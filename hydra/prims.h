@@ -17,6 +17,7 @@ public:
     HdDirtyBits GetInitialDirtyBitsMask() const override;
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
+    void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
 
 protected:
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override {

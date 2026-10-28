@@ -78,6 +78,8 @@ int pika_mesh_no_normals(const pika_renderer *renderer, uint64_t id);
 int pika_mesh_transform(const pika_renderer *renderer, uint64_t id,
                         const double matrix[16]);
 int pika_mesh_visible(const pika_renderer *renderer, uint64_t id, bool visible);
+// The purpose Hydra filters syncs by: "geometry", "render", "proxy" or "guide".
+int pika_mesh_render_tag(const pika_renderer *renderer, uint64_t id, const char *tag);
 
 // Renders a frame into `pixels`, a render buffer of `format` and `len` bytes.
 int pika_render(const pika_renderer *renderer, enum pika_format format,

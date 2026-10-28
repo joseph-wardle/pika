@@ -1,0 +1,22 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Hydra hands over indexed primvars flattened.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        normal3f[] primvars:normals = [(0, 0, 1), (0, 0, -1)] (interpolation = "vertex")
+        int[] primvars:normals:indices = [0, 0, 1]
+    }
+}

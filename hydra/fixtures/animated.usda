@@ -1,0 +1,23 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Time-sampled points are read again at each frame's time.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+            2: [(0, 0, 0), (2, 0, 0), (0, 2, 0)],
+        }
+        uniform token subdivisionScheme = "none"
+    }
+}

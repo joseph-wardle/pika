@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# The mesh's world transform is its local transform times its parent's.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Xform "arm"
+    {
+        double3 xformOp:translate = (1, 2, 3)
+        # A quarter turn about z, exact in binary.
+        matrix4d xformOp:transform = ((0, 1, 0, 0), (-1, 0, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:transform"]
+
+        def Mesh "hand"
+        {
+            int[] faceVertexCounts = [3]
+            int[] faceVertexIndices = [0, 1, 2]
+            point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+            uniform token subdivisionScheme = "none"
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+        }
+    }
+}

@@ -1,0 +1,40 @@
+sync 1
+mesh /world/tri
+  render_tag geometry
+  visible true
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals faceVarying 3
+    0 0 1
+    0 1 0
+    1 0 0
+sync 2
+mesh /world/tri
+  render_tag geometry
+  visible true
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals faceVarying 3
+    1 0 0
+    0 1 0
+    0 0 1

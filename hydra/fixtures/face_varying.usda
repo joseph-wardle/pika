@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Normals authored per face-vertex keep that interpolation.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        normal3f[] normals = [(0, 0, 1), (0, 1, 0), (1, 0, 0)] (interpolation = "faceVarying")
+    }
+}

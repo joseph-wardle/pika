@@ -1,0 +1,57 @@
+sync 1
+mesh /world/draft
+  render_tag proxy
+  visible not synced
+  transform not synced
+  topology not synced
+  points not synced
+  normals not synced
+mesh /world/final
+  render_tag render
+  visible true
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+sync 2
+mesh /world/draft
+  render_tag render
+  visible true
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+mesh /world/final
+  render_tag proxy
+  visible true
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none

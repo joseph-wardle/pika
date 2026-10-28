@@ -1,0 +1,1 @@
+stage.RemovePrim("/world/deleted")

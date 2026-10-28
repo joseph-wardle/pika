@@ -290,6 +290,21 @@ pub unsafe extern "C" fn pika_mesh_visible(renderer: *const Handle, id: u64, vis
     call(|| lock(unsafe { &*renderer })?.store.set_visible(id, visible))
 }
 
+/// # Safety
+/// `renderer` must be live, and `tag` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_render_tag(
+    renderer: *const Handle,
+    id: u64,
+    tag: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, tag) = unsafe { (&*renderer, string(tag)?) };
+        lock(handle)?.store.set_render_tag(id, tag)
+    })
+}
+
 /// Marks the start of a Hydra sync, for its timing.
 ///
 /// # Safety

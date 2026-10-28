@@ -26,6 +26,11 @@ pub struct Mesh {
     /// Hydra's `GfMatrix4d`: row-major, translation in the last row.
     pub transform: Option<[f64; 16]>,
     pub visible: Option<bool>,
+    /// Hydra syncs only the prims whose render tag a render pass draws, and
+    /// leaves the rest in the store with stale data: a proxy mesh is inserted
+    /// but never synced, and a mesh retagged as proxy keeps its old fields.
+    /// Drawing must filter by the pass's tags.
+    pub render_tag: Option<String>,
 }
 
 /// What changes only when a mesh is remodelled.
@@ -121,6 +126,7 @@ impl Store {
                 normals: None,
                 transform: None,
                 visible: None,
+                render_tag: None,
             },
         );
         self.stats.inserted += 1;
@@ -175,6 +181,13 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_render_tag(&mut self, id: u64, tag: String) -> Result<(), String> {
+        let bytes = tag.len();
+        let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale(id))?;
+        write(&mut self.stats, &mut mesh.render_tag, tag, bytes);
+        Ok(())
+    }
+
     /// Ends one Hydra sync: returns what it did and starts counting the next.
     pub fn end_sync(&mut self) -> Stats {
         std::mem::take(&mut self.stats)
@@ -194,6 +207,10 @@ impl fmt::Display for Mesh {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         const UNSYNCED: &str = "not synced";
         writeln!(f, "mesh {}", self.path)?;
+        match &self.render_tag {
+            Some(tag) => writeln!(f, "  render_tag {tag}")?,
+            None => writeln!(f, "  render_tag {UNSYNCED}")?,
+        }
         match self.visible {
             Some(visible) => writeln!(f, "  visible {visible}")?,
             None => writeln!(f, "  visible {UNSYNCED}")?,
@@ -375,15 +392,18 @@ mod tests {
         moved[12] = 2.0;
         store.set_transform(b, moved).unwrap();
         store.set_visible(a, false).unwrap();
+        store.set_render_tag(a, "proxy".into()).unwrap();
 
         let expected = "\
 mesh /world/a
+  render_tag proxy
   visible false
   transform not synced
   topology not synced
   points not synced
   normals not synced
 mesh /world/b
+  render_tag not synced
   visible not synced
   transform
     1 0 0 0

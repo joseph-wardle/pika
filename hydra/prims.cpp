@@ -65,6 +65,15 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     }
 }
 
+// Hydra calls this for every rprim with a dirty render tag, before it decides
+// which ones to sync.
+void PikaMesh::UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) {
+    HdMesh::UpdateRenderTag(delegate, renderParam);
+    if (_renderer)
+        report(pika_mesh_render_tag(_renderer, _id, GetRenderTag().GetText()),
+               GetId().GetString() + " render tag");
+}
+
 void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
     HdMeshTopology topology = GetMeshTopology(delegate);
     VtIntArray const &counts = topology.GetFaceVertexCounts();
