@@ -9,9 +9,12 @@ Pika is a real-time raster renderer for animation production, in the style of Bl
 
 ## Status
 
-This is the bootstrap. The only program is `pika`, which checks that this machine can run the renderer. It loads Vulkan, lists every device, chooses a GPU with Vulkan 1.3 and a graphics+compute queue, and opens it. Then it draws the first offscreen frame: `shaders/check.slang`, compiled by `slangc` at run time, fills a rectangle in which each pixel writes its own position, so the read-back image must match exactly. A second draw, shifted 1 px, must fail by exactly its predicted count. When the Vulkan validation layer is found, `pika` turns on sync validation and fails on any message. It exits non-zero, with the reason, if anything fails.
+There are two programs:
 
-There is no scene rendering, Hydra delegate or MaterialX code yet.
+- **`pika`** checks that this machine can run the renderer. It loads Vulkan, lists every device, chooses a GPU with Vulkan 1.3 and a graphics+compute queue, and opens it. Then it draws the first offscreen frame: `shaders/check.slang`, compiled by `slangc` at run time, fills a rectangle in which each pixel writes its own position, so the read-back image must match exactly. A second draw, shifted 1 px, must fail by exactly its predicted count. When the Vulkan validation layer is found, `pika` turns on sync validation and fails on any message. It exits non-zero, with the reason, if anything fails.
+- **The Hydra delegate** (`hydra/`) is a skeleton. It loads into any Hydra host, accepts meshes without syncing them, and delivers a cleared frame: Vulkan clears the image, and the CPU reads it back into the host's color render buffer (half or full float RGBA).
+
+There is no scene rendering or MaterialX code yet.
 
 ## Requirements
 
@@ -22,7 +25,9 @@ There is no scene rendering, Hydra delegate or MaterialX code yet.
 | Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. `pika` reads `shaders/` from the checkout, so run it from there. |
 | Validate | The Vulkan validation layer from a [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) 1.3.268 or newer | Optional; see below. Tested with SDK 1.4.328.1. |
 
-MaterialX and a Houdini/OpenUSD SDK will be added along with the code that needs them.
+| Delegate | Houdini 21.0 (its HDK headers and USD libraries), `g++` and `make` | Tested with Houdini 21.0.596 (USD 0.25.5) and g++ 11.5. |
+
+MaterialX will be added along with the code that needs it.
 
 ## Develop
 
@@ -34,7 +39,7 @@ cargo test --locked
 cargo run --locked --release   # device check; needs a GPU
 ```
 
-CI (`.github/workflows/ci.yml`) runs the first four commands on a GitHub-hosted Linux runner. That runner has no GPU, so CI never runs `cargo run`. Run the device check on a GPU machine, with validation, before merging changes to `src/gpu.rs`, `src/check.rs` or `shaders/`.
+CI (`.github/workflows/ci.yml`) runs the first four commands on a GitHub-hosted Linux runner. That runner has no GPU, so CI never runs `cargo run`. Run the device check on a GPU machine, with validation, before merging changes to `src/gpu.rs`, `src/target.rs`, `src/check.rs` or `shaders/`.
 
 To validate, point the loader at the SDK's layer. Its manifest names the layer library without a path, so `LD_LIBRARY_PATH` is needed too:
 
@@ -44,3 +49,22 @@ LD_LIBRARY_PATH=$S/lib VK_ADD_LAYER_PATH=$S/share/vulkan/explicit_layer.d cargo 
 ```
 
 The run should print `validation: on (sync)` and end with `validation: 0 messages`.
+
+## Hydra delegate
+
+`make -C hydra` builds the Rust library and links it into `target/hydra/pika.so`, next to its `plugInfo.json`. `HFS` defaults to `/opt/hfs21.0`. To use the delegate, point USD at it from a shell where `houdini_setup_bash` has been sourced:
+
+```sh
+export PXR_PLUGINPATH_NAME=$PWD/target/hydra
+husk -R Pika -c /world/camera -o out.exr hydra/scenes/cube.usda
+```
+
+The delegate's errors go to stderr as `pika: error: ...`, as well as to Hydra, because husk does not print Hydra's diagnostics.
+
+`hydra/check.sh` is the delegate's check. Run it on a GPU host before merging changes to `hydra/` or `src/`. It builds the delegate and renders 24 frames at 1920×1080 in husk, at full and at half float. Every frame must be exactly the clear color and must differ from an unwritten buffer. Validation must report nothing from Pika. The script also prints the time each frame spends on readback:
+
+```sh
+VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
+```
+
+A Rust panic inside the delegate is caught at the C ABI. The delegate reports the panic and renders nothing until it is recreated. Some failures cannot be contained and take down the host with them: a panic during unwinding, running out of memory, a stack overflow, and a GPU driver crash.
