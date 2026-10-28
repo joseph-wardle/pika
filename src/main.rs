@@ -1,7 +1,8 @@
 //! `pika`: checks that this machine can run the renderer.
 //!
 //! Loads Vulkan, lists every device, chooses one and opens it.
-//! Exits 0 only if a suitable device opened.
+//! Exits 0 only if a suitable device opened and the validation layer,
+//! when found, reported nothing.
 
 mod gpu;
 
@@ -23,6 +24,10 @@ fn run() -> Result<(), String> {
         "Vulkan loader {}",
         gpu::version_string(instance.loader_version)
     );
+    match instance.validation_messages() {
+        Some(_) => println!("validation: on (sync)"),
+        None => println!("validation: not found"),
+    }
     for (i, d) in instance.devices.iter().enumerate() {
         let status = d.unsuitable_reason().unwrap_or("ok");
         println!(
@@ -44,5 +49,13 @@ fn run() -> Result<(), String> {
         "opened [{index}] {}, queue family {}",
         instance.devices[index].name, device.queue_family
     );
+
+    // Read the count after the device is destroyed: vkDestroyDevice reports leaks.
+    drop(device);
+    match instance.validation_messages() {
+        Some(0) => println!("validation: 0 messages"),
+        Some(n) => return Err(format!("validation reported {n} messages (printed above)")),
+        None => {}
+    }
     Ok(())
 }
