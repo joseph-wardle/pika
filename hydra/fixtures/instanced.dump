@@ -1,0 +1,58 @@
+sync 1
+instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 2
+    1 0 0 0 0 1 0 0 0 0 1 0 1 0 0 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1
+mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 4 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+sync 2
+instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 2
+    1 0 0 0 0 1 0 0 0 0 1 0 1 0 0 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 3 0 1
+mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 4 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none

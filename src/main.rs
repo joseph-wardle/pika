@@ -6,9 +6,10 @@
 //! its predicted count, and the validation layer, when found, reported nothing.
 
 mod check;
-mod gpu;
 
 use std::process::ExitCode;
+
+use pika::gpu;
 
 fn main() -> ExitCode {
     match run() {

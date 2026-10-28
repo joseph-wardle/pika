@@ -1,0 +1,43 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A point instancer whose prototype is a native instance, as ALab's bonsai is
+# built: the native instancer is nested in the point instancer.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def PointInstancer "scatter"
+    {
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(1, 0, 0), (2, 0, 0)]
+        rel prototypes = </world/scatter/prototypes/leaf>
+
+        def Scope "prototypes"
+        {
+            def Xform "leaf" (
+                instanceable = true
+                references = </prototype>
+            )
+            {
+                double3 xformOp:translate = (0, 3, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+            }
+        }
+    }
+}
+
+class Xform "prototype"
+{
+    def Mesh "tri"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+}

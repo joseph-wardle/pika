@@ -1,0 +1,20 @@
+{
+    "Plugins": [
+        {
+            "Info": {
+                "Types": {
+                    "PikaRendererPlugin": {
+                        "bases": ["HdRendererPlugin"],
+                        "displayName": "Pika",
+                        "priority": 99
+                    }
+                }
+            },
+            "LibraryPath": "pika.so",
+            "Name": "pika",
+            "ResourcePath": ".",
+            "Root": ".",
+            "Type": "library"
+        }
+    ]
+}

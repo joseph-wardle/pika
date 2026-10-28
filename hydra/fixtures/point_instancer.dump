@@ -1,0 +1,70 @@
+sync 1
+instancer /world/scatter
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 7 1
+  instance_translations 2
+    1 0 0
+    2 0 0
+  instance_rotations 2
+    0 0 0 1
+    0.5 0.5 0.5 0.5
+  instance_scales 2
+    1 1 1
+    2 2 2
+mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
+  render_tag geometry
+  visible true
+  instancer /world/scatter indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+sync 2
+instancer /world/scatter
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 7 1
+  instance_translations 2
+    1 0 0
+    3 0 0
+  instance_rotations 2
+    0 0 0 1
+    0.5 0.5 0.5 0.5
+  instance_scales 2
+    1 1 1
+    2 2 2
+mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
+  render_tag geometry
+  visible true
+  instancer /world/scatter indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none

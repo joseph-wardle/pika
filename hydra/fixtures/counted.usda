@@ -1,0 +1,31 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Prims Pika does not store are counted by their Hydra type, so the census
+# sees them. NURBS curves and points pull nothing.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def SphereLight "key" {}
+    def RectLight "fill" {}
+
+    def Material "paint" {}
+
+    def Points "dust"
+    {
+        point3f[] points = [(0, 0, 0)]
+    }
+
+    def NurbsCurves "wire"
+    {
+        int[] curveVertexCounts = [4]
+        point3f[] points = [(0, 0, 0), (0, 1, 0), (0, 2, 0), (0, 3, 0)]
+        int[] order = [4]
+        double[] knots = [0, 0, 0, 0, 1, 1, 1, 1]
+    }
+}

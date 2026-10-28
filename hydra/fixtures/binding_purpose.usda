@@ -1,0 +1,57 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Pika asks for the full (final-look) material bindings, as ALab authors
+# them beside its preview ones, on subsets and whole meshes. Hydra's default
+# would be the preview binding.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+
+        def GeomSubset "all" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [0]
+            rel material:binding:preview = </world/mtl/preview>
+            rel material:binding:full = </world/mtl/full>
+        }
+    }
+
+    # A subset without a full binding inherits the mesh's.
+    def Mesh "whole" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding:preview = </world/mtl/preview>
+        rel material:binding:full = </world/mtl/base>
+
+        def GeomSubset "all" (prepend apiSchemas = ["MaterialBindingAPI"])
+        {
+            uniform token elementType = "face"
+            uniform token familyName = "materialBind"
+            int[] indices = [0]
+            rel material:binding:preview = </world/mtl/preview>
+        }
+    }
+
+    def Scope "mtl"
+    {
+        def Material "preview" {}
+        def Material "base" {}
+        def Material "full" {}
+    }
+}

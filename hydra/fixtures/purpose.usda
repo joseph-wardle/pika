@@ -1,0 +1,30 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# husk renders the default and render purposes, so proxy meshes never arrive.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "draft"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        uniform token purpose = "proxy"
+    }
+
+    def Mesh "final"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        uniform token purpose = "render"
+    }
+}

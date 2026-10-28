@@ -1,0 +1,48 @@
+sync 1
+counted material /world/mtl/blue
+counted material /world/mtl/red
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3 3
+    face_vertex_indices 0 1 2 0 2 3
+    subset "/world/mtl/red" faces 0
+    subset "/world/mtl/blue" faces 1
+  points 4
+    0 0 0
+    1 0 0
+    1 1 0
+    0 1 0
+  normals none
+sync 2
+counted material /world/mtl/blue
+counted material /world/mtl/red
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology rightHanded
+    face_vertex_counts 3 3
+    face_vertex_indices 0 1 2 0 2 3
+    subset "/world/mtl/red" faces 1
+    subset "/world/mtl/blue" faces 0
+  points 4
+    0 0 0
+    1 0 0
+    1 1 0
+    0 1 0
+  normals none
