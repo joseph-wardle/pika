@@ -1,0 +1,14 @@
+/target/
+
+# Machine-local Cargo settings (paths, linkers).
+/.cargo/config.toml
+
+# Production scenes and textures are private and live outside the repository.
+*.usdc
+*.usdz
+*.exr
+*.tx
+*.tex
+*.abc
+*.vdb
+*.bgeo*
