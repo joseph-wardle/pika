@@ -1,6 +1,6 @@
 # Pika
 
-Pika is a real-time raster renderer for animation production, in the style of Blender's EEVEE. It is designed around a USD native pipe using Hydra. The goal is final-look playback of cached shots at 1920×1080 and 24 fps on a 16 GB GPU.
+Pika is a real-time raster renderer for animation production, in the style of Blender's EEVEE. It is designed around a USD native pipe using Hydra. The goal is to deliver the visual capabilities and creative flexibility of a production renderer at the speed of a game engine, without actually being a game engine.
 
 - It runs on Vulkan through [ash](https://crates.io/crates/ash), with shaders in [Slang](https://shader-slang.org).
 - The native boundaries stay thin. A small C++ Hydra render delegate copies scene data into the Rust renderer. Materials come from the upstream MaterialX shader generator rather than a custom compiler.
