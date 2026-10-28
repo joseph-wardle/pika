@@ -9,9 +9,9 @@ Pika is a real-time raster renderer for animation production, in the style of Bl
 
 ## Status
 
-This is the bootstrap. The only program is `pika`, which checks that this machine can run the renderer. It loads Vulkan, lists every device, chooses a GPU with Vulkan 1.3 and a graphics+compute queue, and opens it. It exits non-zero, with the reason, if it can't.
+This is the bootstrap. The only program is `pika`, which checks that this machine can run the renderer. It loads Vulkan, lists every device, chooses a GPU with Vulkan 1.3 and a graphics+compute queue, and opens it. Then it draws the first offscreen frame: `shaders/check.slang`, compiled by `slangc` at run time, fills a rectangle in which each pixel writes its own position, so the read-back image must match exactly. A second draw, shifted 1 px, must fail by exactly its predicted count. When the Vulkan validation layer is found, `pika` turns on sync validation and fails on any message. It exits non-zero, with the reason, if anything fails.
 
-There is no rendering, Hydra delegate or MaterialX code yet.
+There is no scene rendering, Hydra delegate or MaterialX code yet.
 
 ## Requirements
 
@@ -19,8 +19,10 @@ There is no rendering, Hydra delegate or MaterialX code yet.
 | --- | --- | --- |
 | Build | [rustup](https://rustup.rs) and a C linker (`cc`) | Pika follows the latest stable Rust, with rustfmt and clippy (included in rustup's default install). Run `rustup update` after each release. No Vulkan SDK is needed: libvulkan is loaded at run time. |
 | Run | The Vulkan loader (`libvulkan.so.1`) and a Vulkan 1.3 GPU driver | Tested on Linux with NVIDIA driver 580.142 (RTX 4070 Ti SUPER). |
+| Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. `pika` reads `shaders/` from the checkout, so run it from there. |
+| Validate | The Vulkan validation layer from a [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) 1.3.268 or newer | Optional; see below. Tested with SDK 1.4.328.1. |
 
-The Slang compiler, MaterialX, the Vulkan validation layer and a Houdini/OpenUSD SDK will be added along with the code that needs them.
+MaterialX and a Houdini/OpenUSD SDK will be added along with the code that needs them.
 
 ## Develop
 
@@ -32,4 +34,13 @@ cargo test --locked
 cargo run --locked --release   # device check; needs a GPU
 ```
 
-CI (`.github/workflows/ci.yml`) runs the first four commands on a GitHub-hosted Linux runner. That runner has no GPU, so CI never runs `cargo run`. Run the device check on a GPU machine before merging changes to `src/gpu.rs`.
+CI (`.github/workflows/ci.yml`) runs the first four commands on a GitHub-hosted Linux runner. That runner has no GPU, so CI never runs `cargo run`. Run the device check on a GPU machine, with validation, before merging changes to `src/gpu.rs`, `src/check.rs` or `shaders/`.
+
+To validate, point the loader at the SDK's layer. Its manifest names the layer library without a path, so `LD_LIBRARY_PATH` is needed too:
+
+```sh
+S=/path/to/vulkan_sdk/1.4.328.1/x86_64
+LD_LIBRARY_PATH=$S/lib VK_ADD_LAYER_PATH=$S/share/vulkan/explicit_layer.d cargo run --locked --release
+```
+
+The run should print `validation: on (sync)` and end with `validation: 0 messages`.
