@@ -1,9 +1,11 @@
 //! `pika`: checks that this machine can run the renderer.
 //!
-//! Loads Vulkan, lists every device, chooses one and opens it.
+//! Loads Vulkan, lists every device, chooses one and opens it, then compiles
+//! the check shader.
 //! Exits 0 only if a suitable device opened and the validation layer,
 //! when found, reported nothing.
 
+mod check;
 mod gpu;
 
 use std::process::ExitCode;
@@ -48,6 +50,12 @@ fn run() -> Result<(), String> {
     println!(
         "opened [{index}] {}, queue family {}",
         instance.devices[index].name, device.queue_family
+    );
+    let shader = check::compile()?;
+    println!(
+        "slangc {}: check.slang is {} SPIR-V words",
+        shader.slangc_version,
+        shader.spirv.len()
     );
 
     // Read the count after the device is destroyed: vkDestroyDevice reports leaks.
