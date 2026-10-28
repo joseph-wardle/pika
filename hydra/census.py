@@ -4,12 +4,16 @@ and says which renderer work its costs put first.
     hython hydra/census.py <stage.usda> <camera> <first frame> <last frame> <out dir>
 
 Run it from a shell with houdini_setup_bash sourced and PXR_PLUGINPATH_NAME
-pointing at the delegate. It syncs the shot twice: once without its basis
-curves (the gate's scene, as fur is out of the gate), and once whole, to
-measure what fur costs. Each run's per-sync lines are in <out dir>/<run>.stats.
+pointing at the delegate. It syncs the shot three times: twice without its
+basis curves (the gate's scene, as fur is out of the gate), first with the
+stage's value clip files evicted from this machine's page cache and then with
+them cached by that run, and once whole, to measure what fur costs. Each run's
+per-sync lines are in <out dir>/<run>.stats.
 
 The thresholds were fixed before the first run, in design.md's census entry.
-The first sync loads the scene, so the warm figures leave it out.
+The first sync loads the scene, so the warm figures leave it out. Clip files
+are where each frame's animation is read; read cold from NFS they made ALab's
+sync two to three times slower than cached, so storage gets its own verdict.
 """
 
 import os
@@ -39,6 +43,26 @@ def write_gate_layer(stage, path):
         Sdf.CreatePrimInLayer(layer, curve).active = False
     layer.Export(path)
     return curves
+
+
+def clip_files(stage):
+    """The files of the stage's value clips."""
+    files = set()
+    for prim in stage.TraverseAll():
+        for clips in Usd.ClipsAPI(prim).GetClips().values():
+            files.update(p.resolvedPath for p in clips.get("assetPaths", []) if p.resolvedPath)
+    return sorted(files)
+
+
+def evict(paths):
+    """Drops the files' pages from this machine's page cache, so the next read
+    goes to storage. A file server's own cache is out of reach."""
+    for path in paths:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
 
 
 def sync(name, stage, camera, first, last, out):
@@ -119,16 +143,26 @@ def main(stage_path, camera, first, last, out):
     stage = Usd.Stage.Open(stage_path)
     gate = os.path.join(out, "gate.usda")
     curves = write_gate_layer(stage, gate)
+    clips = clip_files(stage)
     print(f"census: {stage_path}, frames {first}-{last}, camera {camera}; "
-          f"the gate run deactivates {len(curves)} basis curves")
+          f"the gate runs deactivate {len(curves)} basis curves; {len(clips)} clip files")
 
-    p95, share, census = report("gate", *sync("gate", gate, camera, first, last, out))
+    evict(clips)
+    cold, _, _ = report("gate, clip files cold", *sync("gate_cold", gate, camera, first, last, out))
+    p95, share, census = report("gate, clip files cached",
+                                *sync("gate", gate, camera, first, last, out))
     report("with fur", *sync("fur", stage_path, camera, first, last, out))
 
-    print("\nverdicts (gate run):")
+    print("\nverdicts (gate runs):")
     verdict(p95 > SYNC_P95_MS,
-            f"warm sync p95 {p95:.2f} ms > {SYNC_P95_MS} ms: the playback cache comes first",
-            f"warm sync p95 {p95:.2f} ms <= {SYNC_P95_MS} ms: no cache yet")
+            f"warm sync p95 {p95:.2f} ms > {SYNC_P95_MS} ms with clip files cached: "
+            "the playback cache comes first",
+            f"warm sync p95 {p95:.2f} ms <= {SYNC_P95_MS} ms with clip files cached: no cache yet")
+    verdict(cold > SYNC_P95_MS,
+            f"warm sync p95 {cold:.2f} ms > {SYNC_P95_MS} ms with clip files cold: "
+            "a cache cannot help the first pass; prefetch clip files or play from local disk",
+            f"warm sync p95 {cold:.2f} ms <= {SYNC_P95_MS} ms with clip files cold: "
+            "storage keeps up")
     verdict(share > REDUNDANT_SHARE,
             f"{100 * share:.1f}% redundant > {100 * REDUNDANT_SHARE:.0f}%: fix the asset first",
             f"{100 * share:.1f}% redundant <= {100 * REDUNDANT_SHARE:.0f}%: no asset fix")

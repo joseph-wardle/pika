@@ -78,7 +78,7 @@ VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
 hython hydra/oracle.py /path/to/ALab/entry.usda 1004 /tmp/oracle
 ```
 
-`hydra/census.py` measures a shot through the delegate, uncached, and gives a verdict on each threshold that orders the renderer work: sync time, unchanged bytes, mesh instances and triangles. It syncs the frame range in husk twice, without the stage's basis curves (fur is outside the gate) and with them, and reports warm p50/p95/max sync times, bytes per sync by prim type, the census and husk's peak memory. On ALab both runs take about 15 s, with husk under 2 GiB resident:
+`hydra/census.py` measures a shot through the delegate, uncached, and gives a verdict on each threshold that orders the renderer work: sync time with clip files cached and cold, unchanged bytes, mesh instances and triangles. It syncs the frame range in husk three times: twice without the stage's basis curves (fur is outside the gate), first with the stage's value clip files evicted from this machine's page cache and then cached, and once with the curves. It reports warm p50/p95/max sync times, bytes per sync by prim type, the census and husk's peak memory. Run it on a quiet machine, because other load inflates the sync times. On ALab the three runs take about 20 s, with husk under 2 GiB resident:
 
 ```sh
 hython hydra/census.py /path/to/ALab/entry.usda /root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam 1004 1057 /tmp/census
