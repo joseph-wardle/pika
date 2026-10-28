@@ -61,13 +61,15 @@ def expected(prim, time):
     mesh = UsdGeom.Mesh(prim)
     purpose = UsdGeom.Imageable(prim).ComputePurpose()
     matrix = mesh.ComputeLocalToWorldTransform(time)
+    bound = lambda p: UsdShade.MaterialBindingAPI(p).ComputeBoundMaterial(UsdShade.Tokens.full)[0]
+    material = bound(prim)
     subsets = []
     for subset in UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets():
-        material, _ = UsdShade.MaterialBindingAPI(subset.GetPrim()).ComputeBoundMaterial(
-            UsdShade.Tokens.full)
-        # Hydra drops a subset with no material for the delegate's purpose.
-        if material:
-            subsets.append((str(material.GetPath()), list(subset.GetIndicesAttr().Get(time))))
+        # A subset inherits the mesh's binding. Hydra drops one with no
+        # material for the delegate's purpose.
+        faces = bound(subset.GetPrim())
+        if faces:
+            subsets.append((str(faces.GetPath()), list(subset.GetIndicesAttr().Get(time))))
     primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(UsdGeom.Tokens.normals)
     if primvar and primvar.HasValue():
         normals = (primvar.GetInterpolation(), primvar.ComputeFlattened(time))
@@ -80,6 +82,7 @@ def expected(prim, time):
         "visible": "true",
         "instancer": "none",
         "transform": np.array([matrix[i][j] for i in range(4) for j in range(4)]),
+        "material": str(material.GetPath()) if material else "",
         "orientation": str(mesh.GetOrientationAttr().Get(time)),
         "face_vertex_counts": list(mesh.GetFaceVertexCountsAttr().Get(time)),
         "face_vertex_indices": list(mesh.GetFaceVertexIndicesAttr().Get(time)),
@@ -100,9 +103,9 @@ def moves(prim, time):
     return points.ValueMightBeTimeVarying() and points.Get(time) != points.Get(after)
 
 
-def write_sample_layer(stage, keep, path):
-    """A layer with the stage's root layer under it, deactivating every prim
-    that is neither kept nor an ancestor of a kept prim."""
+def over(stage):
+    """An anonymous layer with the stage's root layer under it, keeping the
+    root's timing and units."""
     root = stage.GetRootLayer()
     layer = Sdf.Layer.CreateAnonymous(".usda")
     layer.subLayerPaths.append(root.realPath)
@@ -111,6 +114,13 @@ def write_sample_layer(stage, keep, path):
                 "metersPerUnit", "upAxis"):
         if root.pseudoRoot.HasInfo(key):
             layer.pseudoRoot.SetInfo(key, root.pseudoRoot.GetInfo(key))
+    return layer
+
+
+def write_sample_layer(stage, keep, path):
+    """A layer over the stage deactivating every prim that is neither kept
+    nor an ancestor of a kept prim."""
+    layer = over(stage)
     ancestors = {a for p in keep for a in p.GetPrefixes()}
     for parent in sorted(ancestors | {Sdf.Path.absoluteRootPath}):
         if parent in keep:
@@ -152,6 +162,7 @@ def parse_dump(path):
         floats = lambda f: np.array(" ".join(rows.get(f, [])).split(), dtype=np.float64)
         mesh["transform"] = floats("transform")
         mesh["orientation"] = mesh.pop("topology", "not synced")
+        mesh["material"] = mesh.get("material", "not synced").strip('"')
         mesh["points"] = floats("points").astype(np.float32)
         interpolation = mesh["normals"].split()[0]
         mesh["normals"] = None if interpolation == "none" else \
@@ -185,6 +196,7 @@ def main(stage_path, frame, out):
     camera = min(str(p.GetPath()) for p in stage.Traverse() if p.IsA(UsdGeom.Camera))
     keep = {p.GetPath() for p in sample} | {Sdf.Path(camera)}
     keep |= {Sdf.Path(m) for w in want.values() for m, _ in w["subsets"]}
+    keep |= {Sdf.Path(w["material"]) for w in want.values() if w["material"]}
     layer = os.path.join(out, "sample.usda")
     write_sample_layer(stage, keep, layer)
 

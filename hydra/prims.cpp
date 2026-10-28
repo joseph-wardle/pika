@@ -38,7 +38,8 @@ HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
     return HdChangeTracker::DirtyTopology | HdChangeTracker::DirtyPoints |
            HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
            HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
-           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex;
+           HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyInstancer |
+           HdChangeTracker::DirtyInstanceIndex;
 }
 
 void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
@@ -68,6 +69,9 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
         GfMatrix4d matrix = delegate->GetTransform(GetId());
         report(pika_mesh_transform(_renderer, _id, matrix.data()), path + " transform");
     }
+    if (bits & HdChangeTracker::DirtyMaterialId)
+        report(pika_mesh_material(_renderer, _id, delegate->GetMaterialId(GetId()).GetText()),
+               path + " material");
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
         _SyncInstancing(delegate);
 }
@@ -168,7 +172,7 @@ PikaInstancer::~PikaInstancer() {
 
 HdDirtyBits PikaInstancer::GetInitialDirtyBitsMask() const {
     return HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyPrimvar |
-           HdChangeTracker::DirtyInstancer;
+           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex;
 }
 
 void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
@@ -177,8 +181,15 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     if (!_renderer)
         return;
     std::string const &path = GetId().GetString();
-    if (bits & HdChangeTracker::DirtyInstancer)
-        report(pika_instancer_parent(_renderer, _id, GetParentId().GetText()), path + " parent");
+    if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex)) {
+        SdfPath const &parent = GetParentId();
+        VtIntArray indices;
+        if (!parent.IsEmpty())
+            indices = delegate->GetInstanceIndices(parent, GetId());
+        report(pika_instancer_parent(_renderer, _id, parent.GetText(), indices.cdata(),
+                                     indices.size()),
+               path + " parent");
+    }
     if (bits & HdChangeTracker::DirtyTransform) {
         GfMatrix4d matrix = delegate->GetInstancerTransform(GetId());
         report(pika_instancer_transform(_renderer, _id, matrix.data()), path + " transform");

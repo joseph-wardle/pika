@@ -5,7 +5,7 @@
 //! primvars, untriangulated faces), so a dump of the store can be checked
 //! against what Hydra is known to hand over.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
 pub struct Store {
@@ -31,6 +31,9 @@ pub struct Mesh {
     pub visible: Option<bool>,
     /// `Some(None)` when the mesh is not instanced.
     pub instancing: Option<Option<Instancing>>,
+    /// The whole mesh's material, for the full binding purpose; empty when
+    /// none is bound. Subsets override it for their faces.
+    pub material: Option<String>,
     /// Hydra syncs only the prims whose render tag a render pass draws, and
     /// leaves the rest in the store with stale data: a proxy mesh is inserted
     /// but never synced, and a mesh retagged as proxy keeps its old fields.
@@ -38,8 +41,9 @@ pub struct Mesh {
     pub render_tag: Option<String>,
 }
 
-/// A prototype mesh's place in an instancer: it is drawn once per index, at
-/// that index of the instancer's primvars.
+/// A prototype's place in an instancer: it is drawn once per index, at that
+/// index of the instancer's primvars. The prototype is a mesh, or an
+/// instancer nested in another, whose instances are all repeated per index.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Instancing {
     pub instancer: String,
@@ -52,7 +56,7 @@ pub struct Instancing {
 pub struct Instancer {
     pub path: String,
     /// `Some(None)` when the instancer is not nested in another.
-    pub parent: Option<Option<String>>,
+    pub parent: Option<Option<Instancing>>,
     pub transform: Option<[f64; 16]>,
     pub primvars: Option<InstancePrimvars>,
 }
@@ -145,16 +149,42 @@ impl Interpolation {
 pub struct Stats {
     pub inserted: usize,
     pub removed: usize,
-    /// Fields written, changed or not.
-    pub pulls: usize,
-    pub bytes: usize,
-    /// Bytes of basis curves, which are not stored, so are not counted in
-    /// `bytes` and are never known to be redundant.
+    pub mesh: Bytes,
+    pub instancer: Bytes,
+    /// Bytes of basis curves, which are not stored, so are never known to be
+    /// redundant.
     pub curve_bytes: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Bytes {
+    pub pulled: usize,
     /// Bytes of pulls that matched what the store already held: data Hydra
     /// marked dirty that did not change, such as constants authored as time
     /// samples.
-    pub redundant_bytes: usize,
+    pub redundant: usize,
+}
+
+/// What the store holds that a final-look pass will draw: meshes Hydra
+/// synced as visible, with the geometry or render tag. An invisible or
+/// retagged mesh keeps its old fields.
+#[derive(PartialEq, Debug, Default)]
+pub struct Census {
+    pub meshes: usize,
+    /// Each mesh once per instance it is drawn at.
+    pub mesh_instances: usize,
+    /// Triangles as faces fan into them, before any subdivision.
+    pub triangles: usize,
+    /// Triangles counting each mesh once, as its data would be stored.
+    pub prototype_triangles: usize,
+    /// Points, normals and face indices, counting each mesh once.
+    pub geometry_bytes: usize,
+    /// Materials bound to the meshes or their subsets.
+    pub materials: usize,
+    pub instancers: usize,
+    pub curves: usize,
+    /// Counted prims by Hydra type.
+    pub counted: BTreeMap<String, usize>,
 }
 
 impl Store {
@@ -189,6 +219,7 @@ impl Store {
                 transform: None,
                 visible: None,
                 instancing: None,
+                material: None,
                 render_tag: None,
             },
         );
@@ -210,14 +241,14 @@ impl Store {
                 .map(|s| s.material.len() + 4 * s.faces.len())
                 .sum::<usize>();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.topology, topology, bytes);
+        write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
         Ok(())
     }
 
     pub fn set_points(&mut self, id: u64, points: Vec<[f32; 3]>) -> Result<(), String> {
         let bytes = size_of_val(points.as_slice());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.points, points, bytes);
+        write(&mut self.stats.mesh, &mut mesh.points, points, bytes);
         Ok(())
     }
 
@@ -227,19 +258,19 @@ impl Store {
             .as_ref()
             .map_or(0, |n| size_of_val(n.values.as_slice()));
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.normals, normals, bytes);
+        write(&mut self.stats.mesh, &mut mesh.normals, normals, bytes);
         Ok(())
     }
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.transform, transform, 128);
+        write(&mut self.stats.mesh, &mut mesh.transform, transform, 128);
         Ok(())
     }
 
     pub fn set_visible(&mut self, id: u64, visible: bool) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.visible, visible, 1);
+        write(&mut self.stats.mesh, &mut mesh.visible, visible, 1);
         Ok(())
     }
 
@@ -253,14 +284,27 @@ impl Store {
             .as_ref()
             .map_or(0, |i| i.instancer.len() + 4 * i.indices.len());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.instancing, instancing, bytes);
+        write(
+            &mut self.stats.mesh,
+            &mut mesh.instancing,
+            instancing,
+            bytes,
+        );
+        Ok(())
+    }
+
+    /// `material` is empty when none is bound.
+    pub fn set_material(&mut self, id: u64, material: String) -> Result<(), String> {
+        let bytes = material.len();
+        let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
+        write(&mut self.stats.mesh, &mut mesh.material, material, bytes);
         Ok(())
     }
 
     pub fn set_render_tag(&mut self, id: u64, tag: String) -> Result<(), String> {
         let bytes = tag.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats, &mut mesh.render_tag, tag, bytes);
+        write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
         Ok(())
     }
 
@@ -286,13 +330,24 @@ impl Store {
     }
 
     /// `None` when the instancer is not nested in another.
-    pub fn set_instancer_parent(&mut self, id: u64, parent: Option<String>) -> Result<(), String> {
-        let bytes = parent.as_ref().map_or(0, String::len);
+    pub fn set_instancer_parent(
+        &mut self,
+        id: u64,
+        parent: Option<Instancing>,
+    ) -> Result<(), String> {
+        let bytes = parent
+            .as_ref()
+            .map_or(0, |p| p.instancer.len() + 4 * p.indices.len());
         let instancer = self
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(&mut self.stats, &mut instancer.parent, parent, bytes);
+        write(
+            &mut self.stats.instancer,
+            &mut instancer.parent,
+            parent,
+            bytes,
+        );
         Ok(())
     }
 
@@ -301,7 +356,12 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(&mut self.stats, &mut instancer.transform, transform, 128);
+        write(
+            &mut self.stats.instancer,
+            &mut instancer.transform,
+            transform,
+            128,
+        );
         Ok(())
     }
 
@@ -321,7 +381,12 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(&mut self.stats, &mut instancer.primvars, primvars, bytes);
+        write(
+            &mut self.stats.instancer,
+            &mut instancer.primvars,
+            primvars,
+            bytes,
+        );
         Ok(())
     }
 
@@ -344,7 +409,6 @@ impl Store {
             .get_mut(&id)
             .ok_or_else(|| stale("curves", id))?;
         curves.bytes += bytes;
-        self.stats.pulls += 1;
         self.stats.curve_bytes += bytes;
         Ok(())
     }
@@ -367,6 +431,56 @@ impl Store {
     /// Ends one Hydra sync: returns what it did and starts counting the next.
     pub fn end_sync(&mut self) -> Stats {
         std::mem::take(&mut self.stats)
+    }
+
+    /// What drawing the store would cost. Fails when a prototype names an
+    /// instancer the store does not hold, which Hydra's sync order rules out.
+    pub fn census(&self) -> Result<Census, String> {
+        let instancers: HashMap<&str, &Instancer> = (self.instancers.values())
+            .map(|i| (i.path.as_str(), i))
+            .collect();
+        let mut census = Census {
+            instancers: self.instancers.len(),
+            curves: self.curves.len(),
+            ..Default::default()
+        };
+        let mut materials = BTreeSet::new();
+        for mesh in self.meshes.values() {
+            let (Some(true), Some(topology)) = (mesh.visible, &mesh.topology) else {
+                continue;
+            };
+            if !matches!(mesh.render_tag.as_deref(), Some("geometry" | "render")) {
+                continue;
+            }
+            let instances = match &mesh.instancing {
+                Some(Some(i)) => i.indices.len() * repeats(&instancers, &i.instancer)?,
+                _ => 1,
+            };
+            let triangles: usize = (topology.face_vertex_counts.iter())
+                .map(|&n| n.saturating_sub(2) as usize)
+                .sum();
+            census.meshes += 1;
+            census.mesh_instances += instances;
+            census.triangles += triangles * instances;
+            census.prototype_triangles += triangles;
+            census.geometry_bytes += 4 * topology.face_vertex_indices.len()
+                + mesh
+                    .points
+                    .as_ref()
+                    .map_or(0, |p| size_of_val(p.as_slice()))
+                + match &mesh.normals {
+                    Some(Some(n)) => size_of_val(n.values.as_slice()),
+                    _ => 0,
+                };
+            materials.extend(mesh.material.iter().map(String::as_str));
+            materials.extend(topology.subsets.iter().map(|s| s.material.as_str()));
+        }
+        materials.remove("");
+        census.materials = materials.len();
+        for c in self.counted.values() {
+            *census.counted.entry(c.prim_type.clone()).or_default() += 1;
+        }
+        Ok(census)
     }
 
     /// The whole store as canonical text: meshes sorted by path, floats in
@@ -417,6 +531,10 @@ impl fmt::Display for Mesh {
             None => writeln!(f, "  instancer {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())?;
+        match &self.material {
+            Some(material) => writeln!(f, "  material {material:?}")?,
+            None => writeln!(f, "  material {UNSYNCED}")?,
+        }
         match &self.topology {
             Some(t) => {
                 let orientation = if t.left_handed {
@@ -460,7 +578,7 @@ impl fmt::Display for Instancer {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "instancer {}", self.path)?;
         match &self.parent {
-            Some(Some(parent)) => writeln!(f, "  parent {parent}")?,
+            Some(Some(p)) => writeln!(f, "  parent {} indices{}", p.instancer, List(&p.indices))?,
             Some(None) => writeln!(f, "  parent none")?,
             None => writeln!(f, "  parent {UNSYNCED}")?,
         }
@@ -525,17 +643,36 @@ impl<T: fmt::Display> fmt::Display for List<'_, T> {
     }
 }
 
+/// How many times each instance of the instancer at `path` is drawn: once
+/// per index its parent has for it, and so on up.
+fn repeats<'a>(
+    instancers: &HashMap<&'a str, &'a Instancer>,
+    mut path: &'a str,
+) -> Result<usize, String> {
+    let mut repeats = 1;
+    for _ in 0..=instancers.len() {
+        let instancer = instancers
+            .get(path)
+            .ok_or_else(|| format!("no instancer {path} in the store"))?;
+        let Some(Some(parent)) = &instancer.parent else {
+            return Ok(repeats);
+        };
+        repeats *= parent.indices.len();
+        path = &parent.instancer;
+    }
+    Err(format!("instancer {path} is nested in itself"))
+}
+
 fn stale(kind: &str, id: u64) -> String {
     format!("no {kind} with id {id} in the store: it was removed, or never inserted")
 }
 
 /// Stores one pulled field, counting its bytes as redundant when Hydra handed
 /// over the same value before.
-fn write<T: PartialEq>(stats: &mut Stats, slot: &mut Option<T>, value: T, bytes: usize) {
-    stats.pulls += 1;
-    stats.bytes += bytes;
+fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) {
+    stats.pulled += bytes;
     if slot.as_ref() == Some(&value) {
-        stats.redundant_bytes += bytes;
+        stats.redundant += bytes;
     } else {
         *slot = Some(value);
     }
@@ -580,10 +717,7 @@ mod tests {
         store.pulled_curves(c, 68).unwrap();
         let stats = store.end_sync();
         // Curves are not stored, so their bytes can never be found redundant.
-        assert_eq!(
-            (stats.curve_bytes, stats.bytes, stats.redundant_bytes),
-            (136, 0, 0)
-        );
+        assert_eq!((stats.curve_bytes, stats.mesh), (136, Bytes::default()));
     }
 
     #[test]
@@ -597,19 +731,17 @@ mod tests {
         store.set_points(a, points.clone()).unwrap();
         store.set_visible(a, true).unwrap();
         let first = store.end_sync();
-        assert_eq!(
-            (first.pulls, first.bytes, first.redundant_bytes),
-            (2, 49, 0)
-        );
+        assert_eq!((first.mesh.pulled, first.mesh.redundant), (49, 0));
 
         store.set_points(a, points).unwrap();
         store.set_visible(a, true).unwrap();
         let same = store.end_sync();
-        assert_eq!((same.pulls, same.bytes, same.redundant_bytes), (2, 49, 49));
+        assert_eq!((same.mesh.pulled, same.mesh.redundant), (49, 49));
+        assert_eq!(same.instancer, Bytes::default());
 
         // A changed value is not redundant, and is stored.
         store.set_points(a, vec![[0.0, 1.0, 3.0]; 4]).unwrap();
-        assert_eq!(store.end_sync().redundant_bytes, 0);
+        assert_eq!(store.end_sync().mesh.redundant, 0);
         assert_eq!(
             store.meshes[&a].points.as_ref().unwrap()[0],
             [0.0, 1.0, 3.0]
@@ -625,6 +757,74 @@ mod tests {
         let stats = store.end_sync();
         assert_eq!((stats.inserted, stats.removed), (2, 1));
         assert_eq!(store.end_sync(), Stats::default());
+    }
+
+    /// A mesh with one triangle and one quad: 3 triangles.
+    fn drawn(store: &mut Store, path: &str, instancing: Option<Instancing>) -> u64 {
+        let id = store.insert_mesh(path.into());
+        let topology = Topology {
+            face_vertex_counts: vec![3, 4],
+            face_vertex_indices: vec![0, 1, 2, 0, 1, 2, 3],
+            left_handed: false,
+            subsets: vec![Subset {
+                material: "/mtl/red".into(),
+                faces: vec![1],
+            }],
+        };
+        store.set_topology(id, topology).unwrap();
+        store.set_points(id, vec![[0.0; 3]; 4]).unwrap();
+        store.set_visible(id, true).unwrap();
+        store.set_render_tag(id, "geometry".into()).unwrap();
+        store.set_material(id, "/mtl/blue".into()).unwrap();
+        store.set_instancing(id, instancing).unwrap();
+        id
+    }
+
+    #[test]
+    fn census_repeats_nested_instances() {
+        let mut store = Store::new();
+        drawn(&mut store, "/plain", None);
+        let at = |instancer: &str, indices: Vec<i32>| {
+            let instancer = instancer.into();
+            Some(Instancing { instancer, indices })
+        };
+        // Three instances of an outer instancer, two of them its inner one,
+        // which draws its prototype at four instances: eight in all.
+        let outer = store.insert_instancer("/outer".into());
+        store.set_instancer_parent(outer, None).unwrap();
+        let inner = store.insert_instancer("/inner".into());
+        store
+            .set_instancer_parent(inner, at("/outer", vec![0, 2]))
+            .unwrap();
+        drawn(&mut store, "/leaf", at("/inner", vec![0, 1, 2, 3]));
+        store.insert_counted("sphereLight".into(), "/key".into());
+        store.insert_counted("sphereLight".into(), "/fill".into());
+
+        let census = store.census().unwrap();
+        assert_eq!(
+            (census.meshes, census.mesh_instances),
+            (2, 1 + 8),
+            "{census:?}"
+        );
+        assert_eq!(
+            (census.triangles, census.prototype_triangles),
+            (3 * 9, 3 * 2)
+        );
+        assert_eq!(census.geometry_bytes, 2 * (7 * 4 + 4 * 12));
+        assert_eq!((census.materials, census.instancers), (2, 2));
+        assert_eq!(census.counted["sphereLight"], 2);
+
+        // Hidden and proxy meshes are not drawn.
+        let hidden = drawn(&mut store, "/hidden", None);
+        store.set_visible(hidden, false).unwrap();
+        let proxy = drawn(&mut store, "/proxy", None);
+        store.set_render_tag(proxy, "proxy".into()).unwrap();
+        assert_eq!(store.census().unwrap().mesh_instances, 9);
+
+        // A prototype of an instancer the store does not hold is an error.
+        drawn(&mut store, "/lost", at("/missing", vec![0]));
+        let error = store.census().unwrap_err();
+        assert!(error.contains("/missing"), "{error}");
     }
 
     #[test]
@@ -664,6 +864,7 @@ mod tests {
         }
         moved[12] = 2.0;
         store.set_transform(b, moved).unwrap();
+        store.set_material(b, "/mtl/blue".into()).unwrap();
         store.set_visible(a, false).unwrap();
         store.set_render_tag(a, "proxy".into()).unwrap();
         let instancing = Instancing {
@@ -672,7 +873,11 @@ mod tests {
         };
         store.set_instancing(a, Some(instancing)).unwrap();
         let i = store.insert_instancer("/world/i".into());
-        store.set_instancer_parent(i, None).unwrap();
+        let parent = Instancing {
+            instancer: "/world/j".into(),
+            indices: vec![2],
+        };
+        store.set_instancer_parent(i, Some(parent)).unwrap();
         let primvars = InstancePrimvars {
             translations: Some(vec![[1.0, 0.0, 0.0]]),
             rotations: Some(vec![[0.0, 0.0, 0.0, 1.0]]),
@@ -690,6 +895,7 @@ mesh /world/a
   visible false
   instancer /world/i indices 1 0
   transform not synced
+  material not synced
   topology not synced
   points not synced
   normals not synced
@@ -703,6 +909,7 @@ mesh /world/b
     0 1 0 0
     0 0 1 0
     2 0 0 1
+  material \"/mtl/blue\"
   topology leftHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -716,7 +923,7 @@ mesh /world/b
 curves /world/c
   bytes pulled 68
 instancer /world/i
-  parent none
+  parent /world/j indices 2
   transform not synced
   instance_translations 1
     1 0 0

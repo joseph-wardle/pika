@@ -337,6 +337,23 @@ pub unsafe extern "C" fn pika_mesh_render_tag(
     })
 }
 
+/// Sets the material bound to the whole mesh ("" when none).
+///
+/// # Safety
+/// `renderer` must be live, and `material` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_material(
+    renderer: *const Handle,
+    id: u64,
+    material: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, material) = unsafe { (&*renderer, string(material)?) };
+        lock(handle)?.store.set_material(id, material)
+    })
+}
+
 /// Sets the instancer a mesh is a prototype of ("" when none) and the
 /// instance indices it is drawn at.
 ///
@@ -392,17 +409,28 @@ pub unsafe extern "C" fn pika_instancer_free(renderer: *const Handle, id: u64) -
     call(|| lock(unsafe { &*renderer })?.store.remove_instancer(id))
 }
 
+/// Sets the instancer this one is nested in ("" when none) and the
+/// instance indices of the parent it is repeated at.
+///
 /// # Safety
-/// `renderer` must be live, and `parent` a NUL-terminated string.
+/// `renderer` must be live, `parent` a NUL-terminated string and `indices`
+/// valid for `count` reads.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_parent(
     renderer: *const Handle,
     id: u64,
     parent: *const c_char,
+    indices: *const i32,
+    count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the caller guarantees the renderer, the string and the array.
         let (handle, parent) = unsafe { (&*renderer, path(parent)?) };
+        let parent = parent.map(|instancer| Instancing {
+            instancer,
+            // SAFETY: as above.
+            indices: unsafe { slice(indices, count) }.to_vec(),
+        });
         lock(handle)?.store.set_instancer_parent(id, parent)
     })
 }

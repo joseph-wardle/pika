@@ -63,7 +63,13 @@ pub struct Renderer {
     /// `PIKA_STORE_DUMP`: the file each sync's store is appended to, for the
     /// fixture checks. Writing it changes nothing about rendering.
     dump: Option<(String, File)>,
+    /// `PIKA_STATS`: the file each sync's stats and census are appended to,
+    /// one line each, for hydra/census.py.
+    stats: Option<(String, File)>,
     sync_start: Option<Instant>,
+    /// When the last sync began, so each sync's line can say how long the
+    /// host took from one sync to the next.
+    last_start: Option<Instant>,
     syncs: Vec<Sync>,
     frames: Vec<Frame>,
 }
@@ -96,21 +102,17 @@ impl Renderer {
             Some(_) => "on (sync)",
             None => "not found",
         };
-        let dump = match std::env::var("PIKA_STORE_DUMP") {
-            Ok(path) => {
-                let file = File::create(&path)
-                    .map_err(|e| format!("cannot create PIKA_STORE_DUMP file {path}: {e}"))?;
-                Some((path, file))
-            }
-            Err(_) => None,
-        };
+        let dump = output("PIKA_STORE_DUMP")?;
+        let stats = output("PIKA_STATS")?;
         Ok(Self {
             store: Store::new(),
             target: None,
             device: instance.open(index)?,
             device_name: format!("{}, validation {validation}", instance.devices[index].name),
             dump,
+            stats,
             sync_start: None,
+            last_start: None,
             syncs: Vec::new(),
             frames: Vec::new(),
         })
@@ -120,22 +122,30 @@ impl Renderer {
         self.sync_start = Some(Instant::now());
     }
 
-    /// Records the sync's time and stats, and appends the store to the dump.
+    /// Records the sync's time and stats, and appends them and the store to
+    /// their files.
     pub fn end_sync(&mut self) -> Result<(), String> {
         let start = self
             .sync_start
             .take()
             .ok_or("a sync ended that never began: the delegate must call pika_sync_begin")?;
-        self.syncs.push(Sync {
+        let sync = Sync {
             time: start.elapsed(),
             stats: self.store.end_sync(),
-        });
-        let Some((path, file)) = &mut self.dump else {
-            return Ok(());
         };
-        let text = format!("sync {}\n{}", self.syncs.len(), self.store.dump());
-        file.write_all(text.as_bytes())
-            .map_err(|e| format!("cannot write PIKA_STORE_DUMP file {path}: {e}"))
+        let period = self.last_start.replace(start).map(|last| start - last);
+        if let Some((path, file)) = &mut self.stats {
+            let line = stats_line(self.syncs.len() + 1, &sync, period, &self.store.census()?);
+            file.write_all(line.as_bytes())
+                .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))?;
+        }
+        self.syncs.push(sync);
+        if let Some((path, file)) = &mut self.dump {
+            let text = format!("sync {}\n{}", self.syncs.len(), self.store.dump());
+            file.write_all(text.as_bytes())
+                .map_err(|e| format!("cannot write PIKA_STORE_DUMP file {path}: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Renders a `width` × `height` frame into `pixels`, the host's render
@@ -189,8 +199,14 @@ impl Renderer {
         let syncs = if self.syncs.is_empty() {
             "no syncs".into()
         } else {
-            let bytes: usize = self.syncs.iter().map(|s| s.stats.bytes).sum();
-            let redundant: usize = self.syncs.iter().map(|s| s.stats.redundant_bytes).sum();
+            let stored = |s: &Sync| [s.stats.mesh, s.stats.instancer];
+            let bytes: usize = self.syncs.iter().flat_map(stored).map(|b| b.pulled).sum();
+            let redundant: usize = self
+                .syncs
+                .iter()
+                .flat_map(stored)
+                .map(|b| b.redundant)
+                .sum();
             let curves: usize = self.syncs.iter().map(|s| s.stats.curve_bytes).sum();
             format!(
                 "{} syncs: {}; {bytes} bytes pulled, {redundant} redundant; \
@@ -212,6 +228,57 @@ impl Renderer {
             percentiles(self.frames.iter().map(|f| f.copy)),
         )
     }
+}
+
+/// The file an environment variable names, created empty; `None` when the
+/// variable is unset.
+fn output(variable: &str) -> Result<Option<(String, File)>, String> {
+    let Ok(path) = std::env::var(variable) else {
+        return Ok(None);
+    };
+    let file =
+        File::create(&path).map_err(|e| format!("cannot create {variable} file {path}: {e}"))?;
+    Ok(Some((path, file)))
+}
+
+/// One sync as `key value` pairs. The period, from the last sync's start to
+/// this one's, is left out of the first sync.
+fn stats_line(
+    index: usize,
+    sync: &Sync,
+    period: Option<Duration>,
+    census: &store::Census,
+) -> String {
+    let ms = |t: Duration| t.as_secs_f64() * 1e3;
+    let s = &sync.stats;
+    let mut line = format!("sync {index} time_ms {:.3}", ms(sync.time));
+    if let Some(period) = period {
+        line += &format!(" period_ms {:.3}", ms(period));
+    }
+    line += &format!(
+        " inserted {} removed {} mesh_bytes {} mesh_redundant_bytes {} instancer_bytes {} \
+         instancer_redundant_bytes {} curve_bytes {} meshes {} mesh_instances {} triangles {} \
+         prototype_triangles {} geometry_bytes {} materials {} instancers {} curves {}",
+        s.inserted,
+        s.removed,
+        s.mesh.pulled,
+        s.mesh.redundant,
+        s.instancer.pulled,
+        s.instancer.redundant,
+        s.curve_bytes,
+        census.meshes,
+        census.mesh_instances,
+        census.triangles,
+        census.prototype_triangles,
+        census.geometry_bytes,
+        census.materials,
+        census.instancers,
+        census.curves,
+    );
+    for (prim_type, count) in &census.counted {
+        line += &format!(" counted_{prim_type} {count}");
+    }
+    line + "\n"
 }
 
 /// The median and maximum of a non-empty set of times.

@@ -69,8 +69,8 @@ int pika_renderer_new(pika_renderer **out);
 // Prints sync and frame timings and destroys the renderer, even after a panic.
 int pika_renderer_free(pika_renderer *renderer);
 
-// Bracket each Hydra sync. The end records the sync's stats and, when
-// PIKA_STORE_DUMP names a file, appends the whole store to it.
+// Bracket each Hydra sync. The end records the sync's stats and appends them
+// to the file PIKA_STATS names, and the whole store to PIKA_STORE_DUMP's.
 int pika_sync_begin(const pika_renderer *renderer);
 int pika_sync_end(const pika_renderer *renderer);
 
@@ -94,6 +94,8 @@ int pika_mesh_transform(const pika_renderer *renderer, uint64_t id,
 int pika_mesh_visible(const pika_renderer *renderer, uint64_t id, bool visible);
 // The purpose Hydra filters syncs by: "geometry", "render", "proxy" or "guide".
 int pika_mesh_render_tag(const pika_renderer *renderer, uint64_t id, const char *tag);
+// The material bound to the whole mesh, or "".
+int pika_mesh_material(const pika_renderer *renderer, uint64_t id, const char *material);
 
 // The instancer a prototype mesh belongs to ("" when the mesh is not
 // instanced), and the instance indices it is drawn at.
@@ -103,8 +105,10 @@ int pika_mesh_instancer(const pika_renderer *renderer, uint64_t id, const char *
 // Adds an instancer and writes its id, never reused, to `*out`.
 int pika_instancer_new(const pika_renderer *renderer, const char *path, uint64_t *out);
 int pika_instancer_free(const pika_renderer *renderer, uint64_t id);
-// The instancer this one is nested in, or "".
-int pika_instancer_parent(const pika_renderer *renderer, uint64_t id, const char *parent);
+// The instancer this one is nested in ("" when none), and the parent's
+// instance indices it is repeated at.
+int pika_instancer_parent(const pika_renderer *renderer, uint64_t id, const char *parent,
+                          const int32_t *indices, size_t count);
 int pika_instancer_transform(const pika_renderer *renderer, uint64_t id,
                              const double matrix[16]);
 int pika_instancer_primvars(const pika_renderer *renderer, uint64_t id,
