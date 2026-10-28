@@ -1,15 +1,16 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// The skeleton: meshes are accepted but not synced, and the color AOV
-// receives Pika's cleared frame.
+// Meshes are synced into Pika's store, and the color AOV receives Pika's
+// cleared frame.
 
+#include "buffer.h"
 #include "pika.h"
+#include "prims.h"
+#include "report.h"
 
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
-#include <pxr/imaging/hd/mesh.h>
-#include <pxr/imaging/hd/renderBuffer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/renderPass.h>
@@ -19,95 +20,12 @@
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 
-#include <atomic>
-#include <cstdio>
 #include <string>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
-
-// husk drops every Tf diagnostic, so errors also go to stderr.
-void fail(std::string const &message) {
-    fprintf(stderr, "pika: error: %s\n", message.c_str());
-    TF_RUNTIME_ERROR("Pika: %s", message.c_str());
-}
-
-void report(int status, const char *what) {
-    if (status != PIKA_OK)
-        fail(std::string(what) + ": " + pika_last_error());
-}
-
-class PikaMesh final : public HdMesh {
-public:
-    explicit PikaMesh(SdfPath const &id) : HdMesh(id) {}
-
-    HdDirtyBits GetInitialDirtyBitsMask() const override {
-        return HdChangeTracker::Clean;
-    }
-
-    void Sync(HdSceneDelegate *, HdRenderParam *, HdDirtyBits *dirtyBits,
-              TfToken const &) override {
-        *dirtyBits = HdChangeTracker::Clean;
-    }
-
-protected:
-    HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override {
-        return bits;
-    }
-    void _InitRepr(TfToken const &, HdDirtyBits *) override {}
-};
-
-// The pixels live here, in host memory; Pika copies each frame in.
-class PikaRenderBuffer final : public HdRenderBuffer {
-public:
-    explicit PikaRenderBuffer(SdfPath const &id) : HdRenderBuffer(id) {}
-
-    bool Allocate(GfVec3i const &dimensions, HdFormat format,
-                  bool multiSampled) override {
-        _Deallocate();
-        if (dimensions[0] <= 0 || dimensions[1] <= 0 || dimensions[2] != 1)
-            return false;
-        _width = dimensions[0];
-        _height = dimensions[1];
-        _format = format;
-        _multiSampled = multiSampled;
-        _data.resize(size_t(_width) * _height * HdDataSizeOfFormat(format));
-        return true;
-    }
-
-    unsigned int GetWidth() const override { return _width; }
-    unsigned int GetHeight() const override { return _height; }
-    unsigned int GetDepth() const override { return 1; }
-    HdFormat GetFormat() const override { return _format; }
-    bool IsMultiSampled() const override { return _multiSampled; }
-
-    void *Map() override {
-        _mappers++;
-        return _data.data();
-    }
-    void Unmap() override { _mappers--; }
-    bool IsMapped() const override { return _mappers.load() != 0; }
-    void Resolve() override {}
-    bool IsConverged() const override { return true; }
-
-    std::vector<uint8_t> &Data() { return _data; }
-
-protected:
-    void _Deallocate() override {
-        _width = _height = 0;
-        _format = HdFormatInvalid;
-        _data = {};
-    }
-
-private:
-    unsigned int _width = 0, _height = 0;
-    HdFormat _format = HdFormatInvalid;
-    bool _multiSampled = false;
-    std::vector<uint8_t> _data;
-    std::atomic<int> _mappers{0};
-};
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -201,7 +119,7 @@ public:
 
     HdRprim *CreateRprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->mesh)
-            return new PikaMesh(id);
+            return new PikaMesh(id, _renderer);
         return nullptr;
     }
     void DestroyRprim(HdRprim *rprim) override { delete rprim; }
@@ -226,7 +144,15 @@ public:
     }
     void DestroyBprim(HdBprim *bprim) override { delete bprim; }
 
-    void CommitResources(HdChangeTracker *) override {}
+    // Hydra calls Update before its prim syncs and CommitResources after.
+    void Update() override {
+        if (_renderer)
+            report(pika_sync_begin(_renderer), "beginning a sync");
+    }
+    void CommitResources(HdChangeTracker *) override {
+        if (_renderer)
+            report(pika_sync_end(_renderer), "ending a sync");
+    }
 
 private:
     // Without a renderer the delegate still loads, and renders nothing.

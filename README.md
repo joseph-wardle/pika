@@ -12,7 +12,7 @@ Pika is a real-time raster renderer for animation production, in the style of Bl
 There are two programs:
 
 - **`pika`** checks that this machine can run the renderer. It loads Vulkan, lists every device, chooses a GPU with Vulkan 1.3 and a graphics+compute queue, and opens it. Then it draws the first offscreen frame: `shaders/check.slang`, compiled by `slangc` at run time, fills a rectangle in which each pixel writes its own position, so the read-back image must match exactly. A second draw, shifted 1 px, must fail by exactly its predicted count. When the Vulkan validation layer is found, `pika` turns on sync validation and fails on any message. It exits non-zero, with the reason, if anything fails.
-- **The Hydra delegate** (`hydra/`) is a skeleton. It loads into any Hydra host, accepts meshes without syncing them, and delivers a cleared frame: Vulkan clears the image, and the CPU reads it back into the host's color render buffer (half or full float RGBA).
+- **The Hydra delegate** (`hydra/`) loads into any Hydra host and syncs meshes into Pika's store: points, topology with GeomSubsets, normals, world transform and visibility. It does not draw them yet. It delivers a cleared frame: Vulkan clears the image, and the CPU reads it back into the host's color render buffer (half or full float RGBA).
 
 There is no scene rendering or MaterialX code yet.
 
@@ -24,7 +24,6 @@ There is no scene rendering or MaterialX code yet.
 | Run | The Vulkan loader (`libvulkan.so.1`) and a Vulkan 1.3 GPU driver | Tested on Linux with NVIDIA driver 580.142 (RTX 4070 Ti SUPER). |
 | Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. `pika` reads `shaders/` from the checkout, so run it from there. |
 | Validate | The Vulkan validation layer from a [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) 1.3.268 or newer | Optional; see below. Tested with SDK 1.4.328.1. |
-
 | Delegate | Houdini 21.0 (its HDK headers and USD libraries), `g++` and `make` | Tested with Houdini 21.0.596 (USD 0.25.5) and g++ 11.5. |
 
 MaterialX will be added along with the code that needs it.
@@ -59,7 +58,9 @@ export PXR_PLUGINPATH_NAME=$PWD/target/hydra
 husk -R Pika -c /world/camera -o out.exr hydra/scenes/cube.usda
 ```
 
-The delegate's errors go to stderr as `pika: error: ...`, as well as to Hydra, because husk does not print Hydra's diagnostics.
+The delegate's errors go to stderr as `pika: error: ...`, as well as to Hydra, because husk does not print Hydra's diagnostics. When the host exits, Pika prints each Hydra sync's time and the bytes it pulled, with how many of them were unchanged.
+
+To see what Pika received, set `PIKA_STORE_DUMP` to a file. At the end of every Hydra sync, the whole store is appended to it as text, in Hydra's representation: world transforms, flattened primvars, untriangulated faces. It changes nothing about rendering.
 
 `hydra/check.sh` is the delegate's check. Run it on a GPU host before merging changes to `hydra/` or `src/`. It builds the delegate and renders 24 frames at 1920×1080 in husk, at full and at half float. Every frame must be exactly the clear color and must differ from an unwritten buffer. Validation must report nothing from Pika. The script also prints the time each frame spends on readback:
 

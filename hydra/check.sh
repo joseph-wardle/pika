@@ -69,7 +69,7 @@ render() {
     echo "$name: $exact of $FRAMES frames are exactly the clear color; $control differ from unwritten"
     [ $exact -eq $FRAMES ] || fail "$name: frames differ from the clear color"
     [ $control -eq $FRAMES ] || fail "$name: frames match an unwritten buffer"
-    grep "^pika: [0-9]* frames" "$OUT/$name.log" || fail "$name: no frame timings"
+    grep "^pika: .* frames, last at" "$OUT/$name.log" || fail "$name: no frame timings"
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader

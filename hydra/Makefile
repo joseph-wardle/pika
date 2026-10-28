@@ -14,12 +14,14 @@ CXXFLAGS := -std=c++17 -D_GLIBCXX_USE_CXX11_ABI=1 -fPIC -O2 -Wall -Wextra \
 # they cannot clash with another library loaded into the host.
 LDFLAGS := -shared -Wl,--exclude-libs,ALL -Wl,--no-undefined
 # Houdini's pxr.h turns Python support on, so VtValue pulls in Python.
-LIBS := -L$(HFS)/dsolib -lpxr_hd -lpxr_hf -lpxr_sdf -lpxr_vt -lpxr_gf \
+LIBS := -L$(HFS)/dsolib -lpxr_hd -lpxr_hf -lpxr_pxOsd -lpxr_sdf -lpxr_vt -lpxr_gf \
 	-lpxr_tf -lpxr_trace -lpxr_arch -lpxr_python \
 	-L$(HFS)/python/lib -lpython3.11 -ldl -lpthread -lm -lrt -lutil -lgcc_s
 
-$(OUT)/pika.so: plugin.cpp pika.h $(RUST) $(OUT)/plugInfo.json
-	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ plugin.cpp $(RUST) $(LIBS)
+SOURCES := plugin.cpp prims.cpp
+
+$(OUT)/pika.so: $(SOURCES) $(wildcard *.h) $(RUST) $(OUT)/plugInfo.json
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $(SOURCES) $(RUST) $(LIBS)
 
 $(OUT)/plugInfo.json: plugInfo.json
 	mkdir -p $(OUT)

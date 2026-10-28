@@ -4,4 +4,5 @@
 mod abi;
 pub mod gpu;
 mod renderer;
+mod store;
 pub mod target;

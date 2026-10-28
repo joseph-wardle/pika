@@ -1,12 +1,15 @@
-//! What one Hydra render delegate owns on the Rust side: its Vulkan device
-//! and the color target it reads frames back from.
+//! What one Hydra render delegate owns on the Rust side: its scene store,
+//! its Vulkan device and the color target it reads frames back from.
 
+use std::fs::File;
+use std::io::Write;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ash::vk;
 
 use crate::gpu;
+use crate::store::{self, Store};
 use crate::target::Target;
 
 /// The color formats Pika renders, as Hydra names them. Each host picks one:
@@ -52,11 +55,24 @@ pub const CLEAR: [f32; 4] = [0.25, 0.5, 0.75, 1.0];
 static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
 
 pub struct Renderer {
+    pub store: Store,
     // Field order is drop order: the target is destroyed before its device.
     target: Option<Target>,
     device: gpu::Device<'static>,
     pub device_name: String,
+    /// `PIKA_STORE_DUMP`: the file each sync's store is appended to, for the
+    /// fixture checks. Writing it changes nothing about rendering.
+    dump: Option<(String, File)>,
+    sync_start: Option<Instant>,
+    syncs: Vec<Sync>,
     frames: Vec<Frame>,
+}
+
+/// One Hydra sync, from the render delegate's `Update` to its
+/// `CommitResources`: the prim syncs, including Hydra's own pulls.
+struct Sync {
+    time: Duration,
+    stats: store::Stats,
 }
 
 /// Where one frame's time went: the GPU clear and copy to host memory, then
@@ -80,12 +96,46 @@ impl Renderer {
             Some(_) => "on (sync)",
             None => "not found",
         };
+        let dump = match std::env::var("PIKA_STORE_DUMP") {
+            Ok(path) => {
+                let file = File::create(&path)
+                    .map_err(|e| format!("cannot create PIKA_STORE_DUMP file {path}: {e}"))?;
+                Some((path, file))
+            }
+            Err(_) => None,
+        };
         Ok(Self {
+            store: Store::new(),
             target: None,
             device: instance.open(index)?,
             device_name: format!("{}, validation {validation}", instance.devices[index].name),
+            dump,
+            sync_start: None,
+            syncs: Vec::new(),
             frames: Vec::new(),
         })
+    }
+
+    pub fn begin_sync(&mut self) {
+        self.sync_start = Some(Instant::now());
+    }
+
+    /// Records the sync's time and stats, and appends the store to the dump.
+    pub fn end_sync(&mut self) -> Result<(), String> {
+        let start = self
+            .sync_start
+            .take()
+            .ok_or("a sync ended that never began: the delegate must call pika_sync_begin")?;
+        self.syncs.push(Sync {
+            time: start.elapsed(),
+            stats: self.store.end_sync(),
+        });
+        let Some((path, file)) = &mut self.dump else {
+            return Ok(());
+        };
+        let text = format!("sync {}\n{}", self.syncs.len(), self.store.dump());
+        file.write_all(text.as_bytes())
+            .map_err(|e| format!("cannot write PIKA_STORE_DUMP file {path}: {e}"))
     }
 
     /// Renders a `width` × `height` frame into `pixels`, the host's render
@@ -133,32 +183,42 @@ impl Renderer {
         Ok(())
     }
 
-    /// Frame timings so far, as median and maximum per stage.
+    /// Sync and frame timings so far, as median and maximum per stage, with
+    /// the bytes Hydra handed over.
     pub fn report(&self) -> String {
-        let (Some(target), false) = (&self.target, self.frames.is_empty()) else {
-            return "no frames rendered".into();
-        };
-        let stage = |time: fn(&Frame) -> Duration| {
-            let mut ms: Vec<f64> = self
-                .frames
-                .iter()
-                .map(|f| time(f).as_secs_f64() * 1e3)
-                .collect();
-            ms.sort_by(f64::total_cmp);
+        let syncs = if self.syncs.is_empty() {
+            "no syncs".into()
+        } else {
+            let bytes: usize = self.syncs.iter().map(|s| s.stats.bytes).sum();
+            let redundant: usize = self.syncs.iter().map(|s| s.stats.redundant_bytes).sum();
             format!(
-                "p50 {:.2} ms, max {:.2} ms",
-                ms[ms.len() / 2],
-                ms[ms.len() - 1]
+                "{} syncs: {}; {bytes} bytes pulled, {redundant} redundant",
+                self.syncs.len(),
+                percentiles(self.syncs.iter().map(|s| s.time)),
             )
         };
+        let (Some(target), false) = (&self.target, self.frames.is_empty()) else {
+            return format!("{syncs}; no frames rendered");
+        };
         format!(
-            "{} frames, last at {}×{} {:?}: clear and readback {}; copy into the render buffer {}",
+            "{syncs}; {} frames, last at {}×{} {:?}: clear and readback {}; copy into the render buffer {}",
             self.frames.len(),
             target.width,
             target.height,
             target.format,
-            stage(|f| f.submit),
-            stage(|f| f.copy),
+            percentiles(self.frames.iter().map(|f| f.submit)),
+            percentiles(self.frames.iter().map(|f| f.copy)),
         )
     }
+}
+
+/// The median and maximum of a non-empty set of times.
+fn percentiles(times: impl Iterator<Item = Duration>) -> String {
+    let mut ms: Vec<f64> = times.map(|t| t.as_secs_f64() * 1e3).collect();
+    ms.sort_by(f64::total_cmp);
+    format!(
+        "p50 {:.2} ms, max {:.2} ms",
+        ms[ms.len() / 2],
+        ms[ms.len() - 1]
+    )
 }
