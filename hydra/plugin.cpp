@@ -1,8 +1,9 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// Meshes are synced into Pika's store, and the color AOV receives Pika's
-// cleared frame.
+// Meshes and instancers are synced into Pika's store, basis curves are
+// fetched and measured, and other prims are counted. The color AOV receives
+// Pika's cleared frame.
 
 #include "buffer.h"
 #include "pika.h"
@@ -82,18 +83,37 @@ public:
             report(pika_renderer_free(_renderer), "shutting down");
     }
 
+    // Supporting a type changes what Hydra hands over, so the counted types
+    // leave out the implicit surfaces (cube, sphere...), which Hydra
+    // otherwise turns into meshes, and ext computations, which would move
+    // skinned points out of the meshes' primvars.
     TfTokenVector const &GetSupportedRprimTypes() const override {
-        static const TfTokenVector types = {HdPrimTypeTokens->mesh};
+        static const TfTokenVector types = {
+            HdPrimTypeTokens->mesh,        HdPrimTypeTokens->basisCurves,
+            HdPrimTypeTokens->points,      HdPrimTypeTokens->nurbsCurves,
+            HdPrimTypeTokens->nurbsPatch,  HdPrimTypeTokens->volume,
+            HdPrimTypeTokens->tetMesh,
+        };
         return types;
     }
     TfTokenVector const &GetSupportedSprimTypes() const override {
-        static const TfTokenVector types = {HdPrimTypeTokens->camera};
+        static const TfTokenVector types = [] {
+            TfTokenVector t = HdLightPrimTypeTokens();
+            t.push_back(HdPrimTypeTokens->lightFilter);
+            t.push_back(HdPrimTypeTokens->material);
+            t.push_back(HdPrimTypeTokens->camera);
+            return t;
+        }();
         return types;
     }
     TfTokenVector const &GetSupportedBprimTypes() const override {
         static const TfTokenVector types = {HdPrimTypeTokens->renderBuffer};
         return types;
     }
+
+    // Hydra's default is the preview binding; Pika's look target is the
+    // final one, which ALab binds separately.
+    TfToken GetMaterialBindingPurpose() const override { return HdTokens->full; }
 
     HdResourceRegistrySharedPtr GetResourceRegistry() const override {
         return _resources;
@@ -113,21 +133,23 @@ public:
 
     HdInstancer *CreateInstancer(HdSceneDelegate *delegate,
                                  SdfPath const &id) override {
-        return new HdInstancer(delegate, id);
+        return new PikaInstancer(delegate, id, _renderer);
     }
     void DestroyInstancer(HdInstancer *instancer) override { delete instancer; }
 
     HdRprim *CreateRprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->mesh)
             return new PikaMesh(id, _renderer);
-        return nullptr;
+        if (typeId == HdPrimTypeTokens->basisCurves)
+            return new PikaCurves(id, _renderer);
+        return new PikaCountedRprim(typeId, id, _renderer);
     }
     void DestroyRprim(HdRprim *rprim) override { delete rprim; }
 
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera)
             return new HdCamera(id);
-        return nullptr;
+        return new PikaCountedSprim(typeId, id, _renderer);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {
         return CreateSprim(typeId, SdfPath::EmptyPath());

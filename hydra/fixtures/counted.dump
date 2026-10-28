@@ -1,0 +1,11 @@
+sync 1
+counted points /world/dust
+counted rectLight /world/fill
+counted sphereLight /world/key
+counted material /world/paint
+counted nurbsCurves /world/wire
+sync 2
+counted points /world/dust
+counted sphereLight /world/key
+counted material /world/paint
+counted nurbsCurves /world/wire

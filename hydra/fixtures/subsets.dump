@@ -1,7 +1,10 @@
 sync 1
+counted material /world/mtl/blue
+counted material /world/mtl/red
 mesh /world/quad
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -19,9 +22,12 @@ mesh /world/quad
     0 1 0
   normals none
 sync 2
+counted material /world/mtl/blue
+counted material /world/mtl/red
 mesh /world/quad
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0

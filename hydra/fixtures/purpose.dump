@@ -2,6 +2,7 @@ sync 1
 mesh /world/draft
   render_tag proxy
   visible not synced
+  instancer not synced
   transform not synced
   topology not synced
   points not synced
@@ -9,6 +10,7 @@ mesh /world/draft
 mesh /world/final
   render_tag render
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -26,6 +28,7 @@ sync 2
 mesh /world/draft
   render_tag render
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -42,6 +45,7 @@ mesh /world/draft
 mesh /world/final
   render_tag proxy
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0

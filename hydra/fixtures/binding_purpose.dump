@@ -1,0 +1,41 @@
+sync 1
+counted material /world/mtl/full
+counted material /world/mtl/preview
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+    subset "/world/mtl/full" faces 0
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+sync 2
+counted material /world/mtl/full
+counted material /world/mtl/preview
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none

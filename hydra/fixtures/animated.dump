@@ -2,6 +2,7 @@ sync 1
 mesh /world/tri
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -19,6 +20,7 @@ sync 2
 mesh /world/tri
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0

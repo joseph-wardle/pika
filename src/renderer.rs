@@ -191,8 +191,10 @@ impl Renderer {
         } else {
             let bytes: usize = self.syncs.iter().map(|s| s.stats.bytes).sum();
             let redundant: usize = self.syncs.iter().map(|s| s.stats.redundant_bytes).sum();
+            let curves: usize = self.syncs.iter().map(|s| s.stats.curve_bytes).sum();
             format!(
-                "{} syncs: {}; {bytes} bytes pulled, {redundant} redundant",
+                "{} syncs: {}; {bytes} bytes pulled, {redundant} redundant; \
+                 {curves} bytes of basis curves pulled and dropped",
                 self.syncs.len(),
                 percentiles(self.syncs.iter().map(|s| s.time)),
             )

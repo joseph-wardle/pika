@@ -94,10 +94,13 @@ fixture() {
     local name dir=$ROOT/hydra/fixtures script=()
     name=$(basename "$1" .usda)
     [ -f "$dir/$name.py" ] && script=(--postframe-script "$dir/$name.py")
-    PIKA_STORE_DUMP=$OUT/fixtures/$name.dump husk -V 1 -R Pika -f 1 -n 2 --res 16 16 \
+    PIKA_STORE_DUMP=$OUT/fixtures/$name.dump husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
         "${script[@]}" -o "$OUT/fixtures/$name.\$F4.exr" "$1" >"$OUT/fixtures/$name.log" 2>&1 ||
         fail "$name: husk exited $? (see $OUT/fixtures/$name.log)"
     clean "$name" "$OUT/fixtures/$name.log"
+    # UsdImaging names native instance prototypes after hashes that change
+    # from run to run.
+    sed -i -E 's/(_purpose|_geomModel)[0-9a-f]+/\1#/g' "$OUT/fixtures/$name.dump"
     diff -u "$dir/$name.dump" "$OUT/fixtures/$name.dump" ||
         fail "$name: the store differs from $name.dump"
     [ "$(store_after 2 "$OUT/fixtures/$name.dump")" != "$(store_after 1 "$dir/$name.dump")" ] ||

@@ -1,0 +1,74 @@
+sync 1
+instancer /world/scatter
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_translations 2
+    1 0 0
+    2 0 0
+instancer /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer
+  parent /world/scatter
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 3 0 1
+mesh /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer indices 0
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+sync 2
+instancer /world/scatter
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_translations 2
+    1 0 0
+    2 0 0
+instancer /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer
+  parent /world/scatter
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 5 0 1
+mesh /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagatedPrototypes/NoPrimvars_purpose#_geomModel#/__Prototype_1/UsdNiInstancer indices 0
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  topology rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none

@@ -45,6 +45,20 @@ typedef struct pika_topology {
     size_t subset_count;
 } pika_topology;
 
+// Hydra's per-instance transform primvars. Each pointer is null when the
+// primvar is absent, and holds `count` matrices (row-major GfMatrix4d),
+// xyz triples or quaternions (i, j, k, real) when present.
+typedef struct pika_instance_primvars {
+    const double *transforms;
+    size_t transform_count;
+    const float *translations;
+    size_t translation_count;
+    const float *rotations;
+    size_t rotation_count;
+    const float *scales;
+    size_t scale_count;
+} pika_instance_primvars;
+
 typedef struct pika_renderer pika_renderer;
 
 // The message for this thread's last failed call, valid until its next one.
@@ -80,6 +94,32 @@ int pika_mesh_transform(const pika_renderer *renderer, uint64_t id,
 int pika_mesh_visible(const pika_renderer *renderer, uint64_t id, bool visible);
 // The purpose Hydra filters syncs by: "geometry", "render", "proxy" or "guide".
 int pika_mesh_render_tag(const pika_renderer *renderer, uint64_t id, const char *tag);
+
+// The instancer a prototype mesh belongs to ("" when the mesh is not
+// instanced), and the instance indices it is drawn at.
+int pika_mesh_instancer(const pika_renderer *renderer, uint64_t id, const char *instancer,
+                        const int32_t *indices, size_t count);
+
+// Adds an instancer and writes its id, never reused, to `*out`.
+int pika_instancer_new(const pika_renderer *renderer, const char *path, uint64_t *out);
+int pika_instancer_free(const pika_renderer *renderer, uint64_t id);
+// The instancer this one is nested in, or "".
+int pika_instancer_parent(const pika_renderer *renderer, uint64_t id, const char *parent);
+int pika_instancer_transform(const pika_renderer *renderer, uint64_t id,
+                             const double matrix[16]);
+int pika_instancer_primvars(const pika_renderer *renderer, uint64_t id,
+                            const pika_instance_primvars *primvars);
+
+// Basis curves are fetched only to measure them: the delegate reports the
+// bytes it pulled and drops them.
+int pika_curves_new(const pika_renderer *renderer, const char *path, uint64_t *out);
+int pika_curves_free(const pika_renderer *renderer, uint64_t id);
+int pika_curves_pulled(const pika_renderer *renderer, uint64_t id, size_t bytes);
+
+// A prim of any other supported type is only counted, by its Hydra type.
+int pika_counted_new(const pika_renderer *renderer, const char *type, const char *path,
+                     uint64_t *out);
+int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
 // Renders a frame into `pixels`, a render buffer of `format` and `len` bytes.
 int pika_render(const pika_renderer *renderer, enum pika_format format,

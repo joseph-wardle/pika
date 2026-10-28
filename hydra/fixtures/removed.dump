@@ -2,6 +2,7 @@ sync 1
 mesh /world/deleted
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -18,6 +19,7 @@ mesh /world/deleted
 mesh /world/kept
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0
@@ -35,6 +37,7 @@ sync 2
 mesh /world/kept
   render_tag geometry
   visible true
+  instancer none
   transform
     1 0 0 0
     0 1 0 0

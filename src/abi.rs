@@ -12,7 +12,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::renderer::{Format, Renderer};
-use crate::store::{Interpolation, Normals, Subset, Topology};
+use crate::store::{InstancePrimvars, Instancing, Interpolation, Normals, Subset, Topology};
 
 pub const OK: i32 = 0;
 pub const ERROR: i32 = 1;
@@ -40,6 +40,19 @@ pub struct CTopology {
     left_handed: bool,
     subsets: *const CSubset,
     subset_count: usize,
+}
+
+/// `pika_instance_primvars`.
+#[repr(C)]
+pub struct CInstancePrimvars {
+    transforms: *const [f64; 16],
+    transform_count: usize,
+    translations: *const [f32; 3],
+    translation_count: usize,
+    rotations: *const [f32; 4],
+    rotation_count: usize,
+    scales: *const [f32; 3],
+    scale_count: usize,
 }
 
 thread_local! {
@@ -83,6 +96,25 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     }
     // SAFETY: the caller guarantees `len` readable values at `ptr`.
     unsafe { std::slice::from_raw_parts(ptr, len) }
+}
+
+/// A primvar the delegate passes as null when it is absent.
+///
+/// # Safety
+/// As for `slice`.
+unsafe fn primvar<T: Clone>(ptr: *const T, len: usize) -> Option<Vec<T>> {
+    // SAFETY: the caller guarantees `len` readable values at `ptr`.
+    (!ptr.is_null()).then(|| unsafe { slice(ptr, len) }.to_vec())
+}
+
+/// A path the delegate passes as "" when there is none.
+///
+/// # Safety
+/// As for `string`.
+unsafe fn path(ptr: *const c_char) -> Result<Option<String>, String> {
+    // SAFETY: the caller guarantees a NUL-terminated string.
+    let path = unsafe { string(ptr)? };
+    Ok((!path.is_empty()).then_some(path))
 }
 
 /// # Safety
@@ -303,6 +335,184 @@ pub unsafe extern "C" fn pika_mesh_render_tag(
         let (handle, tag) = unsafe { (&*renderer, string(tag)?) };
         lock(handle)?.store.set_render_tag(id, tag)
     })
+}
+
+/// Sets the instancer a mesh is a prototype of ("" when none) and the
+/// instance indices it is drawn at.
+///
+/// # Safety
+/// `renderer` must be live, `instancer` a NUL-terminated string and
+/// `indices` valid for `count` reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_instancer(
+    renderer: *const Handle,
+    id: u64,
+    instancer: *const c_char,
+    indices: *const i32,
+    count: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer, the string and the array.
+        let (handle, instancer) = unsafe { (&*renderer, path(instancer)?) };
+        let instancing = instancer.map(|instancer| Instancing {
+            instancer,
+            // SAFETY: as above.
+            indices: unsafe { slice(indices, count) }.to_vec(),
+        });
+        lock(handle)?.store.set_instancing(id, instancing)
+    })
+}
+
+/// Adds an instancer to the store and writes its id, never reused, to `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_instancer(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_instancer(id))
+}
+
+/// # Safety
+/// `renderer` must be live, and `parent` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_parent(
+    renderer: *const Handle,
+    id: u64,
+    parent: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, parent) = unsafe { (&*renderer, path(parent)?) };
+        lock(handle)?.store.set_instancer_parent(id, parent)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, and `matrix` valid for 16 reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_transform(
+    renderer: *const Handle,
+    id: u64,
+    matrix: *const [f64; 16],
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the matrix.
+        let (handle, matrix) = unsafe { (&*renderer, *matrix) };
+        lock(handle)?.store.set_instancer_transform(id, matrix)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, and `primvars` and the arrays it points to valid
+/// for reads for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_primvars(
+    renderer: *const Handle,
+    id: u64,
+    primvars: *const CInstancePrimvars,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and every array.
+        let (handle, p) = unsafe { (&*renderer, &*primvars) };
+        // SAFETY: as above.
+        let primvars = unsafe {
+            InstancePrimvars {
+                transforms: primvar(p.transforms, p.transform_count),
+                translations: primvar(p.translations, p.translation_count),
+                rotations: primvar(p.rotations, p.rotation_count),
+                scales: primvar(p.scales, p.scale_count),
+            }
+        };
+        lock(handle)?.store.set_instance_primvars(id, primvars)
+    })
+}
+
+/// Adds basis curves to the store and writes their id, never reused, to `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_curves_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_curves(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_curves_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_curves(id))
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, bytes: usize) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
+}
+
+/// Adds a prim that is only counted and writes its id, never reused, to
+/// `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `prim_type` and `path` NUL-terminated strings and
+/// `out` valid for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_counted_new(
+    renderer: *const Handle,
+    prim_type: *const c_char,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the strings.
+        let (handle, prim_type, path) = unsafe { (&*renderer, string(prim_type)?, string(path)?) };
+        let id = lock(handle)?.store.insert_counted(prim_type, path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_counted_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_counted(id))
 }
 
 /// Marks the start of a Hydra sync, for its timing.
