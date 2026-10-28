@@ -1,9 +1,9 @@
 //! `pika`: checks that this machine can run the renderer.
 //!
-//! Loads Vulkan, lists every device, chooses one and opens it, then compiles
-//! the check shader.
-//! Exits 0 only if a suitable device opened and the validation layer,
-//! when found, reported nothing.
+//! Loads Vulkan, lists every device, chooses one and opens it, then draws the
+//! first-frame check and its shifted negative control.
+//! Exits 0 only if the check matched exactly, the control failed by exactly
+//! its predicted count, and the validation layer, when found, reported nothing.
 
 mod check;
 mod gpu;
@@ -58,12 +58,26 @@ fn run() -> Result<(), String> {
         shader.spirv.len()
     );
 
+    let mut offscreen = check::Offscreen::new(&device, &shader)?;
+    let reference = check::expected(check::RECT);
+    let drawn = check::mismatches(&reference, &offscreen.draw(check::RECT)?);
+    let shifted = check::mismatches(&reference, &offscreen.draw(check::SHIFTED)?);
+    println!("first frame: {drawn} mismatched pixels (must be 0)");
+    println!(
+        "shifted control: {shifted} mismatched pixels (must be {})",
+        check::SHIFTED_MISMATCHES
+    );
+
     // Read the count after the device is destroyed: vkDestroyDevice reports leaks.
+    drop(offscreen);
     drop(device);
     match instance.validation_messages() {
         Some(0) => println!("validation: 0 messages"),
         Some(n) => return Err(format!("validation reported {n} messages (printed above)")),
         None => {}
+    }
+    if drawn != 0 || shifted != check::SHIFTED_MISMATCHES {
+        return Err("the first-frame check failed (counts above)".into());
     }
     Ok(())
 }

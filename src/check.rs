@@ -4,20 +4,27 @@
 use std::io::{Cursor, ErrorKind};
 use std::process::Command;
 
+use ash::vk;
+
+use crate::gpu;
+
 /// Width and height of the target. A power of two keeps the shader's pixel to
 /// NDC mapping exact, and positions must fit the 8-bit channels.
-#[cfg_attr(not(test), expect(dead_code, reason = "the GPU path will use it"))]
 pub const SIZE: i32 = 64;
 
 /// The drawn rectangle in pixels, `[x0, y0, x1, y1]` with exclusive ends.
 /// Off-centre and not square, so a flipped or transposed image fails.
-#[cfg_attr(not(test), expect(dead_code, reason = "the GPU path will use it"))]
 pub const RECT: [i32; 4] = [16, 8, 56, 40];
 
 /// `RECT` moved 1 px right, the negative control. Because each pixel holds its
 /// own position, only the two edge columns differ: 2 × height pixels.
-#[cfg_attr(not(test), expect(dead_code, reason = "the GPU path will use it"))]
 pub const SHIFTED: [i32; 4] = [17, 8, 57, 40];
+
+/// Mismatches a draw of `SHIFTED` must give against `expected(RECT)`.
+pub const SHIFTED_MISMATCHES: usize = 2 * (RECT[3] - RECT[1]) as usize;
+
+const FORMAT: vk::Format = vk::Format::R8G8B8A8_UINT;
+const BYTES: usize = (SIZE * SIZE * 4) as usize;
 
 // Read at run time from the source tree, so `cargo run` must run from a checkout.
 const SHADER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/check.slang");
@@ -70,10 +77,9 @@ fn slangc(args: &[&str]) -> Result<std::process::Output, String> {
 
 /// The image a draw of `rect` must produce: tightly packed RGBA8_UINT rows,
 /// `[x, y, 1, 255]` inside the rectangle and zero outside.
-#[cfg_attr(not(test), expect(dead_code, reason = "the GPU path will use it"))]
 pub fn expected(rect: [i32; 4]) -> Vec<u8> {
     let [x0, y0, x1, y1] = rect;
-    let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    let mut pixels = Vec::with_capacity(BYTES);
     for y in 0..SIZE {
         for x in 0..SIZE {
             let inside = (x0..x1).contains(&x) && (y0..y1).contains(&y);
@@ -89,11 +95,379 @@ pub fn expected(rect: [i32; 4]) -> Vec<u8> {
 }
 
 /// How many RGBA8 pixels differ between two images of the same size.
-#[cfg_attr(not(test), expect(dead_code, reason = "the GPU path will use it"))]
 pub fn mismatches(a: &[u8], b: &[u8]) -> usize {
     assert_eq!(a.len(), b.len(), "images differ in size");
     let (a, b) = (a.as_chunks::<4>().0, b.as_chunks::<4>().0);
     a.iter().zip(b).filter(|(p, q)| p != q).count()
+}
+
+/// A `SIZE`² RGBA8_UINT target, the check pipeline and a readback buffer.
+/// Every handle starts null, so a failed `new` can drop a partly built value.
+pub struct Offscreen<'a> {
+    device: &'a gpu::Device<'a>,
+    image: vk::Image,
+    image_memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    readback: vk::Buffer,
+    readback_memory: vk::DeviceMemory,
+    mapped: *mut u8,
+    layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    pool: vk::CommandPool,
+    commands: vk::CommandBuffer,
+    fence: vk::Fence,
+}
+
+impl<'a> Offscreen<'a> {
+    pub fn new(device: &'a gpu::Device<'a>, shader: &Shader) -> Result<Self, String> {
+        let d = &device.raw;
+        let mut o = Self {
+            device,
+            image: vk::Image::null(),
+            image_memory: vk::DeviceMemory::null(),
+            view: vk::ImageView::null(),
+            readback: vk::Buffer::null(),
+            readback_memory: vk::DeviceMemory::null(),
+            mapped: std::ptr::null_mut(),
+            layout: vk::PipelineLayout::null(),
+            pipeline: vk::Pipeline::null(),
+            pool: vk::CommandPool::null(),
+            commands: vk::CommandBuffer::null(),
+            fence: vk::Fence::null(),
+        };
+        let extent = vk::Extent3D {
+            width: SIZE as u32,
+            height: SIZE as u32,
+            depth: 1,
+        };
+
+        let image_info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(FORMAT)
+            .extent(extent)
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
+        // SAFETY (this and every call below in `new`): `d` is a live device,
+        // each info struct outlives its call, and each handle passed in was
+        // created on `d` just above.
+        o.image = unsafe { d.create_image(&image_info, None) }
+            .map_err(|e| format!("vkCreateImage failed: {e}"))?;
+        let needs = unsafe { d.get_image_memory_requirements(o.image) };
+        o.image_memory = allocate(device, needs, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        unsafe { d.bind_image_memory(o.image, o.image_memory, 0) }
+            .map_err(|e| format!("vkBindImageMemory failed: {e}"))?;
+        let view_info = vk::ImageViewCreateInfo::default()
+            .image(o.image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(FORMAT)
+            .subresource_range(COLOR);
+        o.view = unsafe { d.create_image_view(&view_info, None) }
+            .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
+
+        let buffer_info = vk::BufferCreateInfo::default()
+            .size(BYTES as u64)
+            .usage(vk::BufferUsageFlags::TRANSFER_DST);
+        o.readback = unsafe { d.create_buffer(&buffer_info, None) }
+            .map_err(|e| format!("vkCreateBuffer failed: {e}"))?;
+        let needs = unsafe { d.get_buffer_memory_requirements(o.readback) };
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        o.readback_memory = allocate(device, needs, host)?;
+        unsafe { d.bind_buffer_memory(o.readback, o.readback_memory, 0) }
+            .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
+        // Freeing the memory in `drop` also unmaps it.
+        o.mapped = unsafe {
+            d.map_memory(
+                o.readback_memory,
+                0,
+                vk::WHOLE_SIZE,
+                vk::MemoryMapFlags::empty(),
+            )
+        }
+        .map_err(|e| format!("vkMapMemory failed: {e}"))?
+        .cast();
+
+        let push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .size(size_of::<Push>() as u32)];
+        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
+        o.layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
+            .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
+        o.pipeline = pipeline(d, o.layout, &shader.spirv)?;
+
+        let pool_info =
+            vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family);
+        o.pool = unsafe { d.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("vkCreateCommandPool failed: {e}"))?;
+        let alloc_info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(o.pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        o.commands = unsafe { d.allocate_command_buffers(&alloc_info) }
+            .map_err(|e| format!("vkAllocateCommandBuffers failed: {e}"))?[0];
+        o.fence = unsafe { d.create_fence(&vk::FenceCreateInfo::default(), None) }
+            .map_err(|e| format!("vkCreateFence failed: {e}"))?;
+        Ok(o)
+    }
+
+    /// Clears the target, draws `rect` and returns the read-back pixels as
+    /// tightly packed RGBA8 rows.
+    pub fn draw(&mut self, rect: [i32; 4]) -> Result<Vec<u8>, String> {
+        let d = &self.device.raw;
+        // SAFETY: `mapped` is the whole of the readback memory, at least
+        // `BYTES` long, and no GPU work is pending: every draw waits on its fence.
+        let pixels = unsafe { std::slice::from_raw_parts_mut(self.mapped, BYTES) };
+        // A draw or copy that never lands leaves 0xCD, which no pixel can be.
+        pixels.fill(0xCD);
+
+        let cb = self.commands;
+        let push = Push {
+            rect,
+            size: [SIZE, SIZE],
+        };
+        // SAFETY (this and every call below in `draw`): `d` is a live device,
+        // all handles were created on it in `new`, `cb` is not in use because
+        // the last submit was waited on, and each info struct outlives its call.
+        unsafe {
+            d.reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+                .map_err(|e| format!("vkResetCommandPool failed: {e}"))?;
+            let begin = vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            d.begin_command_buffer(cb, &begin)
+                .map_err(|e| format!("vkBeginCommandBuffer failed: {e}"))?;
+
+            let to_attachment = vk::ImageMemoryBarrier2::default()
+                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image(self.image)
+                .subresource_range(COLOR);
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_attachment]),
+            );
+
+            let attachment = [vk::RenderingAttachmentInfo::default()
+                .image_view(self.view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue::default())];
+            let rendering = vk::RenderingInfo::default()
+                .render_area(AREA)
+                .layer_count(1)
+                .color_attachments(&attachment);
+            d.cmd_begin_rendering(cb, &rendering);
+            d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            d.cmd_push_constants(
+                cb,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                &push.bytes(),
+            );
+            d.cmd_draw(cb, 6, 1, 0, 0);
+            d.cmd_end_rendering(cb);
+
+            let to_copy = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(self.image)
+                .subresource_range(COLOR);
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_copy]),
+            );
+            // A zero row length and height mean tightly packed rows.
+            let region = vk::BufferImageCopy::default()
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_extent(vk::Extent3D {
+                    width: SIZE as u32,
+                    height: SIZE as u32,
+                    depth: 1,
+                });
+            d.cmd_copy_image_to_buffer(
+                cb,
+                self.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.readback,
+                &[region],
+            );
+            // Host-coherent memory still needs this for the copy to be visible to the host.
+            let to_host = vk::BufferMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                .buffer(self.readback)
+                .size(vk::WHOLE_SIZE);
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().buffer_memory_barriers(&[to_host]),
+            );
+            d.end_command_buffer(cb)
+                .map_err(|e| format!("vkEndCommandBuffer failed: {e}"))?;
+
+            let submit = [vk::CommandBufferSubmitInfo::default().command_buffer(cb)];
+            let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit)];
+            d.reset_fences(&[self.fence])
+                .map_err(|e| format!("vkResetFences failed: {e}"))?;
+            d.queue_submit2(self.device.queue, &submits, self.fence)
+                .map_err(|e| format!("vkQueueSubmit2 failed: {e}"))?;
+            d.wait_for_fences(&[self.fence], true, u64::MAX)
+                .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
+        }
+        Ok(pixels.to_vec())
+    }
+}
+
+impl Drop for Offscreen<'_> {
+    fn drop(&mut self) {
+        let d = &self.device.raw;
+        // SAFETY: every handle was created on `d` or is null, which destroy
+        // calls accept, and waiting for idle means none is still in use.
+        unsafe {
+            let _ = d.device_wait_idle();
+            d.destroy_fence(self.fence, None);
+            d.destroy_command_pool(self.pool, None);
+            d.destroy_pipeline(self.pipeline, None);
+            d.destroy_pipeline_layout(self.layout, None);
+            d.destroy_buffer(self.readback, None);
+            d.free_memory(self.readback_memory, None);
+            d.destroy_image_view(self.view, None);
+            d.destroy_image(self.image, None);
+            d.free_memory(self.image_memory, None);
+        }
+    }
+}
+
+/// `check.slang`'s push constants, laid out as Slang lays out `Push`.
+#[repr(C)]
+struct Push {
+    rect: [i32; 4],
+    size: [i32; 2],
+}
+
+impl Push {
+    fn bytes(&self) -> Vec<u8> {
+        self.rect
+            .iter()
+            .chain(&self.size)
+            .flat_map(|v| v.to_ne_bytes())
+            .collect()
+    }
+}
+
+const COLOR: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::COLOR,
+    base_mip_level: 0,
+    level_count: 1,
+    base_array_layer: 0,
+    layer_count: 1,
+};
+
+const AREA: vk::Rect2D = vk::Rect2D {
+    offset: vk::Offset2D { x: 0, y: 0 },
+    extent: vk::Extent2D {
+        width: SIZE as u32,
+        height: SIZE as u32,
+    },
+};
+
+fn allocate(
+    device: &gpu::Device,
+    needs: vk::MemoryRequirements,
+    flags: vk::MemoryPropertyFlags,
+) -> Result<vk::DeviceMemory, String> {
+    let info = vk::MemoryAllocateInfo::default()
+        .allocation_size(needs.size)
+        .memory_type_index(gpu::memory_type(
+            &device.memory_types,
+            needs.memory_type_bits,
+            flags,
+        )?);
+    // SAFETY: `device.raw` is live and `info` outlives the call.
+    unsafe { device.raw.allocate_memory(&info, None) }
+        .map_err(|e| format!("vkAllocateMemory ({flags:?}) failed: {e}"))
+}
+
+/// The check pipeline: no vertex input, no blending (integer formats cannot
+/// blend), two-sided, rendering to one `FORMAT` attachment.
+fn pipeline(
+    d: &ash::Device,
+    layout: vk::PipelineLayout,
+    spirv: &[u32],
+) -> Result<vk::Pipeline, String> {
+    let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+    // SAFETY: `d` is live and `module_info` outlives the call.
+    let module = unsafe { d.create_shader_module(&module_info, None) }
+        .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(c"vs"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(c"fs"),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewports = [vk::Viewport {
+        x: 0.0,
+        y: 0.0,
+        width: SIZE as f32,
+        height: SIZE as f32,
+        min_depth: 0.0,
+        max_depth: 1.0,
+    }];
+    let scissors = [AREA];
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewports(&viewports)
+        .scissors(&scissors);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::RGBA)];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let formats = [FORMAT];
+    let mut rendering =
+        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .color_blend_state(&blend)
+        .layout(layout)
+        .push_next(&mut rendering);
+    // SAFETY: `d` is live, `module` and `layout` were created on it, and
+    // `info` and what it points to outlive the call.
+    let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) };
+    // SAFETY: pipeline creation is complete, so the module is no longer used.
+    unsafe { d.destroy_shader_module(module, None) };
+    pipeline
+        .map(|p| p[0])
+        .map_err(|(_, e)| format!("vkCreateGraphicsPipelines failed: {e}"))
 }
 
 #[cfg(test)]
@@ -124,8 +498,10 @@ mod tests {
 
     #[test]
     fn shifted_rect_differs_in_two_columns() {
-        let height = (RECT[3] - RECT[1]) as usize;
-        assert_eq!(mismatches(&expected(RECT), &expected(SHIFTED)), 2 * height);
+        assert_eq!(
+            mismatches(&expected(RECT), &expected(SHIFTED)),
+            SHIFTED_MISMATCHES
+        );
     }
 
     #[test]

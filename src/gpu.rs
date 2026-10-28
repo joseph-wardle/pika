@@ -56,7 +56,6 @@ pub fn choose(devices: &[DeviceInfo]) -> Option<usize> {
 
 /// The first memory type allowed by `type_bits` (from `vkGet*MemoryRequirements`)
 /// that has every flag in `flags`.
-#[cfg_attr(not(test), expect(dead_code, reason = "check.rs will use it"))]
 pub fn memory_type(
     types: &[vk::MemoryType],
     type_bits: u32,
@@ -331,11 +330,9 @@ unsafe extern "system" fn count_message(
 /// A logical device. It borrows its `Instance` so it cannot outlive it.
 pub struct Device<'a> {
     _instance: &'a Instance,
-    raw: ash::Device,
+    pub raw: ash::Device,
     pub queue_family: u32,
-    #[expect(dead_code, reason = "check.rs will use it")]
     pub queue: vk::Queue,
-    #[expect(dead_code, reason = "check.rs will use it")]
     pub memory_types: Vec<vk::MemoryType>,
 }
 
