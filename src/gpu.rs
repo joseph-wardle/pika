@@ -7,6 +7,7 @@ pub const REQUIRED_API: u32 = vk::API_VERSION_1_3;
 
 /// What Pika needs to know about a physical device to choose one.
 pub struct DeviceInfo {
+    pub handle: vk::PhysicalDevice,
     pub name: String,
     pub kind: vk::PhysicalDeviceType,
     pub api_version: u32,
@@ -63,7 +64,6 @@ pub struct Instance {
     _entry: ash::Entry,
     raw: ash::Instance,
     pub loader_version: u32,
-    pub physical: Vec<vk::PhysicalDevice>,
     pub devices: Vec<DeviceInfo>,
 }
 
@@ -102,16 +102,14 @@ impl Instance {
             _entry: entry,
             raw,
             loader_version,
-            physical: Vec::new(),
             devices: Vec::new(),
         };
         // SAFETY: `instance.raw` is a live instance.
-        instance.physical = unsafe { instance.raw.enumerate_physical_devices() }
+        let physical = unsafe { instance.raw.enumerate_physical_devices() }
             .map_err(|e| format!("vkEnumeratePhysicalDevices failed: {e}"))?;
-        instance.devices = instance
-            .physical
-            .iter()
-            .map(|&pd| instance.describe(pd))
+        instance.devices = physical
+            .into_iter()
+            .map(|pd| instance.describe(pd))
             .collect::<Result<_, _>>()?;
         Ok(instance)
     }
@@ -148,6 +146,7 @@ impl Instance {
             .map(|i| i as u32);
 
         Ok(DeviceInfo {
+            handle: pd,
             name,
             kind: props.device_type,
             api_version: props.api_version,
@@ -170,11 +169,8 @@ impl Instance {
         let create_info = vk::DeviceCreateInfo::default().queue_create_infos(&queues);
         // SAFETY: the physical device belongs to this live instance and
         // `create_info` outlives the call.
-        let raw = unsafe {
-            self.raw
-                .create_device(self.physical[index], &create_info, None)
-        }
-        .map_err(|e| format!("vkCreateDevice on {} failed: {e}", info.name))?;
+        let raw = unsafe { self.raw.create_device(info.handle, &create_info, None) }
+            .map_err(|e| format!("vkCreateDevice on {} failed: {e}", info.name))?;
         Ok(Device {
             _instance: self,
             raw,
@@ -210,6 +206,7 @@ mod tests {
 
     fn device(kind: vk::PhysicalDeviceType, api_version: u32, vram_gib: u64) -> DeviceInfo {
         DeviceInfo {
+            handle: vk::PhysicalDevice::null(),
             name: format!("{kind:?}"),
             kind,
             api_version,
