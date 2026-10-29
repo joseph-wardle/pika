@@ -15,10 +15,8 @@ use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
 use crate::shader;
-use crate::smooth::Smooth;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
-use crate::subdiv::Subdiv;
 use crate::target::Target;
 use crate::transform::Camera;
 use crate::view::View;
@@ -102,8 +100,6 @@ pub struct Renderer {
     view: Option<View>,
     raster: Raster,
     cull: Cull,
-    subdiv: Subdiv,
-    smooth: Smooth,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
@@ -198,9 +194,7 @@ impl Renderer {
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            subdiv: Subdiv::new(&device, &subdiv.spirv)?,
-            smooth: Smooth::new(&device, &smooth.spirv)?,
-            geometry: Geometry::new(),
+            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv)?,
             device,
             device_name,
             dump,
@@ -318,15 +312,9 @@ impl Renderer {
             }
         };
         let cb = self.commands.begin()?;
-        let update = self.geometry.update(
-            &self.device,
-            &self.store,
-            &moved,
-            &inputs.render_tags,
-            &self.subdiv,
-            &self.smooth,
-            cb,
-        )?;
+        let update =
+            self.geometry
+                .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
         self.commands.mark("update")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
