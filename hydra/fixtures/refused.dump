@@ -1,0 +1,41 @@
+sync 1
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology loop rightHanded
+    face_vertex_counts 4
+    face_vertex_indices 0 1 2 3
+  points 4
+    0 0 0
+    1 0 0
+    1 1 0
+    0 1 0
+  normals none
+sync 2
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology loop rightHanded
+    face_vertex_counts 3 3
+    face_vertex_indices 0 1 2 0 2 3
+    refined faces 8 points 9
+  points 4
+    0 0 0
+    1 0 0
+    1 1 0
+    0 1 0
+  normals none

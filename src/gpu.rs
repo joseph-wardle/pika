@@ -1,4 +1,5 @@
-//! Vulkan instance, validation, device choice and logical device.
+//! Vulkan instance, validation, device choice and logical device, and the
+//! buffers and compute pipelines created on it.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -505,6 +506,105 @@ impl Drop for Buffer {
         unsafe {
             self.device.destroy_buffer(self.raw, None);
             self.device.free_memory(self.memory, None);
+        }
+    }
+}
+
+/// A compute pipeline whose only input is its push constants: buffer
+/// addresses and a range of items, which its shader walks in a grid-stride
+/// loop of `numthreads(64, 1, 1)` groups.
+pub struct Compute {
+    // A copy of the owner's device table, which outlives this (field order).
+    device: ash::Device,
+    layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+}
+
+impl Compute {
+    /// The threads in a group, as the shaders declare.
+    const GROUP_SIZE: u64 = 64;
+    /// Vulkan's guaranteed minimum of groups in one dispatch dimension.
+    const MAX_GROUPS: u64 = 65535;
+
+    /// The pipeline of `spirv`'s entry point `cs`, with `push_size` bytes of
+    /// push constants.
+    pub fn new(device: &Device, spirv: &[u32], push_size: usize) -> Result<Self, String> {
+        let d = &device.raw;
+        let push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .size(push_size as u32)];
+        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
+        // SAFETY: `d` is live and `layout_info` outlives the call.
+        let layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
+            .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
+        let mut c = Self {
+            device: d.clone(),
+            layout,
+            pipeline: vk::Pipeline::null(),
+        };
+        let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
+        // SAFETY: `d` is live and `module_info` outlives the call.
+        let module = unsafe { d.create_shader_module(&module_info, None) }
+            .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module)
+            .name(c"cs");
+        let info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(c.layout);
+        // SAFETY: `d` is live, `module` and the layout were created on it,
+        // and `info` outlives the call.
+        let built = unsafe { d.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) };
+        // SAFETY: pipeline creation is complete, so the module is no longer used.
+        unsafe { d.destroy_shader_module(module, None) };
+        c.pipeline = built
+            .map(|p| p[0])
+            .map_err(|(_, e)| format!("vkCreateComputePipelines failed: {e}"))?;
+        Ok(c)
+    }
+
+    /// Records into `cb`, outside rendering, one dispatch per range of
+    /// items. `push` is called with each range's first item, count and
+    /// stride, the threads dispatched, and returns the push constants: a
+    /// plain `repr(C)` struct without padding.
+    pub fn record<P: Copy>(
+        &self,
+        cb: vk::CommandBuffer,
+        ranges: &[std::ops::Range<u32>],
+        push: impl Fn(u32, u32, u32) -> P,
+    ) {
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, and the pipeline was
+        // created on `d`.
+        unsafe { d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline) };
+        for r in ranges.iter().filter(|r| !r.is_empty()) {
+            let count = r.end - r.start;
+            let groups = (count as u64)
+                .div_ceil(Self::GROUP_SIZE)
+                .min(Self::MAX_GROUPS);
+            let constants = push(r.start, count, (groups * Self::GROUP_SIZE) as u32);
+            // SAFETY: `P` is plain data without padding, so all its bytes are
+            // initialized.
+            let bytes = unsafe {
+                std::slice::from_raw_parts((&raw const constants).cast::<u8>(), size_of::<P>())
+            };
+            // SAFETY: as above, and the layout was created on `d`.
+            unsafe {
+                d.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, bytes);
+                d.cmd_dispatch(cb, groups as u32, 1, 1);
+            }
+        }
+    }
+}
+
+impl Drop for Compute {
+    fn drop(&mut self) {
+        // SAFETY: both handles were created on `device` or are null, and the
+        // owner's target waited for idle before this drops (field order).
+        unsafe {
+            self.device.destroy_pipeline(self.pipeline, None);
+            self.device.destroy_pipeline_layout(self.layout, None);
         }
     }
 }

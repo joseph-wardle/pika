@@ -40,8 +40,28 @@ typedef struct pika_subset {
     size_t face_count;
 } pika_subset;
 
+// A subdivision surface refined by the delegate's OpenSubdiv: the refined
+// faces, untriangulated, with those refined from holes, and per refined point
+// a stencil, the weighted sum of cage points it is. Stencil i is entries
+// stencil_offsets[i] to stencil_offsets[i + 1] of the indices and weights.
+typedef struct pika_refined {
+    const int32_t *face_vertex_counts;
+    size_t face_count;
+    const int32_t *face_vertex_indices;
+    size_t index_count;
+    const int32_t *holes;
+    size_t hole_count;
+    // point_count + 1 offsets.
+    const uint32_t *stencil_offsets;
+    size_t point_count;
+    const int32_t *stencil_indices;
+    const float *stencil_weights;
+    size_t entry_count;
+} pika_refined;
+
 // HdMeshTopology, untriangulated. `scheme` is USD's subdivision scheme
-// token: "catmullClark", "loop", "bilinear" or "none".
+// token: "catmullClark", "loop", "bilinear" or "none". `refined` is null
+// when the scheme is none or OpenSubdiv refused the mesh.
 typedef struct pika_topology {
     const char *scheme;
     const int32_t *face_vertex_counts;
@@ -53,6 +73,7 @@ typedef struct pika_topology {
     size_t hole_count;
     const pika_subset *subsets;
     size_t subset_count;
+    const pika_refined *refined;
 } pika_topology;
 
 // Hydra's per-instance transform primvars. Each pointer is null when the

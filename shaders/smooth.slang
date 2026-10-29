@@ -11,6 +11,8 @@ struct Push
     // left-handed meshes.
     uint2 *corners;
     float *normals;
+    // The points this dispatch writes.
+    uint first;
     uint count;
     // The threads dispatched.
     uint stride;
@@ -29,8 +31,9 @@ float3 load3(float *values, uint i)
 [numthreads(64, 1, 1)]
 void cs(uint3 thread : SV_DispatchThreadID)
 {
-    for (uint p = thread.x; p < push.count; p += push.stride)
+    for (uint i = thread.x; i < push.count; i += push.stride)
     {
+        uint p = push.first + i;
         float3 curr = load3(push.points, p);
         float3 n = float3(0);
         for (uint e = push.offsets[p]; e < push.offsets[p + 1]; e++)

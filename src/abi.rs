@@ -13,7 +13,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, Normals, Scheme, Subset, Topology,
+    InstancePrimvars, Instancing, Interpolation, Normals, Refined, Scheme, Subset, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -45,6 +45,23 @@ pub struct CTopology {
     hole_count: usize,
     subsets: *const CSubset,
     subset_count: usize,
+    refined: *const CRefined,
+}
+
+/// `pika_refined`.
+#[repr(C)]
+pub struct CRefined {
+    face_vertex_counts: *const i32,
+    face_count: usize,
+    face_vertex_indices: *const i32,
+    index_count: usize,
+    holes: *const i32,
+    hole_count: usize,
+    stencil_offsets: *const u32,
+    point_count: usize,
+    stencil_indices: *const i32,
+    stencil_weights: *const f32,
+    entry_count: usize,
 }
 
 /// `pika_instance_primvars`.
@@ -303,6 +320,17 @@ pub unsafe extern "C" fn pika_mesh_topology(
             // SAFETY: as above.
             holes: unsafe { slice(t.holes, t.hole_count) }.to_vec(),
             subsets,
+            // SAFETY: as above.
+            refined: unsafe { t.refined.as_ref() }.map(|r| Refined {
+                // SAFETY: as above.
+                face_vertex_counts: unsafe { slice(r.face_vertex_counts, r.face_count) }.to_vec(),
+                face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
+                    .to_vec(),
+                holes: unsafe { slice(r.holes, r.hole_count) }.to_vec(),
+                offsets: unsafe { slice(r.stencil_offsets, r.point_count + 1) }.to_vec(),
+                indices: unsafe { slice(r.stencil_indices, r.entry_count) }.to_vec(),
+                weights: unsafe { slice(r.stencil_weights, r.entry_count) }.to_vec(),
+            }),
         };
         lock(handle)?.store.set_topology(id, topology)
     })

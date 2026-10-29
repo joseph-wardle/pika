@@ -1,0 +1,21 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# OpenSubdiv refuses a Loop mesh with a quad, so its cage is drawn: there is
+# no refined surface, and the delegate warns instead of failing.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "quad"
+    {
+        uniform token subdivisionScheme = "loop"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    }
+}
