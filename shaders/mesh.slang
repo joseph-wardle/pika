@@ -1,6 +1,7 @@
 // The mesh pass: every mesh instance into the color, depth and normal AOVs.
-// Vertices are pulled from src/geometry.rs's buffers by address; only the
-// index buffer and the draw records are bound.
+// Vertices are pulled from src/geometry.rs's buffers by address, and each
+// instance through the view's visible list (shaders/cull.slang); only the
+// index buffer and the view's draw records are bound.
 
 struct Push
 {
@@ -16,6 +17,8 @@ struct Push
     uint2 *vertices;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
+    // The instances the cull pass kept, at each record's first instance.
+    uint *visible;
 };
 
 [[vk::push_constant]]
@@ -38,12 +41,12 @@ float3 load3(float *values, uint i)
 }
 
 // SV_VulkanVertexID and SV_VulkanInstanceID include the draw's vertex offset
-// and first instance, which select the mesh's vertices and its instance.
+// and first instance, which select the mesh's vertices and its visible slot.
 [shader("vertex")]
-Varyings vs(uint vertex : SV_VulkanVertexID, uint instance : SV_VulkanInstanceID)
+Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     uint2 v = push.vertices[vertex];
-    float4 *m = push.instances + 7 * instance;
+    float4 *m = push.instances + 7 * push.visible[slot];
     float4 p = float4(load3(push.points, v.x), 1);
     float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
     float3 n = v.y == SMOOTH ? load3(push.smooth, v.x) : load3(push.normals, v.y);

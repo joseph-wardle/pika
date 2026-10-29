@@ -398,7 +398,8 @@ pub fn allocate(
 }
 
 /// A buffer and the memory only it uses. Device-local buffers have a device
-/// address, through which shaders read them; host buffers stay mapped.
+/// address, through which shaders read them; host buffers stay mapped, and
+/// have one when their usage asks for it.
 /// Every handle starts null, so a failed `new` can drop a partly built value.
 pub struct Buffer {
     // A copy of the owner's device table. Every owner keeps the `Device`
@@ -407,7 +408,7 @@ pub struct Buffer {
     pub raw: vk::Buffer,
     memory: vk::DeviceMemory,
     pub size: u64,
-    /// 0 for a host buffer.
+    /// 0 for a host buffer without SHADER_DEVICE_ADDRESS usage.
     pub address: vk::DeviceAddress,
     mapped: *mut u8,
 }
@@ -453,10 +454,20 @@ impl Buffer {
         let mut b = Self::create(device, size, usage)?;
         // SAFETY: `b.raw` was created on `device.raw`, which is live.
         let needs = unsafe { device.raw.get_buffer_memory_requirements(b.raw) };
-        b.memory = allocate(device, needs, flags, vk::MemoryAllocateFlags::empty())?;
+        let addressed = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let allocate_flags = match addressed {
+            true => vk::MemoryAllocateFlags::DEVICE_ADDRESS,
+            false => vk::MemoryAllocateFlags::empty(),
+        };
+        b.memory = allocate(device, needs, flags, allocate_flags)?;
         // SAFETY: as above, and the memory was just allocated for this buffer.
         unsafe { device.raw.bind_buffer_memory(b.raw, b.memory, 0) }
             .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
+        if addressed {
+            let info = vk::BufferDeviceAddressInfo::default().buffer(b.raw);
+            // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS and is bound.
+            b.address = unsafe { device.raw.get_buffer_device_address(&info) };
+        }
         // Freeing the memory in `drop` also unmaps it.
         // SAFETY: the memory is host visible and not yet mapped.
         let mapped = unsafe {

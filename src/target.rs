@@ -12,9 +12,9 @@ use crate::gpu::{self, Buffer};
 /// beyond, so the depth buffer is cleared to 0.
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// The frame's timestamps: at `begin`, at `begin_rendering`, after
-/// rendering ends and after the readback copies.
-const TIMESTAMPS: u32 = 4;
+/// The frame's timestamps: at `begin`, at `begin_cull`, at
+/// `begin_rendering`, after rendering ends and after the readback copies.
+const TIMESTAMPS: u32 = 5;
 
 /// A color image and the buffer it is read back into.
 struct Attachment {
@@ -43,6 +43,8 @@ pub struct Target {
     commands: vk::CommandBuffer,
     fence: vk::Fence,
     timestamps: vk::QueryPool,
+    /// `begin_cull` was called this frame.
+    culling: bool,
     timestamp_bits: u32,
     timestamp_period: f32,
 }
@@ -51,9 +53,10 @@ pub struct Target {
 pub struct Times {
     /// From the submit until the fence signalled.
     pub wait: Duration,
-    /// On the GPU: the work recorded between `begin` and `begin_rendering`,
-    /// rendering, and the readback copies.
+    /// On the GPU: the work recorded between `begin` and `begin_cull`, then
+    /// until `begin_rendering`, rendering, and the readback copies.
     pub update: Duration,
+    pub cull: Duration,
     pub draw: Duration,
     pub readback: Duration,
 }
@@ -81,6 +84,7 @@ impl Target {
             commands: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
             timestamps: vk::QueryPool::null(),
+            culling: false,
             timestamp_bits: device.timestamp_bits,
             timestamp_period: device.timestamp_period,
         };
@@ -169,7 +173,12 @@ impl Target {
     /// its value in `clears`, the depth buffer to the far plane. Record draws,
     /// then call `finish`.
     pub fn begin_rendering(&mut self, clears: &[vk::ClearColorValue]) {
-        self.timestamp(1);
+        // A query never written would stall `finish` forever.
+        if !self.culling {
+            self.timestamp(1);
+        }
+        self.culling = false;
+        self.timestamp(2);
         let d = &self.device;
         let cb = self.commands;
         let mut barriers: Vec<_> = (self.colors.iter())
@@ -240,7 +249,7 @@ impl Target {
         // SAFETY: `cb` is recording inside the rendering `begin_rendering`
         // started.
         unsafe { self.device.cmd_end_rendering(self.commands) };
-        self.timestamp(2);
+        self.timestamp(3);
         let d = &self.device;
         let cb = self.commands;
         let read: Vec<&Attachment> = (self.colors.iter().zip(read))
@@ -306,7 +315,7 @@ impl Target {
                 cb,
                 vk::PipelineStageFlags2::ALL_COMMANDS,
                 self.timestamps,
-                3,
+                4,
             );
             d.cmd_pipeline_barrier2(
                 cb,
@@ -344,10 +353,19 @@ impl Target {
             Ok(Times {
                 wait,
                 update: between(0),
-                draw: between(1),
-                readback: between(2),
+                cull: between(1),
+                draw: between(2),
+                readback: between(3),
             })
         }
+    }
+
+    /// Marks the end of the uploads and the start of the views' culling,
+    /// after `begin` and before `begin_rendering`. A frame without it has
+    /// no cull time.
+    pub fn begin_cull(&mut self) {
+        self.timestamp(1);
+        self.culling = true;
     }
 
     /// Records timestamp `index`, written once all earlier commands finish.

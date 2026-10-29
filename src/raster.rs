@@ -1,8 +1,10 @@
-//! The mesh pass: one pipeline per color format, drawing every mesh instance
-//! with a single multi-draw into the color, depth and normal AOVs.
+//! The mesh pass: one pipeline per color format, drawing the mesh instances
+//! the cull pass kept with a single multi-draw into the color, depth and
+//! normal AOVs.
 
 use ash::vk;
 
+use crate::cull::View;
 use crate::geometry::Bound;
 use crate::gpu;
 use crate::target;
@@ -36,6 +38,7 @@ struct Push {
     smooth: vk::DeviceAddress,
     vertices: vk::DeviceAddress,
     instances: vk::DeviceAddress,
+    visible: vk::DeviceAddress,
 }
 
 impl Raster {
@@ -68,8 +71,9 @@ impl Raster {
         Ok(r)
     }
 
-    /// Records the draws into `cb`, inside rendering into a target of
-    /// `color` (one of `COLOR_FORMATS`), `DEPTH_AOV` and `NORMAL_AOV`.
+    /// Records the draws of `view`, culled from `camera`, into `cb`, inside
+    /// rendering into a target of `color` (one of `COLOR_FORMATS`),
+    /// `DEPTH_AOV` and `NORMAL_AOV`.
     pub fn draw(
         &self,
         cb: vk::CommandBuffer,
@@ -77,6 +81,7 @@ impl Raster {
         area: vk::Rect2D,
         camera: Camera,
         geometry: &Bound,
+        view: &View,
     ) {
         if geometry.count == 0 {
             return;
@@ -90,6 +95,7 @@ impl Raster {
             smooth: geometry.smooth,
             vertices: geometry.vertices,
             instances: geometry.instances,
+            visible: view.visible(),
         };
         // SAFETY: `Push` is plain `repr(C)` data without padding.
         let push = unsafe {
@@ -116,7 +122,7 @@ impl Raster {
             d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
             d.cmd_draw_indexed_indirect(
                 cb,
-                geometry.records,
+                view.records(),
                 0,
                 geometry.count,
                 size_of::<vk::DrawIndexedIndirectCommand>() as u32,
