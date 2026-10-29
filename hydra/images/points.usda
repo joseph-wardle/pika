@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    doc = "A moved and rotated point instancer of two prototypes, a pyramid and a transformed quad, with orientations, scales (one mirroring), positions that change at frame 2 and an instance hidden at frame 2. The orientations are exact in half floats."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def PointInstancer "scatter"
+{
+    double3 xformOp:translate = (0.1, 0, -5)
+    float xformOp:rotateZ = 10
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateZ"]
+    rel prototypes = [</scatter/protos/pyramid>, </scatter/protos/card>]
+    int[] protoIndices = [0, 1, 0, 1, 0]
+    point3f[] positions.timeSamples = {
+        1: [(-1.2, 0.35, 0), (-0.4, 0.4, 0), (0.4, 0.35, 0), (1.2, 0.4, -0.5), (0, -0.45, 0)],
+        2: [(-1.1, 0.3, 0.5), (-0.4, 0.4, 0), (0.5, 0.35, 0), (1.2, 0.4, -0.5), (0.3, -0.4, 0)],
+    }
+    quath[] orientations = [(1, 0, 0, 0), (0, 0, 1, 0), (0.5, 0.5, 0.5, 0.5), (1, 0, 0, 0), (0.5, -0.5, 0.5, 0.5)]
+    float3[] scales = [(1, 1, 1), (-1, 1, 1), (1, 1.5, 0.8), (1, 1.5, 1), (1.2, 1.2, 1.2)]
+    int64[] invisibleIds.timeSamples = {
+        1: [],
+        2: [3],
+    }
+
+    def Scope "protos"
+    {
+        def Mesh "pyramid"
+        {
+            uniform token subdivisionScheme = "none"
+            int[] faceVertexCounts = [4, 3, 3, 3, 3]
+            int[] faceVertexIndices = [0, 3, 2, 1, 0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4]
+            point3f[] points = [(-0.3, -0.3, 0), (0.3, -0.3, 0), (0.3, 0.3, 0), (-0.3, 0.3, 0), (0, 0, 0.35)]
+            normal3f[] normals = [(0, 0, -1), (0, -7, 6), (7, 0, 6), (0, 7, 6), (-7, 0, 6)] (
+                interpolation = "uniform"
+            )
+        }
+
+        # Turned on the root, and moved again on the mesh.
+        def Xform "card"
+        {
+            float xformOp:rotateZ = 30
+            uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+
+            def Mesh "quad"
+            {
+                uniform token subdivisionScheme = "none"
+                double3 xformOp:translate = (0.05, 0, 0)
+                uniform token[] xformOpOrder = ["xformOp:translate"]
+                int[] faceVertexCounts = [4]
+                int[] faceVertexIndices = [0, 1, 2, 3]
+                point3f[] points = [(-0.3, -0.2, 0), (0.3, -0.2, 0), (0.3, 0.2, 0), (-0.3, 0.2, 0)]
+                normal3f[] normals = [(-0.3, -0.3, 1), (0.3, -0.3, 1), (0.3, 0.3, 1), (-0.3, 0.3, 1)] (
+                    interpolation = "vertex"
+                )
+            }
+        }
+    }
+}

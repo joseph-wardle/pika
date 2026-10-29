@@ -5,15 +5,16 @@
 //! The layout (the vertex table, the triangle indices and every mesh's
 //! ranges) is rebuilt only when a mesh is added, removed or remodelled. A
 //! playing frame writes only the points and normals that moved, and rewrites
-//! the instances and draw records when a transform or visibility changes.
+//! the instances and draw records when a transform, visibility or instancer
+//! changes. Each mesh is one draw record, of all its instances.
 
 use std::collections::{BTreeMap, HashMap};
 
 use ash::vk;
 
 use crate::gpu::{self, Buffer};
-use crate::store::{Interpolation, Mesh, Moved, Store};
-use crate::transform::Instance;
+use crate::store::{Instancer, Interpolation, Mesh, Moved, Store};
+use crate::transform::{Instance, instance_transforms, multiply};
 
 /// A vertex's normal index when the mesh has no normals. Normals are not
 /// computed yet, so it shades black.
@@ -396,14 +397,17 @@ fn triangulate(
     Ok(())
 }
 
-/// One instance and draw record per visible mesh. Instanced meshes are left
-/// out until instancing is drawn.
+/// One draw record per visible mesh, drawing it at each of its instances.
+/// A mesh whose instancers do not fit together is left out, with a warning.
 fn draws(store: &Store, layout: &Layout) -> (Vec<Instance>, Vec<vk::DrawIndexedIndirectCommand>) {
+    let instancers: HashMap<&str, &Instancer> = (store.instancers().values())
+        .map(|i| (i.path.as_str(), i))
+        .collect();
     let mut instances = Vec::new();
     let mut records = Vec::new();
     for (&id, range) in &layout.ranges {
         let mesh = &store.meshes()[&id];
-        let (Some(true), Some(None), Some(transform), Some(topology)) = (
+        let (Some(true), Some(instancing), Some(transform), Some(topology)) = (
             mesh.visible,
             &mesh.instancing,
             &mesh.transform,
@@ -411,20 +415,36 @@ fn draws(store: &Store, layout: &Layout) -> (Vec<Instance>, Vec<vk::DrawIndexedI
         ) else {
             continue;
         };
-        let Some(instance) = Instance::new(transform, topology.left_handed) else {
-            continue;
-        };
         if range.index_count == 0 {
+            continue;
+        }
+        let matrices = match instancing {
+            None => vec![*transform],
+            Some(i) => match instance_transforms(&instancers, i) {
+                Ok(m) => m.iter().map(|m| multiply(transform, m)).collect(),
+                Err(e) => {
+                    eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
+                    continue;
+                }
+            },
+        };
+        let first = instances.len();
+        let left_handed = topology.left_handed;
+        instances.extend(
+            matrices
+                .iter()
+                .filter_map(|m| Instance::new(m, left_handed)),
+        );
+        if instances.len() == first {
             continue;
         }
         records.push(vk::DrawIndexedIndirectCommand {
             index_count: range.index_count,
-            instance_count: 1,
+            instance_count: (instances.len() - first) as u32,
             first_index: range.first_index,
             vertex_offset: range.first_vertex,
-            first_instance: instances.len() as u32,
+            first_instance: first as u32,
         });
-        instances.push(instance);
     }
     (instances, records)
 }

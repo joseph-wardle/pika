@@ -1,0 +1,96 @@
+#usda 1.0
+(
+    doc = "Four native instances of a quad and a triangle: one rotated, one mirrored, one hidden at frame 2 and one moving at frame 2, all under a rotated parent."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+class Xform "_tile"
+{
+    def Mesh "quad"
+    {
+        uniform token subdivisionScheme = "none"
+        double3 xformOp:translate = (0, 0.15, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-0.35, -0.2, 0), (0.35, -0.2, 0), (0.35, 0.2, 0), (-0.35, 0.2, 0)]
+        normal3f[] normals = [(0.3, 0.2, 1)] (
+            interpolation = "uniform"
+        )
+    }
+
+    def Mesh "tri"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(-0.35, -0.45, 0), (0.35, -0.45, 0), (-0.1, -0.1, 0)]
+        normal3f[] normals = [(-0.4, 0, 1), (0.4, 0, 1), (0, 0.5, 1)] (
+            interpolation = "faceVarying"
+        )
+    }
+}
+
+def Xform "tiles"
+{
+    float xformOp:rotateZ = 5
+    uniform token[] xformOpOrder = ["xformOp:rotateZ"]
+
+    def Xform "a" (
+        instanceable = true
+        references = </_tile>
+    )
+    {
+        double3 xformOp:translate = (-1.1, 0.4, -5)
+        float xformOp:rotateY = 25
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateY"]
+    }
+
+    def Xform "b" (
+        instanceable = true
+        references = </_tile>
+    )
+    {
+        token visibility.timeSamples = {
+            1: "inherited",
+            2: "invisible",
+        }
+        double3 xformOp:translate = (0, 0.4, -5)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    # The mirror reverses its winding: the camera still sees its front.
+    def Xform "c" (
+        instanceable = true
+        references = </_tile>
+    )
+    {
+        double3 xformOp:translate = (1.1, 0.4, -5)
+        float3 xformOp:scale = (-1, 1, 1)
+        uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+    }
+
+    def Xform "d" (
+        instanceable = true
+        references = </_tile>
+    )
+    {
+        double3 xformOp:translate.timeSamples = {
+            1: (-0.5, -0.5, -5),
+            2: (0.4, -0.45, -4.5),
+        }
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+}

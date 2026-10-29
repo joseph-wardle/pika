@@ -5,6 +5,10 @@
 //! matrix it reads is the transpose, sent as rows of f32. The conversions are
 //! done in f64, so the f32 rounding happens once.
 
+use std::collections::HashMap;
+
+use crate::store::{Instancer, Instancing};
+
 /// One mesh instance: its world matrix and normal matrix, and whether its
 /// winding is reversed. Laid out as the shader's 7 `float4`s per instance.
 #[repr(C)]
@@ -85,6 +89,110 @@ impl Camera {
     }
 }
 
+/// The transforms a prototype is drawn at in `instancing`, as Hydra composes
+/// them: at each level of instancers, each instance's primvars, then the
+/// instancer's transform; the next level out repeats all of those once per
+/// instance of its own. The prototype's own transform goes first, before
+/// these. Fails when an instancer is missing, unsynced, nested in itself or
+/// short of an index.
+pub fn instance_transforms(
+    instancers: &HashMap<&str, &Instancer>,
+    instancing: &Instancing,
+) -> Result<Vec<[f64; 16]>, String> {
+    let mut matrices = vec![IDENTITY];
+    let mut at = instancing;
+    for _ in 0..=instancers.len() {
+        let instancer = instancers
+            .get(at.instancer.as_str())
+            .ok_or_else(|| format!("no instancer {} in the store", at.instancer))?;
+        let level = level(instancer, &at.indices)?;
+        // Outer instances first, as Hydra orders them.
+        matrices = (level.iter())
+            .flat_map(|outer| matrices.iter().map(|inner| multiply(inner, outer)))
+            .collect();
+        let Some(Some(parent)) = &instancer.parent else {
+            return Ok(matrices);
+        };
+        at = parent;
+    }
+    Err(format!("instancer {} is nested in itself", at.instancer))
+}
+
+/// One instancer's transform at each of `indices`, without its parents'.
+fn level(instancer: &Instancer, indices: &[i32]) -> Result<Vec<[f64; 16]>, String> {
+    let (Some(transform), Some(primvars)) = (&instancer.transform, &instancer.primvars) else {
+        return Err(format!("instancer {} is not synced", instancer.path));
+    };
+    let get = |name: &str, count: usize, index: i32| {
+        usize::try_from(index)
+            .ok()
+            .filter(|&i| i < count)
+            .ok_or_else(|| {
+                let path = &instancer.path;
+                format!("instance index {index} is not one of {path}'s {count} {name}")
+            })
+    };
+    let p = primvars;
+    indices
+        .iter()
+        .map(|&index| {
+            // Row vectors: the leftmost matrix applies first.
+            let mut m = IDENTITY;
+            if let Some(t) = &p.transforms {
+                m = t[get("transforms", t.len(), index)?];
+            }
+            if let Some(s) = &p.scales {
+                let [x, y, z] = s[get("scales", s.len(), index)?].map(f64::from);
+                m = multiply(
+                    &m,
+                    &[x, 0., 0., 0., 0., y, 0., 0., 0., 0., z, 0., 0., 0., 0., 1.],
+                );
+            }
+            if let Some(r) = &p.rotations {
+                m = multiply(&m, &rotate(r[get("rotations", r.len(), index)?]));
+            }
+            if let Some(t) = &p.translations {
+                let [x, y, z] = t[get("translations", t.len(), index)?].map(f64::from);
+                m = multiply(
+                    &m,
+                    &[1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.],
+                );
+            }
+            Ok(multiply(&m, transform))
+        })
+        .collect()
+}
+
+/// The row-vector rotation of a `GfQuatf` (i, j, k, real), as Gf builds it.
+/// USD's point instancer authors half-float quaternions, which are not
+/// quite unit length; dividing by the squared length keeps them rigid.
+fn rotate(q: [f32; 4]) -> [f64; 16] {
+    let [i, j, k, r] = q.map(f64::from);
+    let s = 2.0 / (i * i + j * j + k * k + r * r);
+    [
+        1.0 - s * (j * j + k * k),
+        s * (i * j + k * r),
+        s * (k * i - j * r),
+        0.0,
+        s * (i * j - k * r),
+        1.0 - s * (k * k + i * i),
+        s * (j * k + i * r),
+        0.0,
+        s * (k * i + j * r),
+        s * (j * k - i * r),
+        1.0 - s * (j * j + i * i),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ]
+}
+
+const IDENTITY: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
 /// Column `j` of a row-major 4×4 matrix: row `j` of its transpose.
 fn column(m: &[f64; 16], j: usize) -> [f64; 4] {
     [m[j], m[4 + j], m[8 + j], m[12 + j]]
@@ -95,7 +203,8 @@ fn linear(m: &[f64; 16]) -> [[f64; 3]; 3] {
     std::array::from_fn(|r| std::array::from_fn(|c| m[r * 4 + c]))
 }
 
-fn multiply(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
+/// The row-major product `a b`: `a` applies first to a row vector.
+pub fn multiply(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
     std::array::from_fn(|i| (0..4).map(|k| a[i / 4 * 4 + k] * b[k * 4 + i % 4]).sum())
 }
 
@@ -123,6 +232,7 @@ fn inverse3(m: &[[f64; 3]; 3], det: f64) -> Option<[[f64; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::InstancePrimvars;
 
     fn dot(a: [f32; 4], b: [f64; 4]) -> f64 {
         (0..4).map(|i| a[i] as f64 * b[i]).sum()
@@ -222,6 +332,92 @@ mod tests {
         // The control: transforming the normal like a point breaks that.
         let wrong: [f64; 3] = std::array::from_fn(|r| dot(i.world[r], [1.0, 1.0, 0.0, 0.0]));
         assert!((0..3).map(|k| wrong[k] * t[k]).sum::<f64>().abs() > 0.1);
+    }
+
+    fn moved(m: &[f64; 16], p: [f64; 3]) -> [f64; 3] {
+        std::array::from_fn(|c| (0..3).map(|k| p[k] * m[k * 4 + c]).sum::<f64>() + m[12 + c])
+    }
+
+    /// An inner instancer with every primvar, nested in an outer one with
+    /// two translated instances.
+    fn nested() -> (Instancer, Instancer) {
+        let to = translate(10.0, 0.0, 0.0);
+        // A quarter turn about x.
+        let ti = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let outer = Instancer {
+            path: "/outer".into(),
+            parent: Some(None),
+            transform: Some(to),
+            primvars: Some(InstancePrimvars {
+                translations: Some(vec![[0.0; 3], [0.0, 100.0, 0.0]]),
+                ..Default::default()
+            }),
+        };
+        let inner = Instancer {
+            path: "/inner".into(),
+            parent: Some(Some(Instancing {
+                instancer: "/outer".into(),
+                indices: vec![0, 1],
+            })),
+            transform: Some(ti),
+            primvars: Some(InstancePrimvars {
+                transforms: Some(vec![translate(0.0, 0.0, 1.0)]),
+                translations: Some(vec![[4.0, 5.0, 6.0]]),
+                // Not unit length: (0.1, 0.5, -0.3, 0.8) / 0.99.
+                rotations: Some(vec![[0.1, 0.5, -0.3, 0.8]]),
+                scales: Some(vec![[1.0, 2.0, -3.0]]),
+            }),
+        };
+        (outer, inner)
+    }
+
+    #[test]
+    fn instances_compose_as_gf_does() {
+        let (outer, inner) = nested();
+        let instancers = HashMap::from([("/outer", &outer), ("/inner", &inner)]);
+        let at = Instancing {
+            instancer: "/inner".into(),
+            indices: vec![0],
+        };
+        let m = instance_transforms(&instancers, &at).unwrap();
+        // The point (1, 1, 1) as Gf moves it through M S R T Ti, then O To
+        // for each outer instance O.
+        let expected = [[11.0, -2.0, 9.0], [11.0, 98.0, 9.0]];
+        assert_eq!(m.len(), 2);
+        for (m, e) in m.iter().zip(expected) {
+            let p = moved(m, [1.0, 1.0, 1.0]);
+            assert!((0..3).all(|k| (p[k] - e[k]).abs() < 1e-5), "{p:?} {e:?}");
+        }
+        // Gf's rotation of x by the normalized quaternion.
+        let x = moved(&rotate([0.1, 0.5, -0.3, 0.8]), [1.0, 0.0, 0.0]);
+        let e = [31.0 / 99.0, -38.0 / 99.0, -86.0 / 99.0];
+        assert!((0..3).all(|k| (x[k] - e[k]).abs() < 1e-6), "{x:?}");
+        // The control: the real part read first, as (real, i, j, k).
+        let wrong = moved(&rotate([0.8, 0.1, 0.5, -0.3]), [1.0, 0.0, 0.0]);
+        assert!((0..3).any(|k| (wrong[k] - e[k]).abs() > 0.1));
+    }
+
+    #[test]
+    fn broken_instancers_are_refused() {
+        let (outer, mut inner) = nested();
+        let at = |instancer: &str, index| Instancing {
+            instancer: instancer.into(),
+            indices: vec![index],
+        };
+        let instancers = HashMap::from([("/outer", &outer), ("/inner", &inner)]);
+        let error = instance_transforms(&instancers, &at("/inner", 1)).unwrap_err();
+        assert!(
+            error.contains("index 1 is not one of /inner's 1 transforms"),
+            "{error}"
+        );
+        let error = instance_transforms(&instancers, &at("/lost", 0)).unwrap_err();
+        assert!(error.contains("no instancer /lost"), "{error}");
+        inner.parent = Some(Some(at("/inner", 0)));
+        let instancers = HashMap::from([("/inner", &inner)]);
+        let error = instance_transforms(&instancers, &at("/inner", 0)).unwrap_err();
+        assert!(error.contains("nested in itself"), "{error}");
     }
 
     #[test]

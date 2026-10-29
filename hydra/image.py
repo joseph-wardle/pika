@@ -14,6 +14,9 @@ What the reference encodes:
   image's aspect (Fit, which is expandAperture). Pixel rows go down, as in
   the EXR. No host hands Pika an off-centre data window (see plugin.cpp),
   so every pixel is rendered.
+- Meshes are drawn once per instance: native instances through their
+  instance proxies, point instancers' prototypes at USD's instance
+  transforms, without the instances its mask (invisibleIds) hides.
 - Faces split into fans around their first vertex, as Hydra splits them.
 - Depth is OpenGL's window depth, (z_ndc + 1) / 2, of the hit point.
 - The normal is the authored normal, interpolated, moved by the inverse
@@ -47,19 +50,74 @@ FRAMES = (1, 2)
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
-            "unflipped normals", "flat normals", "frame 1's reference"]
+            "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
+            "orientations misread", "frame 1's reference"]
 
 
-def triangles(stage, time):
-    """Every visible mesh's fan triangles, in world space: for each, the
-    world points, the object normals at its corners, the normal matrix,
+def meshes(stage, time, control=None):
+    """Every mesh drawn, once per instance it is drawn at: its prim and
+    world matrix. Native instances are walked through their instance
+    proxies; a point instancer's prototypes are drawn only at its instances,
+    by USD's ComputeInstanceTransformsAtTime, which includes each prototype
+    root's own transform."""
+    out = []
+    walked = set()
+
+    def walk(prim, parent, local=None):
+        imageable = UsdGeom.Imageable(prim)
+        if imageable and imageable.GetVisibilityAttr().Get(time) == UsdGeom.Tokens.invisible:
+            return
+        if local is None:
+            xformable = UsdGeom.Xformable(prim)
+            local = xformable.GetLocalTransformation(time) if xformable else Gf.Matrix4d(1)
+        if control == "outer instances dropped" and prim.IsInstance():
+            # Each prototype once, in its own space.
+            if prim.GetPrototype() in walked:
+                return
+            walked.add(prim.GetPrototype())
+            local = parent = Gf.Matrix4d(1)
+        world = local * parent
+        if prim.IsA(UsdGeom.PointInstancer):
+            instancer = UsdGeom.PointInstancer(prim)
+            prototypes = instancer.GetPrototypesRel().GetTargets()
+            indices = instancer.GetProtoIndicesAttr().Get(time)
+            transforms = instancer.ComputeInstanceTransformsAtTime(
+                time, time, UsdGeom.PointInstancer.IncludeProtoXform, UsdGeom.PointInstancer.IgnoreMask)
+            mask = instancer.ComputeMaskAtTime(time)
+            if control == "instancer transform dropped":
+                world = parent
+            for i, transform in enumerate(transforms):
+                if not mask or mask[i]:
+                    walk(stage.GetPrimAtPath(prototypes[indices[i]]), world, transform)
+            return
+        if prim.IsA(UsdGeom.Mesh):
+            out.append((prim, world))
+        for child in prim.GetFilteredChildren(Usd.TraverseInstanceProxies()):
+            walk(child, world)
+
+    walk(stage.GetPseudoRoot(), Gf.Matrix4d(1))
+    return out
+
+
+def misread_orientations(stage, time):
+    """Authors, in the session layer, each point instancer's orientations
+    as they would read if GfQuatf's (i, j, k, real) were taken for
+    (real, i, j, k)."""
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for prim in stage.TraverseAll():
+            attr = UsdGeom.PointInstancer(prim).GetOrientationsAttr() if prim.IsA(UsdGeom.PointInstancer) else None
+            if attr and attr.HasAuthoredValue():
+                attr.Set([Gf.Quath(q.GetImaginary()[0], Gf.Vec3h(q.GetImaginary()[1], q.GetImaginary()[2],
+                                                                 q.GetReal())) for q in attr.Get(time)])
+
+
+def triangles(stage, time, control=None):
+    """Every drawn mesh instance's fan triangles, in world space: for each,
+    the world points, the object normals at its corners, the normal matrix,
     whether it is left-handed, and a face id."""
     out = []
-    for prim in stage.Traverse():
+    for instance, (prim, world) in enumerate(meshes(stage, time, control)):
         mesh = UsdGeom.Mesh(prim)
-        if not mesh or mesh.ComputeVisibility(time) != UsdGeom.Tokens.inherited:
-            continue
-        world = mesh.ComputeLocalToWorldTransform(time)
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
         points = mesh.GetPointsAttr().Get(time)
@@ -85,7 +143,7 @@ def triangles(stage, time):
                     "normals": [normal(c) for c in cs],
                     "normal_matrix": normal_matrix,
                     "left": left,
-                    "face": (str(prim.GetPath()), face),
+                    "face": (str(prim.GetPath()), instance, face),
                 })
             corner += count
     return out
@@ -107,7 +165,10 @@ def reference(stage, time, width, height, control=None):
     f = frustum(stage, time, width, height, focal, policy)
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     eye = f.position
-    tris = triangles(stage, time)
+    if control == "orientations misread":
+        misread_orientations(stage, time)
+    tris = triangles(stage, time, control)
+    stage.GetSessionLayer().Clear()
     shift = 0.5 if control == "half a pixel right" else 0.0
 
     image = {

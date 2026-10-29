@@ -221,6 +221,10 @@ impl Store {
         &self.meshes
     }
 
+    pub fn instancers(&self) -> &BTreeMap<u64, Instancer> {
+        &self.instancers
+    }
+
     /// What changed since the last call.
     pub fn take_moved(&mut self) -> Moved {
         std::mem::take(&mut self.moved)
