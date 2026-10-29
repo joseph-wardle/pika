@@ -18,7 +18,7 @@ mesh /world/final
     0 0 1 0
     0 0 0 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3
@@ -37,7 +37,7 @@ mesh /world/draft
     0 0 1 0
     0 0 0 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3
@@ -55,7 +55,7 @@ mesh /world/final
     0 0 1 0
     0 0 0 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3

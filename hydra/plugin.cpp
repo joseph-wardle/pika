@@ -2,14 +2,15 @@
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
 // Meshes and instancers are synced into Pika's store, basis curves are
-// fetched and measured, and other prims are counted. The color AOV receives
-// Pika's cleared frame.
+// fetched and measured, and other prims are counted. Pika draws the meshes
+// into the color, depth and normal AOVs.
 
 #include "buffer.h"
 #include "pika.h"
 #include "prims.h"
 #include "report.h"
 
+#include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
 #include <pxr/imaging/hd/renderDelegate.h>
@@ -21,12 +22,24 @@
 #include <pxr/imaging/hd/resourceRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
+
+// The pika_format of a render buffer, or false when Pika writes none.
+bool Format(HdFormat format, pika_format *out) {
+    switch (format) {
+    case HdFormatFloat16Vec4: *out = PIKA_FLOAT16_VEC4; return true;
+    case HdFormatFloat32Vec4: *out = PIKA_FLOAT32_VEC4; return true;
+    case HdFormatFloat32: *out = PIKA_FLOAT32; return true;
+    case HdFormatFloat32Vec3: *out = PIKA_FLOAT32_VEC3; return true;
+    default: return false;
+    }
+}
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -36,11 +49,24 @@ public:
 
 protected:
     void _Execute(HdRenderPassStateSharedPtr const &state,
-                  TfTokenVector const &) override {
+                  TfTokenVector const &renderTags) override {
         if (!_renderer)
             return;
+        if (!state->GetCamera()) {
+            fail("the render pass has no camera");
+            return;
+        }
+        pika_frame frame = {};
+        std::copy_n(state->GetWorldToViewMatrix().data(), 16, frame.world_to_view);
+        std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
+        GfVec4f clear(0.0f);
+        PikaRenderBuffer *first = nullptr;
         for (HdRenderPassAovBinding const &aov : state->GetAovBindings()) {
-            if (aov.aovName != HdAovTokens->color)
+            pika_aov *slot = aov.aovName == HdAovTokens->color    ? &frame.color
+                             : aov.aovName == HdAovTokens->depth  ? &frame.depth
+                             : aov.aovName == HdAovTokens->normal ? &frame.normal
+                                                                  : nullptr;
+            if (!slot)
                 continue;
             HdRenderBuffer *bound = aov.renderBuffer;
             if (!bound)
@@ -50,21 +76,62 @@ protected:
             auto *buffer = static_cast<PikaRenderBuffer *>(bound);
             if (!buffer)
                 continue;
-            pika_format format;
-            if (buffer->GetFormat() == HdFormatFloat16Vec4)
-                format = PIKA_FLOAT16_VEC4;
-            else if (buffer->GetFormat() == HdFormatFloat32Vec4)
-                format = PIKA_FLOAT32_VEC4;
-            else {
-                fail("the color AOV is " + TfEnum::GetName(buffer->GetFormat()) +
-                     "; Pika renders HdFormatFloat16Vec4 and HdFormatFloat32Vec4");
+            if (!Format(buffer->GetFormat(), &slot->format)) {
+                fail("the " + aov.aovName.GetString() + " AOV is " +
+                     TfEnum::GetName(buffer->GetFormat()) + ", which Pika does not write");
                 continue;
             }
-            std::vector<uint8_t> &pixels = buffer->Data();
-            report(pika_render(_renderer, format, buffer->GetWidth(),
-                               buffer->GetHeight(), pixels.data(), pixels.size()),
-                   "render");
+            if (first && (buffer->GetWidth() != first->GetWidth() ||
+                          buffer->GetHeight() != first->GetHeight())) {
+                fail("the " + aov.aovName.GetString() + " render buffer's size differs from " +
+                     "the other AOVs'");
+                continue;
+            }
+            first = buffer;
+            slot->pixels = buffer->Data().data();
+            slot->len = buffer->Data().size();
+            if (aov.aovName == HdAovTokens->color && aov.clearValue.IsHolding<GfVec4f>())
+                clear = aov.clearValue.UncheckedGet<GfVec4f>();
         }
+        if (!first)
+            return;
+        frame.width = first->GetWidth();
+        frame.height = first->GetHeight();
+        std::copy_n(clear.data(), 4, frame.clear_color);
+
+        CameraUtilFraming const &framing = state->GetFraming();
+        if (framing.IsValid()) {
+            GfRect2i const &window = framing.dataWindow;
+            frame.window[0] = window.GetMinX();
+            frame.window[1] = window.GetMinY();
+            frame.window[2] = window.GetWidth();
+            frame.window[3] = window.GetHeight();
+        } else {
+            // The deprecated viewport counts y up from the bottom row.
+            GfVec4f const &viewport = state->GetViewport();
+            // husk renders a dataWindowNDC by sizing the buffers to the data
+            // window, placing the viewport in the full image and conforming
+            // the projection to the window's own aspect. The full image's
+            // size is not in the render pass, so the window cannot be framed.
+            if (viewport[0] < 0 || viewport[1] < 0 || viewport[0] + viewport[2] > frame.width ||
+                viewport[1] + viewport[3] > frame.height) {
+                fail("the viewport lies outside the render buffers, as husk sets it for a "
+                     "dataWindowNDC, which Pika does not support yet");
+                return;
+            }
+            frame.window[0] = int(viewport[0]);
+            frame.window[1] = int(frame.height - viewport[1] - viewport[3]);
+            frame.window[2] = int(viewport[2]);
+            frame.window[3] = int(viewport[3]);
+        }
+        // Hydra syncs only the prims of the tags its passes draw, but a prim
+        // retagged out of them keeps its last data in the store.
+        std::vector<const char *> tags;
+        for (TfToken const &tag : renderTags)
+            tags.push_back(tag.GetText());
+        frame.render_tags = tags.data();
+        frame.render_tag_count = tags.size();
+        report(pika_render(_renderer, &frame), "render");
     }
 
 private:
@@ -123,6 +190,11 @@ public:
         if (name == HdAovTokens->color)
             return HdAovDescriptor(HdFormatFloat16Vec4, false,
                                    VtValue(GfVec4f(0.0f)));
+        if (name == HdAovTokens->depth)
+            return HdAovDescriptor(HdFormatFloat32, false, VtValue(1.0f));
+        if (name == HdAovTokens->normal)
+            return HdAovDescriptor(HdFormatFloat32Vec3, false,
+                                   VtValue(GfVec3f(0.0f)));
         return HdAovDescriptor();
     }
 

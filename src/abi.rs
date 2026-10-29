@@ -11,8 +11,10 @@ use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::renderer::{Format, Renderer};
-use crate::store::{InstancePrimvars, Instancing, Interpolation, Normals, Subset, Topology};
+use crate::renderer::{Aov, Format, Frame, Renderer};
+use crate::store::{
+    InstancePrimvars, Instancing, Interpolation, Normals, Scheme, Subset, Topology,
+};
 
 pub const OK: i32 = 0;
 pub const ERROR: i32 = 1;
@@ -33,11 +35,14 @@ pub struct CSubset {
 /// `pika_topology`.
 #[repr(C)]
 pub struct CTopology {
+    scheme: *const c_char,
     face_vertex_counts: *const i32,
     face_count: usize,
     face_vertex_indices: *const i32,
     index_count: usize,
     left_handed: bool,
+    holes: *const i32,
+    hole_count: usize,
     subsets: *const CSubset,
     subset_count: usize,
 }
@@ -53,6 +58,30 @@ pub struct CInstancePrimvars {
     rotation_count: usize,
     scales: *const [f32; 3],
     scale_count: usize,
+}
+
+/// `pika_aov`.
+#[repr(C)]
+pub struct CAov {
+    format: u32,
+    pixels: *mut u8,
+    len: usize,
+}
+
+/// `pika_frame`.
+#[repr(C)]
+pub struct CFrame {
+    world_to_view: [f64; 16],
+    projection: [f64; 16],
+    width: u32,
+    height: u32,
+    window: [i32; 4],
+    clear_color: [f32; 4],
+    color: CAov,
+    depth: CAov,
+    normal: CAov,
+    render_tags: *const *const c_char,
+    render_tag_count: usize,
 }
 
 thread_local! {
@@ -171,25 +200,46 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
     })
 }
 
-/// Renders a `width` × `height` frame into `pixels`, a render buffer of
-/// `format` (a `pika_format`) and `len` bytes.
+/// Renders one frame into the render buffers it binds.
 ///
 /// # Safety
-/// `renderer` must be live, and `pixels` valid for `len` byte writes for the
-/// duration of the call.
+/// `renderer` must be live, `frame` valid for reads, and each bound AOV's
+/// `pixels` valid for `len` byte writes for the duration of the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pika_render(
-    renderer: *const Handle,
-    format: u32,
-    width: u32,
-    height: u32,
-    pixels: *mut u8,
-    len: usize,
-) -> i32 {
+pub unsafe extern "C" fn pika_render(renderer: *const Handle, frame: *const CFrame) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees both pointers for this call.
-        let (handle, pixels) = unsafe { (&*renderer, std::slice::from_raw_parts_mut(pixels, len)) };
-        lock(handle)?.render(Format::from_abi(format)?, width, height, pixels)
+        // SAFETY: the caller guarantees the renderer and the frame.
+        let (handle, f) = unsafe { (&*renderer, &*frame) };
+        let aov = |a: &CAov| -> Result<Option<Aov>, String> {
+            if a.pixels.is_null() {
+                return Ok(None);
+            }
+            Ok(Some(Aov {
+                format: Format::from_abi(a.format)?,
+                // SAFETY: the caller guarantees `len` writable bytes.
+                pixels: unsafe { std::slice::from_raw_parts_mut(a.pixels, a.len) },
+            }))
+        };
+        let window = f.window.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        // SAFETY: the caller guarantees the frame's arrays and strings.
+        let render_tags = unsafe { slice(f.render_tags, f.render_tag_count) }
+            .iter()
+            // SAFETY: as above.
+            .map(|&t| unsafe { string(t) })
+            .collect::<Result<_, _>>()?;
+        let frame = Frame {
+            world_to_view: f.world_to_view,
+            projection: f.projection,
+            width: f.width,
+            height: f.height,
+            window,
+            clear_color: f.clear_color,
+            color: aov(&f.color)?,
+            depth: aov(&f.depth)?,
+            normal: aov(&f.normal)?,
+            render_tags,
+        };
+        lock(handle)?.render(frame)
     })
 }
 
@@ -245,9 +295,13 @@ pub unsafe extern "C" fn pika_mesh_topology(
         }
         let topology = Topology {
             // SAFETY: as above.
+            scheme: Scheme::from_token(&unsafe { string(t.scheme)? })?,
+            // SAFETY: as above.
             face_vertex_counts: unsafe { slice(t.face_vertex_counts, t.face_count) }.to_vec(),
             face_vertex_indices: unsafe { slice(t.face_vertex_indices, t.index_count) }.to_vec(),
             left_handed: t.left_handed,
+            // SAFETY: as above.
+            holes: unsafe { slice(t.holes, t.hole_count) }.to_vec(),
             subsets,
         };
         lock(handle)?.store.set_topology(id, topology)

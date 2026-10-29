@@ -9,7 +9,7 @@ mod check;
 
 use std::process::ExitCode;
 
-use pika::gpu;
+use pika::{gpu, shader};
 
 fn main() -> ExitCode {
     match run() {
@@ -45,14 +45,14 @@ fn run() -> Result<(), String> {
 
     let index = gpu::choose(&instance.devices).ok_or(
         "no suitable Vulkan device: Pika needs a GPU with Vulkan 1.3 and a graphics+compute \
-         queue. Check the driver with `vulkaninfo --summary`.",
+         queue with timestamps. Check the driver with `vulkaninfo --summary`.",
     )?;
     let device = instance.open(index)?;
     println!(
         "opened [{index}] {}, queue family {}",
         instance.devices[index].name, device.queue_family
     );
-    let shader = check::compile()?;
+    let shader = shader::compile("check")?;
     println!(
         "slangc {}: check.slang is {} SPIR-V words",
         shader.slangc_version,

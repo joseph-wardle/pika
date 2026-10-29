@@ -89,15 +89,19 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
     HdMeshTopology topology = GetMeshTopology(delegate);
     VtIntArray const &counts = topology.GetFaceVertexCounts();
     VtIntArray const &indices = topology.GetFaceVertexIndices();
+    VtIntArray const &holes = topology.GetHoleIndices();
     std::vector<pika_subset> subsets;
     for (HdGeomSubset const &s : topology.GetGeomSubsets())
         subsets.push_back({s.materialId.GetText(), s.indices.cdata(), s.indices.size()});
     pika_topology t = {
+        topology.GetScheme().GetText(),
         counts.cdata(),
         counts.size(),
         indices.cdata(),
         indices.size(),
         topology.GetOrientation() == PxOsdOpenSubdivTokens->leftHanded,
+        holes.cdata(),
+        holes.size(),
         subsets.data(),
         subsets.size(),
     };

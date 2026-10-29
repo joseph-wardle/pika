@@ -17,6 +17,7 @@ pub struct Store {
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
     stats: Stats,
+    moved: Moved,
 }
 
 /// Each field is `None` until Hydra first hands it over.
@@ -90,10 +91,45 @@ pub struct Counted {
 /// What changes only when a mesh is remodelled.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Topology {
+    pub scheme: Scheme,
     pub face_vertex_counts: Vec<i32>,
     pub face_vertex_indices: Vec<i32>,
     pub left_handed: bool,
+    /// Faces that are not drawn. They still shape their points' normals.
+    pub holes: Vec<i32>,
     pub subsets: Vec<Subset>,
+}
+
+/// USD's subdivision schemes. Every scheme but `None` is a subdivision
+/// surface, whose normals come from its points, not from a primvar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scheme {
+    CatmullClark,
+    Loop,
+    Bilinear,
+    None,
+}
+
+impl Scheme {
+    /// The scheme USD names `token`.
+    pub fn from_token(token: &str) -> Result<Self, String> {
+        match token {
+            "catmullClark" => Ok(Self::CatmullClark),
+            "loop" => Ok(Self::Loop),
+            "bilinear" => Ok(Self::Bilinear),
+            "none" => Ok(Self::None),
+            _ => Err(format!("unknown subdivision scheme {token:?}")),
+        }
+    }
+
+    fn token(self) -> &'static str {
+        match self {
+            Self::CatmullClark => "catmullClark",
+            Self::Loop => "loop",
+            Self::Bilinear => "bilinear",
+            Self::None => "none",
+        }
+    }
 }
 
 /// A GeomSubset: the faces bound to one material.
@@ -142,6 +178,24 @@ impl Interpolation {
             Self::FaceVarying => "faceVarying",
         }
     }
+}
+
+/// What changed since the renderer last took it, so a frame uploads only
+/// that. Only changed values count: a redundant pull moves nothing.
+#[derive(PartialEq, Debug, Default)]
+pub struct Moved {
+    /// A mesh was added, removed or remodelled, or its points or normals
+    /// changed size or kind: the layout of every mesh's data is rebuilt.
+    pub layout: bool,
+    /// Meshes whose points changed, keeping their count.
+    pub points: BTreeSet<u64>,
+    /// Meshes whose normals changed, keeping their interpolation and count.
+    pub normals: BTreeSet<u64>,
+    /// Meshes whose transform changed: only their instances are rewritten.
+    pub transforms: BTreeSet<u64>,
+    /// A visibility, render tag or instancing changed: the instances and
+    /// draw records are rewritten.
+    pub draws: bool,
 }
 
 /// What one Hydra sync did to the store.
@@ -196,7 +250,21 @@ impl Store {
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
             stats: Stats::default(),
+            moved: Moved::default(),
         }
+    }
+
+    pub fn meshes(&self) -> &BTreeMap<u64, Mesh> {
+        &self.meshes
+    }
+
+    pub fn instancers(&self) -> &BTreeMap<u64, Instancer> {
+        &self.instancers
+    }
+
+    /// What changed since the last call.
+    pub fn take_moved(&mut self) -> Moved {
+        std::mem::take(&mut self.moved)
     }
 
     fn new_id(&mut self) -> u64 {
@@ -223,17 +291,23 @@ impl Store {
                 render_tag: None,
             },
         );
+        self.moved.layout = true;
         id
     }
 
     pub fn remove_mesh(&mut self, id: u64) -> Result<(), String> {
         self.meshes.remove(&id).ok_or_else(|| stale("mesh", id))?;
         self.stats.removed += 1;
+        self.moved.layout = true;
         Ok(())
     }
 
     pub fn set_topology(&mut self, id: u64, topology: Topology) -> Result<(), String> {
-        let bytes = 4 * (topology.face_vertex_counts.len() + topology.face_vertex_indices.len())
+        let bytes = 4
+            * (topology.face_vertex_counts.len()
+                + topology.face_vertex_indices.len()
+                + topology.holes.len())
+            + topology.scheme.token().len()
             + 1
             + topology
                 .subsets
@@ -241,14 +315,22 @@ impl Store {
                 .map(|s| s.material.len() + 4 * s.faces.len())
                 .sum::<usize>();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
+        self.moved.layout |= write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
         Ok(())
     }
 
     pub fn set_points(&mut self, id: u64, points: Vec<[f32; 3]>) -> Result<(), String> {
         let bytes = size_of_val(points.as_slice());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.points, points, bytes);
+        let count = mesh.points.as_ref().map(Vec::len);
+        let resized = count != Some(points.len());
+        if write(&mut self.stats.mesh, &mut mesh.points, points, bytes) {
+            if resized {
+                self.moved.layout = true;
+            } else {
+                self.moved.points.insert(id);
+            }
+        }
         Ok(())
     }
 
@@ -258,19 +340,29 @@ impl Store {
             .as_ref()
             .map_or(0, |n| size_of_val(n.values.as_slice()));
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.normals, normals, bytes);
+        let kind = |n: &Option<Normals>| n.as_ref().map(|n| (n.interpolation, n.values.len()));
+        let reshaped = mesh.normals.as_ref().map(kind) != Some(kind(&normals));
+        if write(&mut self.stats.mesh, &mut mesh.normals, normals, bytes) {
+            if reshaped {
+                self.moved.layout = true;
+            } else {
+                self.moved.normals.insert(id);
+            }
+        }
         Ok(())
     }
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.transform, transform, 128);
+        if write(&mut self.stats.mesh, &mut mesh.transform, transform, 128) {
+            self.moved.transforms.insert(id);
+        }
         Ok(())
     }
 
     pub fn set_visible(&mut self, id: u64, visible: bool) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.visible, visible, 1);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.visible, visible, 1);
         Ok(())
     }
 
@@ -284,7 +376,7 @@ impl Store {
             .as_ref()
             .map_or(0, |i| i.instancer.len() + 4 * i.indices.len());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.mesh,
             &mut mesh.instancing,
             instancing,
@@ -304,7 +396,7 @@ impl Store {
     pub fn set_render_tag(&mut self, id: u64, tag: String) -> Result<(), String> {
         let bytes = tag.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
         Ok(())
     }
 
@@ -318,6 +410,7 @@ impl Store {
             primvars: None,
         };
         self.instancers.insert(id, instancer);
+        self.moved.draws = true;
         id
     }
 
@@ -326,6 +419,7 @@ impl Store {
             .remove(&id)
             .ok_or_else(|| stale("instancer", id))?;
         self.stats.removed += 1;
+        self.moved.draws = true;
         Ok(())
     }
 
@@ -342,7 +436,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.parent,
             parent,
@@ -356,7 +450,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.transform,
             transform,
@@ -381,7 +475,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.primvars,
             primvars,
@@ -542,9 +636,12 @@ impl fmt::Display for Mesh {
                 } else {
                     "rightHanded"
                 };
-                writeln!(f, "  topology {orientation}")?;
+                writeln!(f, "  topology {} {orientation}", t.scheme.token())?;
                 writeln!(f, "    face_vertex_counts{}", List(&t.face_vertex_counts))?;
                 writeln!(f, "    face_vertex_indices{}", List(&t.face_vertex_indices))?;
+                if !t.holes.is_empty() {
+                    writeln!(f, "    holes{}", List(&t.holes))?;
+                }
                 for s in &t.subsets {
                     writeln!(f, "    subset {:?} faces{}", s.material, List(&s.faces))?;
                 }
@@ -668,14 +765,15 @@ fn stale(kind: &str, id: u64) -> String {
 }
 
 /// Stores one pulled field, counting its bytes as redundant when Hydra handed
-/// over the same value before.
-fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) {
+/// over the same value before. Returns whether the value changed.
+fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) -> bool {
     stats.pulled += bytes;
     if slot.as_ref() == Some(&value) {
         stats.redundant += bytes;
-    } else {
-        *slot = Some(value);
+        return false;
     }
+    *slot = Some(value);
+    true
 }
 
 #[cfg(test)]
@@ -749,6 +847,49 @@ mod tests {
     }
 
     #[test]
+    fn moved_holds_only_what_changed() {
+        let mut store = Store::new();
+        let a = drawn(&mut store, "/a", None);
+        assert!(store.take_moved().layout);
+        assert_eq!(store.take_moved(), Moved::default());
+
+        // A redundant pull moves nothing; a changed one moves only its kind.
+        store.set_points(a, vec![[0.0; 3]; 4]).unwrap();
+        store.set_visible(a, true).unwrap();
+        store.set_render_tag(a, "geometry".into()).unwrap();
+        assert_eq!(store.take_moved(), Moved::default());
+        // A retagged mesh keeps its data, but the passes drawing it change.
+        store.set_render_tag(a, "proxy".into()).unwrap();
+        assert!(store.take_moved().draws);
+        store.set_points(a, vec![[1.0; 3]; 4]).unwrap();
+        let normals = |values| Normals {
+            interpolation: Interpolation::Vertex,
+            values,
+        };
+        store
+            .set_normals(a, Some(normals(vec![[0.0; 3]; 4])))
+            .unwrap();
+        let moved = store.take_moved();
+        // Normals arriving for the first time change the layout.
+        assert_eq!((moved.layout, &moved.points), (true, &BTreeSet::from([a])));
+        store
+            .set_normals(a, Some(normals(vec![[1.0; 3]; 4])))
+            .unwrap();
+        store.set_transform(a, [1.0; 16]).unwrap();
+        let moved = store.take_moved();
+        assert_eq!((moved.layout, moved.draws), (false, false));
+        assert_eq!(moved.normals, BTreeSet::from([a]));
+        assert_eq!(moved.transforms, BTreeSet::from([a]));
+
+        // Changing the point count moves the layout, not the points.
+        store.set_points(a, vec![[1.0; 3]; 5]).unwrap();
+        let moved = store.take_moved();
+        assert!(moved.layout && moved.points.is_empty());
+        store.remove_mesh(a).unwrap();
+        assert!(store.take_moved().layout);
+    }
+
+    #[test]
     fn end_sync_counts_insertions_and_removals() {
         let mut store = Store::new();
         let a = store.insert_mesh("/a".into());
@@ -763,9 +904,11 @@ mod tests {
     fn drawn(store: &mut Store, path: &str, instancing: Option<Instancing>) -> u64 {
         let id = store.insert_mesh(path.into());
         let topology = Topology {
+            scheme: Scheme::None,
             face_vertex_counts: vec![3, 4],
             face_vertex_indices: vec![0, 1, 2, 0, 1, 2, 3],
             left_handed: false,
+            holes: vec![],
             subsets: vec![Subset {
                 material: "/mtl/red".into(),
                 faces: vec![1],
@@ -836,9 +979,11 @@ mod tests {
             .set_topology(
                 b,
                 Topology {
+                    scheme: Scheme::Loop,
                     face_vertex_counts: vec![3],
                     face_vertex_indices: vec![0, 1, 2],
                     left_handed: true,
+                    holes: vec![0],
                     subsets: vec![Subset {
                         material: "/mtl/red".into(),
                         faces: vec![0],
@@ -910,9 +1055,10 @@ mesh /world/b
     0 0 1 0
     2 0 0 1
   material \"/mtl/blue\"
-  topology leftHanded
+  topology loop leftHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
+    holes 0
     subset \"/mtl/red\" faces 0
   points 3
     0 0 0

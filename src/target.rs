@@ -1,14 +1,33 @@
-//! A color image to render into and the host-visible buffer the CPU reads it
-//! back from.
+//! The images a frame renders into, a depth buffer, the host-visible
+//! buffers the CPU reads them back from, and the timestamps that time the
+//! frame's GPU work.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use crate::gpu;
+use crate::gpu::{self, Buffer};
 
-/// A `width` × `height` color image of `format`, cleared and read back once per
-/// frame. Every handle starts null, so a failed `new` can drop a partly built value.
+/// Pika's depth is reversed: 1 at the near plane, 0 at the far plane and
+/// beyond, so the depth buffer is cleared to 0.
+pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+
+/// The frame's timestamps: at `begin`, at `begin_rendering`, after
+/// rendering ends and after the readback copies.
+const TIMESTAMPS: u32 = 4;
+
+/// A color image and the buffer it is read back into.
+struct Attachment {
+    format: vk::Format,
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    view: vk::ImageView,
+    readback: Buffer,
+}
+
+/// `width` × `height` color images of the given formats, in attachment
+/// order, and a depth buffer. Every handle starts null, so a failed `new`
+/// can drop a partly built value.
 pub struct Target {
     // A copy of the owner's device table. The owner keeps the `gpu::Device`
     // alive longer than this target (field order), which `drop` relies on.
@@ -16,29 +35,35 @@ pub struct Target {
     queue: vk::Queue,
     pub width: u32,
     pub height: u32,
-    pub format: vk::Format,
-    bytes: usize,
-    image: vk::Image,
-    image_memory: vk::DeviceMemory,
-    view: vk::ImageView,
-    readback: vk::Buffer,
-    readback_memory: vk::DeviceMemory,
-    mapped: *mut u8,
+    colors: Vec<Attachment>,
+    depth: vk::Image,
+    depth_memory: vk::DeviceMemory,
+    depth_view: vk::ImageView,
     pool: vk::CommandPool,
     commands: vk::CommandBuffer,
     fence: vk::Fence,
+    timestamps: vk::QueryPool,
+    timestamp_bits: u32,
+    timestamp_period: f32,
 }
 
-// SAFETY: `mapped` points into memory this target owns, and it is only
-// dereferenced through `&mut self`, so moving the target to another thread is sound.
-unsafe impl Send for Target {}
+/// Where one frame's time went after recording.
+pub struct Times {
+    /// From the submit until the fence signalled.
+    pub wait: Duration,
+    /// On the GPU: the work recorded between `begin` and `begin_rendering`,
+    /// rendering, and the readback copies.
+    pub update: Duration,
+    pub draw: Duration,
+    pub readback: Duration,
+}
 
 impl Target {
-    /// `bytes_per_pixel` must match `format`; it sizes the readback buffer.
+    /// `formats` pairs each color attachment's format with its bytes per
+    /// pixel, which size its readback buffer.
     pub fn new(
         device: &gpu::Device,
-        format: vk::Format,
-        bytes_per_pixel: usize,
+        formats: &[(vk::Format, usize)],
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
@@ -48,75 +73,43 @@ impl Target {
             queue: device.queue,
             width,
             height,
-            format,
-            bytes: width as usize * height as usize * bytes_per_pixel,
-            image: vk::Image::null(),
-            image_memory: vk::DeviceMemory::null(),
-            view: vk::ImageView::null(),
-            readback: vk::Buffer::null(),
-            readback_memory: vk::DeviceMemory::null(),
-            mapped: std::ptr::null_mut(),
+            colors: Vec::new(),
+            depth: vk::Image::null(),
+            depth_memory: vk::DeviceMemory::null(),
+            depth_view: vk::ImageView::null(),
             pool: vk::CommandPool::null(),
             commands: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
+            timestamps: vk::QueryPool::null(),
+            timestamp_bits: device.timestamp_bits,
+            timestamp_period: device.timestamp_period,
         };
-
-        let image_info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC);
-        // SAFETY (this and every call below in `new`): `d` is a live device,
-        // each info struct outlives its call, and each handle passed in was
-        // created on `d` just above.
-        t.image = unsafe { d.create_image(&image_info, None) }
-            .map_err(|e| format!("vkCreateImage ({width}×{height} {format:?}) failed: {e}"))?;
-        let needs = unsafe { d.get_image_memory_requirements(t.image) };
-        t.image_memory = allocate(device, needs, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
-        unsafe { d.bind_image_memory(t.image, t.image_memory, 0) }
-            .map_err(|e| format!("vkBindImageMemory failed: {e}"))?;
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(t.image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(COLOR);
-        t.view = unsafe { d.create_image_view(&view_info, None) }
-            .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
-
-        let buffer_info = vk::BufferCreateInfo::default()
-            .size(t.bytes as u64)
-            .usage(vk::BufferUsageFlags::TRANSFER_DST);
-        t.readback = unsafe { d.create_buffer(&buffer_info, None) }
-            .map_err(|e| format!("vkCreateBuffer failed: {e}"))?;
-        let needs = unsafe { d.get_buffer_memory_requirements(t.readback) };
-        // Uncached host memory reads at a small fraction of cached speed.
-        let host = vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT
-            | vk::MemoryPropertyFlags::HOST_CACHED;
-        t.readback_memory = allocate(device, needs, host)?;
-        unsafe { d.bind_buffer_memory(t.readback, t.readback_memory, 0) }
-            .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
-        // Freeing the memory in `drop` also unmaps it.
-        t.mapped = unsafe {
-            d.map_memory(
-                t.readback_memory,
-                0,
-                vk::WHOLE_SIZE,
-                vk::MemoryMapFlags::empty(),
-            )
+        for &(format, bytes_per_pixel) in formats {
+            let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
+            // Uncached host memory reads at a small fraction of cached speed.
+            let host = vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT
+                | vk::MemoryPropertyFlags::HOST_CACHED;
+            let readback = Buffer::host(device, bytes, vk::BufferUsageFlags::TRANSFER_DST, host)?;
+            let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+            let (image, memory, view) = image(device, format, usage, COLOR, width, height)?;
+            t.colors.push(Attachment {
+                format,
+                image,
+                memory,
+                view,
+                readback,
+            });
         }
-        .map_err(|e| format!("vkMapMemory failed: {e}"))?
-        .cast();
+        let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        (t.depth, t.depth_memory, t.depth_view) =
+            image(device, DEPTH_FORMAT, usage, DEPTH, width, height)?;
 
         let pool_info =
             vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family);
+        // SAFETY (this and every call below in `new`): `d` is a live device,
+        // each info struct outlives its call, and each handle passed in was
+        // created on `d` just above.
         t.pool = unsafe { d.create_command_pool(&pool_info, None) }
             .map_err(|e| format!("vkCreateCommandPool failed: {e}"))?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -127,113 +120,197 @@ impl Target {
             .map_err(|e| format!("vkAllocateCommandBuffers failed: {e}"))?[0];
         t.fence = unsafe { d.create_fence(&vk::FenceCreateInfo::default(), None) }
             .map_err(|e| format!("vkCreateFence failed: {e}"))?;
+        let query_info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(TIMESTAMPS);
+        t.timestamps = unsafe { d.create_query_pool(&query_info, None) }
+            .map_err(|e| format!("vkCreateQueryPool failed: {e}"))?;
         Ok(t)
     }
 
-    /// The read-back pixels as tightly packed rows. No GPU work is pending
-    /// outside `finish`, so they are safe to read or overwrite here.
-    pub fn pixels(&mut self) -> &mut [u8] {
-        // SAFETY: `mapped` is the whole of the readback memory, at least
-        // `bytes` long, and `finish` waits for every submit before returning.
-        unsafe { std::slice::from_raw_parts_mut(self.mapped, self.bytes) }
+    /// Whether the target has these color formats and this size.
+    pub fn fits(&self, formats: &[(vk::Format, usize)], width: u32, height: u32) -> bool {
+        let same = self
+            .colors
+            .iter()
+            .map(|a| a.format)
+            .eq(formats.iter().map(|f| f.0));
+        same && (self.width, self.height) == (width, height)
     }
 
-    /// Starts a frame: begins dynamic rendering into the image, cleared to
-    /// `clear`. Record draws into the returned command buffer, then call `finish`.
-    pub fn begin(&mut self, clear: vk::ClearValue) -> Result<vk::CommandBuffer, String> {
+    /// Attachment `index`'s read-back pixels as tightly packed rows, first
+    /// row first. No GPU work is pending outside `finish`, so they are safe
+    /// to read or overwrite here.
+    pub fn pixels(&mut self, index: usize) -> &mut [u8] {
+        self.colors[index].readback.bytes()
+    }
+
+    /// Starts a frame's command buffer, for uploads before `begin_rendering`.
+    pub fn begin(&mut self) -> Result<vk::CommandBuffer, String> {
+        let begin = vk::CommandBufferBeginInfo::default()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        // SAFETY: the pool and buffer were created on this live device, and
+        // `finish` waited for the last submit, so neither is in use.
+        unsafe {
+            self.device
+                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
+                .map_err(|e| format!("vkResetCommandPool failed: {e}"))?;
+            self.device
+                .begin_command_buffer(self.commands, &begin)
+                .map_err(|e| format!("vkBeginCommandBuffer failed: {e}"))?;
+            self.device
+                .cmd_reset_query_pool(self.commands, self.timestamps, 0, TIMESTAMPS);
+        }
+        self.timestamp(0);
+        Ok(self.commands)
+    }
+
+    /// Begins dynamic rendering into every attachment, each color cleared to
+    /// its value in `clears`, the depth buffer to the far plane. Record draws,
+    /// then call `finish`.
+    pub fn begin_rendering(&mut self, clears: &[vk::ClearColorValue]) {
+        self.timestamp(1);
         let d = &self.device;
         let cb = self.commands;
-        // SAFETY (this and every call below in `begin`): `d` is a live device,
-        // all handles were created on it in `new`, `cb` is not in use because
-        // the last submit was waited on, and each info struct outlives its call.
-        unsafe {
-            d.reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
-                .map_err(|e| format!("vkResetCommandPool failed: {e}"))?;
-            let begin = vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            d.begin_command_buffer(cb, &begin)
-                .map_err(|e| format!("vkBeginCommandBuffer failed: {e}"))?;
-
-            let to_attachment = vk::ImageMemoryBarrier2::default()
-                .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+        let mut barriers: Vec<_> = (self.colors.iter())
+            .map(|a| {
+                vk::ImageMemoryBarrier2::default()
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image(a.image)
+                    .subresource_range(COLOR)
+            })
+            .collect();
+        let depth_stages = vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
+        barriers.push(
+            vk::ImageMemoryBarrier2::default()
+                .dst_stage_mask(depth_stages)
+                .dst_access_mask(
+                    vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                )
                 .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image(self.image)
-                .subresource_range(COLOR);
+                .new_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .image(self.depth)
+                .subresource_range(DEPTH),
+        );
+        let attachments: Vec<_> = (self.colors.iter().zip(clears))
+            .map(|(a, &color)| {
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(a.view)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue { color })
+            })
+            .collect();
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(self.depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 0.0,
+                    stencil: 0,
+                },
+            });
+        let rendering = vk::RenderingInfo::default()
+            .render_area(self.area())
+            .layer_count(1)
+            .color_attachments(&attachments)
+            .depth_attachment(&depth);
+        // SAFETY: `cb` is recording (`begin`), every handle was created on
+        // `d`, and the info structs outlive the calls.
+        unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
-                &vk::DependencyInfo::default().image_memory_barriers(&[to_attachment]),
+                &vk::DependencyInfo::default().image_memory_barriers(&barriers),
             );
-
-            let attachment = [vk::RenderingAttachmentInfo::default()
-                .image_view(self.view)
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(clear)];
-            let rendering = vk::RenderingInfo::default()
-                .render_area(self.area())
-                .layer_count(1)
-                .color_attachments(&attachment);
             d.cmd_begin_rendering(cb, &rendering);
         }
-        Ok(cb)
     }
 
-    /// Ends the frame begun by `begin`: copies the image to the readback
-    /// buffer, submits and waits. Returns how long the submit took to complete.
-    pub fn finish(&mut self) -> Result<std::time::Duration, String> {
+    /// Ends the frame begun by `begin_rendering`: copies each attachment that
+    /// `read` marks to its readback buffer, submits and waits.
+    pub fn finish(&mut self, read: &[bool]) -> Result<Times, String> {
+        // SAFETY: `cb` is recording inside the rendering `begin_rendering`
+        // started.
+        unsafe { self.device.cmd_end_rendering(self.commands) };
+        self.timestamp(2);
         let d = &self.device;
         let cb = self.commands;
-        // SAFETY (this and every call below in `finish`): as in `begin`, and
-        // `cb` is recording, inside the rendering `begin` started.
+        let read: Vec<&Attachment> = (self.colors.iter().zip(read))
+            .filter(|(_, r)| **r)
+            .map(|(a, _)| a)
+            .collect();
+        let to_copy: Vec<_> = (read.iter())
+            .map(|a| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(a.image)
+                    .subresource_range(COLOR)
+            })
+            .collect();
+        // Host-coherent memory still needs this for the copies to be visible to the host.
+        let to_host: Vec<_> = (read.iter())
+            .map(|a| {
+                vk::BufferMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                    .dst_access_mask(vk::AccessFlags2::HOST_READ)
+                    .buffer(a.readback.raw)
+                    .size(vk::WHOLE_SIZE)
+            })
+            .collect();
+        // A zero row length and height mean tightly packed rows.
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        // SAFETY (this and every call below in `finish`): `cb` is recording
+        // outside rendering, every handle was created on `d`, and the info
+        // structs outlive the calls.
         unsafe {
-            d.cmd_end_rendering(cb);
-            let to_copy = vk::ImageMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-                .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
-                .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
-                .image(self.image)
-                .subresource_range(COLOR);
             d.cmd_pipeline_barrier2(
                 cb,
-                &vk::DependencyInfo::default().image_memory_barriers(&[to_copy]),
+                &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
             );
-            // A zero row length and height mean tightly packed rows.
-            let region = vk::BufferImageCopy::default()
-                .image_subresource(vk::ImageSubresourceLayers {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    mip_level: 0,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                })
-                .image_extent(vk::Extent3D {
-                    width: self.width,
-                    height: self.height,
-                    depth: 1,
-                });
-            d.cmd_copy_image_to_buffer(
+            for a in &read {
+                d.cmd_copy_image_to_buffer(
+                    cb,
+                    a.image,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    a.readback.raw,
+                    &[region],
+                );
+            }
+            d.cmd_write_timestamp2(
                 cb,
-                self.image,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                self.readback,
-                &[region],
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                self.timestamps,
+                3,
             );
-            // Host-coherent memory still needs this for the copy to be visible to the host.
-            let to_host = vk::BufferMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-                .dst_access_mask(vk::AccessFlags2::HOST_READ)
-                .buffer(self.readback)
-                .size(vk::WHOLE_SIZE);
             d.cmd_pipeline_barrier2(
                 cb,
-                &vk::DependencyInfo::default().buffer_memory_barriers(&[to_host]),
+                &vk::DependencyInfo::default().buffer_memory_barriers(&to_host),
             );
             d.end_command_buffer(cb)
                 .map_err(|e| format!("vkEndCommandBuffer failed: {e}"))?;
@@ -247,8 +324,44 @@ impl Target {
                 .map_err(|e| format!("vkQueueSubmit2 failed: {e}"))?;
             d.wait_for_fences(&[self.fence], true, u64::MAX)
                 .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
-            Ok(start.elapsed())
+            let wait = start.elapsed();
+            let mut ticks = [0u64; TIMESTAMPS as usize];
+            d.get_query_pool_results(
+                self.timestamps,
+                0,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )
+            .map_err(|e| format!("vkGetQueryPoolResults failed: {e}"))?;
+            let between = |a: usize| {
+                elapsed(
+                    ticks[a],
+                    ticks[a + 1],
+                    self.timestamp_bits,
+                    self.timestamp_period,
+                )
+            };
+            Ok(Times {
+                wait,
+                update: between(0),
+                draw: between(1),
+                readback: between(2),
+            })
         }
+    }
+
+    /// Records timestamp `index`, written once all earlier commands finish.
+    fn timestamp(&mut self, index: u32) {
+        // SAFETY: the command buffer is recording, the pool was created on
+        // this device and reset in `begin`, and `index` is below `TIMESTAMPS`.
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                self.commands,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                self.timestamps,
+                index,
+            )
+        };
     }
 
     /// The whole image, for render areas, viewports and scissors.
@@ -268,15 +381,20 @@ impl Drop for Target {
         let d = &self.device;
         // SAFETY: every handle was created on `d` or is null, which destroy
         // calls accept, and waiting for idle means none is still in use.
+        // The readback buffers drop with `colors`, after this.
         unsafe {
             let _ = d.device_wait_idle();
             d.destroy_fence(self.fence, None);
+            d.destroy_query_pool(self.timestamps, None);
             d.destroy_command_pool(self.pool, None);
-            d.destroy_buffer(self.readback, None);
-            d.free_memory(self.readback_memory, None);
-            d.destroy_image_view(self.view, None);
-            d.destroy_image(self.image, None);
-            d.free_memory(self.image_memory, None);
+            for a in &self.colors {
+                d.destroy_image_view(a.view, None);
+                d.destroy_image(a.image, None);
+                d.free_memory(a.memory, None);
+            }
+            d.destroy_image_view(self.depth_view, None);
+            d.destroy_image(self.depth, None);
+            d.free_memory(self.depth_memory, None);
         }
     }
 }
@@ -289,19 +407,89 @@ const COLOR: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     layer_count: 1,
 };
 
-fn allocate(
+const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
+    aspect_mask: vk::ImageAspectFlags::DEPTH,
+    ..COLOR
+};
+
+/// The time from timestamp `start` to `end` of a counter with `bits` valid
+/// bits, ticking every `period` nanoseconds. The counter may wrap between.
+fn elapsed(start: u64, end: u64, bits: u32, period: f32) -> Duration {
+    let ticks = end.wrapping_sub(start) & (u64::MAX >> (64 - bits));
+    Duration::from_nanos((ticks as f64 * period as f64) as u64)
+}
+
+/// A device-local 2D image with its memory and a view of `range`.
+fn image(
     device: &gpu::Device,
-    needs: vk::MemoryRequirements,
-    flags: vk::MemoryPropertyFlags,
-) -> Result<vk::DeviceMemory, String> {
-    let info = vk::MemoryAllocateInfo::default()
-        .allocation_size(needs.size)
-        .memory_type_index(gpu::memory_type(
-            &device.memory_types,
-            needs.memory_type_bits,
-            flags,
-        )?);
-    // SAFETY: `device.raw` is live and `info` outlives the call.
-    unsafe { device.raw.allocate_memory(&info, None) }
-        .map_err(|e| format!("vkAllocateMemory ({flags:?}) failed: {e}"))
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    range: vk::ImageSubresourceRange,
+    width: u32,
+    height: u32,
+) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
+    let d = &device.raw;
+    let info = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(format)
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .usage(usage);
+    // SAFETY (this and every call below): `d` is a live device, each info
+    // struct outlives its call, and each handle passed in was created on `d`
+    // just above. On an error, the handles made so far are destroyed here.
+    let image = unsafe { d.create_image(&info, None) }
+        .map_err(|e| format!("vkCreateImage ({width}×{height} {format:?}) failed: {e}"))?;
+    let needs = unsafe { d.get_image_memory_requirements(image) };
+    let flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+    let memory = match gpu::allocate(device, needs, flags, vk::MemoryAllocateFlags::empty()) {
+        Ok(m) => m,
+        Err(e) => {
+            unsafe { d.destroy_image(image, None) };
+            return Err(e);
+        }
+    };
+    let view_info = vk::ImageViewCreateInfo::default()
+        .image(image)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(format)
+        .subresource_range(range);
+    let view = unsafe { d.bind_image_memory(image, memory, 0) }
+        .map_err(|e| format!("vkBindImageMemory failed: {e}"))
+        .and_then(|()| {
+            unsafe { d.create_image_view(&view_info, None) }
+                .map_err(|e| format!("vkCreateImageView failed: {e}"))
+        });
+    match view {
+        Ok(view) => Ok((image, memory, view)),
+        Err(e) => {
+            unsafe {
+                d.destroy_image(image, None);
+                d.free_memory(memory, None);
+            }
+            Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_scales_ticks_and_survives_a_wrap() {
+        let ns = |d: Duration| d.as_nanos();
+        assert_eq!(ns(elapsed(1000, 1500, 64, 1.0)), 500);
+        assert_eq!(ns(elapsed(1000, 1500, 64, 52.08)), 26_040);
+        // A 36-bit counter that wrapped: 16 ticks before and 16 after.
+        assert_eq!(ns(elapsed((1 << 36) - 16, 16, 36, 1.0)), 32);
+        // The same wrap read without the mask is a huge interval.
+        assert!(ns(elapsed((1 << 36) - 16, 16, 64, 1.0)) > 1 << 60);
+    }
 }

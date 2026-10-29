@@ -18,8 +18,12 @@ pub struct DeviceInfo {
     pub api_version: u32,
     pub vram_bytes: u64,
     pub ray_query: bool,
-    /// First queue family that supports both graphics and compute.
+    /// First queue family that supports graphics, compute and timestamps.
     pub queue_family: Option<u32>,
+    /// That family's valid timestamp bits.
+    pub timestamp_bits: u32,
+    /// Nanoseconds per timestamp tick.
+    pub timestamp_period: f32,
 }
 
 impl DeviceInfo {
@@ -30,7 +34,7 @@ impl DeviceInfo {
         } else if self.api_version < REQUIRED_API {
             Some("needs Vulkan 1.3")
         } else if self.queue_family.is_none() {
-            Some("no graphics+compute queue")
+            Some("no graphics+compute queue with timestamps")
         } else {
             None
         }
@@ -221,8 +225,7 @@ impl Instance {
         let wanted = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
         let queue_family = families
             .iter()
-            .position(|f| f.queue_flags.contains(wanted))
-            .map(|i| i as u32);
+            .position(|f| f.queue_flags.contains(wanted) && f.timestamp_valid_bits > 0);
 
         Ok(DeviceInfo {
             handle: pd,
@@ -231,7 +234,9 @@ impl Instance {
             api_version: props.api_version,
             vram_bytes,
             ray_query,
-            queue_family,
+            queue_family: queue_family.map(|i| i as u32),
+            timestamp_bits: queue_family.map_or(0, |i| families[i].timestamp_valid_bits),
+            timestamp_period: props.limits.timestamp_period,
         })
     }
 
@@ -239,24 +244,42 @@ impl Instance {
     /// with dynamic rendering and synchronization2 enabled.
     pub fn open(&self, index: usize) -> Result<Device<'_>, String> {
         let info = &self.devices[index];
-        let queue_family = info
-            .queue_family
-            .ok_or_else(|| format!("{} has no graphics+compute queue", info.name))?;
+        let queue_family = info.queue_family.ok_or_else(|| {
+            format!(
+                "{} has no graphics+compute queue with timestamps",
+                info.name
+            )
+        })?;
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        // Both features are mandatory in Vulkan 1.3, so support needs no check.
+        // Dynamic rendering, synchronization2 and buffer device addresses are
+        // mandatory in Vulkan 1.3. The rest are optional, but every desktop
+        // GPU has them.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
+        let mut vulkan12 =
+            vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
+        let features = vk::PhysicalDeviceFeatures::default()
+            .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true);
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
+            .enabled_features(&features)
+            .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         // SAFETY: the physical device belongs to this live instance and
         // `create_info` outlives the call.
-        let raw = unsafe { self.raw.create_device(info.handle, &create_info, None) }
-            .map_err(|e| format!("vkCreateDevice on {} failed: {e}", info.name))?;
+        let raw =
+            unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
+                format!(
+                    "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect and \
+                 drawIndirectFirstInstance.",
+                    info.name
+                )
+            })?;
         // SAFETY: `raw` was created with one queue in `queue_family`.
         let queue = unsafe { raw.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.
@@ -266,6 +289,8 @@ impl Instance {
             raw,
             queue_family,
             queue,
+            timestamp_bits: info.timestamp_bits,
+            timestamp_period: info.timestamp_period,
             memory_types: memory.memory_types_as_slice().to_vec(),
         })
     }
@@ -333,6 +358,8 @@ pub struct Device<'a> {
     pub raw: ash::Device,
     pub queue_family: u32,
     pub queue: vk::Queue,
+    pub timestamp_bits: u32,
+    pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
 }
 
@@ -341,6 +368,144 @@ impl Drop for Device<'_> {
         // SAFETY: every object created on this device borrows it, so all have
         // been destroyed, and their owners waited for idle first.
         unsafe { self.raw.destroy_device(None) };
+    }
+}
+
+/// Allocates memory of the first type allowed by `needs` that has `flags`.
+pub fn allocate(
+    device: &Device,
+    needs: vk::MemoryRequirements,
+    flags: vk::MemoryPropertyFlags,
+    allocate_flags: vk::MemoryAllocateFlags,
+) -> Result<vk::DeviceMemory, String> {
+    let mut flags_info = vk::MemoryAllocateFlagsInfo::default().flags(allocate_flags);
+    let info = vk::MemoryAllocateInfo::default()
+        .allocation_size(needs.size)
+        .memory_type_index(memory_type(
+            &device.memory_types,
+            needs.memory_type_bits,
+            flags,
+        )?)
+        .push_next(&mut flags_info);
+    // SAFETY: `device.raw` is live and `info` outlives the call.
+    unsafe { device.raw.allocate_memory(&info, None) }.map_err(|e| {
+        format!(
+            "vkAllocateMemory ({} bytes, {flags:?}) failed: {e}",
+            needs.size
+        )
+    })
+}
+
+/// A buffer and the memory only it uses. Device-local buffers have a device
+/// address, through which shaders read them; host buffers stay mapped.
+/// Every handle starts null, so a failed `new` can drop a partly built value.
+pub struct Buffer {
+    // A copy of the owner's device table. Every owner keeps the `Device`
+    // alive longer than its buffers (field order), which `drop` relies on.
+    device: ash::Device,
+    pub raw: vk::Buffer,
+    memory: vk::DeviceMemory,
+    pub size: u64,
+    /// 0 for a host buffer.
+    pub address: vk::DeviceAddress,
+    mapped: *mut u8,
+}
+
+// SAFETY: `mapped` points into memory this buffer owns, and it is only
+// dereferenced through `&mut self`, so moving the buffer to another thread is sound.
+unsafe impl Send for Buffer {}
+
+impl Buffer {
+    /// A device-local buffer of `size` bytes, with a device address.
+    pub fn device_local(
+        device: &Device,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+    ) -> Result<Self, String> {
+        let usage = usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        let mut b = Self::create(device, size, usage)?;
+        // SAFETY: `b.raw` was created on `device.raw`, which is live.
+        let needs = unsafe { device.raw.get_buffer_memory_requirements(b.raw) };
+        b.memory = allocate(
+            device,
+            needs,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            vk::MemoryAllocateFlags::DEVICE_ADDRESS,
+        )?;
+        // SAFETY: as above, and the memory was just allocated for this buffer.
+        unsafe { device.raw.bind_buffer_memory(b.raw, b.memory, 0) }
+            .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
+        let info = vk::BufferDeviceAddressInfo::default().buffer(b.raw);
+        // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS and is bound.
+        b.address = unsafe { device.raw.get_buffer_device_address(&info) };
+        Ok(b)
+    }
+
+    /// A mapped host buffer of `size` bytes in memory with `flags`, which
+    /// must include HOST_VISIBLE and HOST_COHERENT.
+    pub fn host(
+        device: &Device,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        flags: vk::MemoryPropertyFlags,
+    ) -> Result<Self, String> {
+        let mut b = Self::create(device, size, usage)?;
+        // SAFETY: `b.raw` was created on `device.raw`, which is live.
+        let needs = unsafe { device.raw.get_buffer_memory_requirements(b.raw) };
+        b.memory = allocate(device, needs, flags, vk::MemoryAllocateFlags::empty())?;
+        // SAFETY: as above, and the memory was just allocated for this buffer.
+        unsafe { device.raw.bind_buffer_memory(b.raw, b.memory, 0) }
+            .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
+        // Freeing the memory in `drop` also unmaps it.
+        // SAFETY: the memory is host visible and not yet mapped.
+        let mapped = unsafe {
+            device
+                .raw
+                .map_memory(b.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+        };
+        b.mapped = mapped
+            .map_err(|e| format!("vkMapMemory failed: {e}"))?
+            .cast();
+        Ok(b)
+    }
+
+    fn create(device: &Device, size: u64, usage: vk::BufferUsageFlags) -> Result<Self, String> {
+        let mut b = Self {
+            device: device.raw.clone(),
+            raw: vk::Buffer::null(),
+            memory: vk::DeviceMemory::null(),
+            size,
+            address: 0,
+            mapped: std::ptr::null_mut(),
+        };
+        // Vulkan has no empty buffers.
+        let info = vk::BufferCreateInfo::default()
+            .size(size.max(16))
+            .usage(usage);
+        // SAFETY: `device.raw` is live and `info` outlives the call.
+        b.raw = unsafe { device.raw.create_buffer(&info, None) }
+            .map_err(|e| format!("vkCreateBuffer ({size} bytes, {usage:?}) failed: {e}"))?;
+        Ok(b)
+    }
+
+    /// A host buffer's bytes. The owner must have waited for any GPU work
+    /// that uses the buffer.
+    pub fn bytes(&mut self) -> &mut [u8] {
+        assert!(!self.mapped.is_null(), "a device-local buffer has no bytes");
+        // SAFETY: `mapped` is the whole of the buffer's memory, at least
+        // `size` bytes long.
+        unsafe { std::slice::from_raw_parts_mut(self.mapped, self.size as usize) }
+    }
+}
+
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        // SAFETY: both handles were created on `device` or are null, which
+        // destroy calls accept, and the owner waited for any work using them.
+        unsafe {
+            self.device.destroy_buffer(self.raw, None);
+            self.device.free_memory(self.memory, None);
+        }
     }
 }
 
@@ -357,6 +522,8 @@ mod tests {
             vram_bytes: vram_gib << 30,
             ray_query: false,
             queue_family: Some(0),
+            timestamp_bits: 64,
+            timestamp_period: 1.0,
         }
     }
 
@@ -419,7 +586,7 @@ mod tests {
         assert_eq!(devices[1].unsuitable_reason(), Some("needs Vulkan 1.3"));
         assert_eq!(
             devices[2].unsuitable_reason(),
-            Some("no graphics+compute queue")
+            Some("no graphics+compute queue with timestamps")
         );
     }
 }

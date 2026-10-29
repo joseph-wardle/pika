@@ -28,7 +28,7 @@ mesh /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagated
     0 0 1 0
     0 0 0 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3
@@ -66,7 +66,7 @@ mesh /world/scatter/prototypes/leaf/ForInstancer12c9f8cd6edba73a/UsdNiPropagated
     0 0 1 0
     0 0 0 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3

@@ -16,7 +16,13 @@ extern "C" {
 enum { PIKA_OK = 0, PIKA_ERROR = 1, PIKA_PANIC = 2 };
 
 // Render buffer formats, named after Hydra's HdFormat values they match.
-enum pika_format { PIKA_FLOAT16_VEC4 = 1, PIKA_FLOAT32_VEC4 = 2 };
+// Color is half or full float RGBA, depth float and normals float xyz.
+enum pika_format {
+    PIKA_FLOAT16_VEC4 = 1,
+    PIKA_FLOAT32_VEC4 = 2,
+    PIKA_FLOAT32 = 3,
+    PIKA_FLOAT32_VEC3 = 4,
+};
 
 // Primvar interpolations, named after Hydra's HdInterpolation values.
 enum pika_interpolation {
@@ -34,13 +40,17 @@ typedef struct pika_subset {
     size_t face_count;
 } pika_subset;
 
-// HdMeshTopology, untriangulated.
+// HdMeshTopology, untriangulated. `scheme` is USD's subdivision scheme
+// token: "catmullClark", "loop", "bilinear" or "none".
 typedef struct pika_topology {
+    const char *scheme;
     const int32_t *face_vertex_counts;
     size_t face_count;
     const int32_t *face_vertex_indices;
     size_t index_count;
     bool left_handed;
+    const int32_t *holes;
+    size_t hole_count;
     const pika_subset *subsets;
     size_t subset_count;
 } pika_topology;
@@ -58,6 +68,32 @@ typedef struct pika_instance_primvars {
     const float *scales;
     size_t scale_count;
 } pika_instance_primvars;
+
+// A render buffer bound to an AOV: `len` bytes of `format`, bottom row
+// first. `pixels` is null when the AOV is not bound.
+typedef struct pika_aov {
+    enum pika_format format;
+    uint8_t *pixels;
+    size_t len;
+} pika_aov;
+
+// One frame of a render pass, from Hydra's render pass state.
+typedef struct pika_frame {
+    // Row-major GfMatrix4ds. The projection is conformed to the framing, so
+    // it maps the data window to OpenGL's clip space.
+    double world_to_view[16];
+    double projection[16];
+    // Every bound render buffer's size.
+    uint32_t width, height;
+    // The data window, the pixels Pika writes: x, y, width, height, with y
+    // counted down from the top row, as CameraUtilFraming counts it.
+    int32_t window[4];
+    float clear_color[4];
+    pika_aov color, depth, normal;
+    // The render tags the pass draws; none means every tag.
+    const char *const *render_tags;
+    size_t render_tag_count;
+} pika_frame;
 
 typedef struct pika_renderer pika_renderer;
 
@@ -125,9 +161,12 @@ int pika_counted_new(const pika_renderer *renderer, const char *type, const char
                      uint64_t *out);
 int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
-// Renders a frame into `pixels`, a render buffer of `format` and `len` bytes.
-int pika_render(const pika_renderer *renderer, enum pika_format format,
-                uint32_t width, uint32_t height, uint8_t *pixels, size_t len);
+// Draws the store's meshes of the frame's render tags into its data window:
+// color is grey, shaded by the normal against the view direction; depth is
+// OpenGL's window depth, cleared to 1; normals are in world space, turned
+// toward the viewer.
+// Pixels outside the data window are left as they are.
+int pika_render(const pika_renderer *renderer, const pika_frame *frame);
 
 #ifdef __cplusplus
 }

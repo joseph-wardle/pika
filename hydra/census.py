@@ -84,6 +84,8 @@ def sync(name, stage, camera, first, last, out):
         sys.exit(f"census: Pika reported errors (see {log})")
     rows = []
     for line in open(stats):
+        if not line.startswith("sync "):
+            continue
         words = line.split()
         rows.append({k: float(v) for k, v in zip(words[::2], words[1::2])})
     if len(rows) < last - first + 1:
