@@ -16,10 +16,17 @@ What the reference encodes:
   so every pixel is rendered.
 - Meshes are drawn once per instance: native instances through their
   instance proxies, point instancers' prototypes at USD's instance
-  transforms, without the instances its mask (invisibleIds) hides.
-- Faces split into fans around their first vertex, as Hydra splits them.
+  transforms, without the instances its mask (invisibleIds) hides. Only
+  meshes of the host's purposes are drawn: husk's default and render,
+  usdrecord's default and proxy.
+- Faces but the holes split into fans around their first vertex, as Hydra
+  splits them.
 - Depth is OpenGL's window depth, (z_ndc + 1) / 2, of the hit point.
-- The normal is the authored normal, interpolated, moved by the inverse
+- The normal is the authored normal on a mesh whose subdivisionScheme is
+  none. Otherwise, or without one, it is the point's smooth normal, as Hydra
+  computes it: the sum over the point's corners, holes included, of the
+  cross product of the edges to the next and previous corner (swapped when
+  left-handed), normalized. Either is interpolated, moved by the inverse
   transpose of the world matrix and normalized. A face's front is the side
   its moved geometric normal points to, reversed when left-handed; seen from
   behind, the normal is negated. Color is grey: the normal against the
@@ -51,12 +58,16 @@ FRAMES = (1, 2)
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
             "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
-            "orientations misread", "frame 1's reference"]
+            "orientations misread", "authored normals on subdivided meshes", "holes drawn",
+            "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
+            "purposes ignored", "frame 1's reference"]
+HUSK_PURPOSES = ("default", "render")
+USDRECORD_PURPOSES = ("default", "proxy")
 
 
-def meshes(stage, time, control=None):
-    """Every mesh drawn, once per instance it is drawn at: its prim and
-    world matrix. Native instances are walked through their instance
+def meshes(stage, time, purposes, control=None):
+    """Every mesh of `purposes` drawn, once per instance it is drawn at: its
+    prim and world matrix. Native instances are walked through their instance
     proxies; a point instancer's prototypes are drawn only at its instances,
     by USD's ComputeInstanceTransformsAtTime, which includes each prototype
     root's own transform."""
@@ -90,7 +101,8 @@ def meshes(stage, time, control=None):
                 if not mask or mask[i]:
                     walk(stage.GetPrimAtPath(prototypes[indices[i]]), world, transform)
             return
-        if prim.IsA(UsdGeom.Mesh):
+        drawn = imageable and imageable.ComputePurpose() in purposes
+        if prim.IsA(UsdGeom.Mesh) and (drawn or control == "purposes ignored"):
             out.append((prim, world))
         for child in prim.GetFilteredChildren(Usd.TraverseInstanceProxies()):
             walk(child, world)
@@ -111,23 +123,58 @@ def misread_orientations(stage, time):
                                                                  q.GetReal())) for q in attr.Get(time)])
 
 
-def triangles(stage, time, control=None):
+def smooth_normals(points, counts, indices, left, control=None):
+    """Each point's smooth normal, as Hydra's Hd_SmoothNormals computes it."""
+    sums = [Gf.Vec3d(0) for _ in points]
+    corner = 0
+    for count in counts:
+        face = [indices[corner + j] for j in range(count)]
+        corner += count
+        p = [Gf.Vec3d(points[i]) for i in face]
+        unit = Gf.Cross(p[1] - p[0], p[2] - p[0]).GetNormalized() if count > 2 else Gf.Vec3d(0)
+        for j, curr in enumerate(face):
+            prev, next = p[j - 1], p[(j + 1) % count]
+            if left and control != "left-handed corners unswapped":
+                prev, next = next, prev
+            if control == "face normals averaged":
+                sums[curr] += -unit if left else unit
+            else:
+                sums[curr] += Gf.Cross(next - p[j], prev - p[j])
+    return [n.GetNormalized() if n.GetLength() > 0 else n for n in sums]
+
+
+def triangles(stage, time, purposes, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix,
     whether it is left-handed, and a face id."""
     out = []
-    for instance, (prim, world) in enumerate(meshes(stage, time, control)):
+    for instance, (prim, world) in enumerate(meshes(stage, time, purposes, control)):
         mesh = UsdGeom.Mesh(prim)
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
         points = mesh.GetPointsAttr().Get(time)
         counts = mesh.GetFaceVertexCountsAttr().Get(time)
         indices = mesh.GetFaceVertexIndicesAttr().Get(time)
+        holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
+        if control == "holes drawn":
+            holes = set()
         normals = mesh.GetNormalsAttr().Get(time)
         interpolation = mesh.GetNormalsInterpolation()
         left = mesh.GetOrientationAttr().Get(time) == UsdGeom.Tokens.leftHanded
+        subdivided = mesh.GetSubdivisionSchemeAttr().Get(time) != UsdGeom.Tokens.none
+        if control == "authored normals on subdivided meshes":
+            subdivided = False
+        if subdivided or not normals:
+            # The points smooth normals are computed from.
+            at = FRAMES[0] if control == "frame 1's smooth normals" else time
+            normals = smooth_normals(mesh.GetPointsAttr().Get(at), counts, indices, left, control)
+            interpolation = UsdGeom.Tokens.vertex
         corner = 0
         for face, count in enumerate(counts):
+            if face in holes:
+                corner += count
+                continue
+
             def normal(c):
                 if interpolation == UsdGeom.Tokens.uniform:
                     return Gf.Vec3d(normals[face])
@@ -159,7 +206,7 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, control=None):
+def reference(stage, time, width, height, purposes, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
@@ -167,7 +214,7 @@ def reference(stage, time, width, height, control=None):
     eye = f.position
     if control == "orientations misread":
         misread_orientations(stage, time)
-    tris = triangles(stage, time, control)
+    tris = triangles(stage, time, purposes, control)
     stage.GetSessionLayer().Clear()
     shift = 0.5 if control == "half a pixel right" else 0.0
 
@@ -281,10 +328,10 @@ def usdrecord(scene, out, width):
     return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
 
 
-def references(stage, width, height):
+def references(stage, width, height, purposes):
     """The reference and each control's, for each frame."""
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, purposes, c) for c in controls} for t in FRAMES}
 
 
 def check(name, renders, references, aovs):
@@ -321,7 +368,7 @@ def main():
         name = os.path.splitext(os.path.basename(scene))[0]
         stage = Usd.Stage.Open(scene)
         width, height = UsdRender.Settings(stage.GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get()
-        refs = references(stage, width, height)
+        refs = references(stage, width, height, HUSK_PURPOSES)
         renders, log = husk(scene, out)
         print(f"{name} in husk ({log}):")
         f, c = check(name, renders, refs, ["color", "depth", "normal"])
@@ -332,8 +379,9 @@ def main():
         # usdrecord takes the image's height from the camera's aspect.
         renders, log = usdrecord(scene, out, width)
         shape = renders[FRAMES[0]]["color"].shape
-        if shape[:2] != (height, width):
-            refs = references(stage, shape[1], shape[0])
+        purposed = any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue() for p in stage.Traverse())
+        if shape[:2] != (height, width) or purposed:
+            refs = references(stage, shape[1], shape[0], USDRECORD_PURPOSES)
         print(f"{name} in usdrecord ({log}):")
         failures += check(f"{name} (usdrecord)", renders, refs, ["color"])[0]
     for control in CONTROLS:

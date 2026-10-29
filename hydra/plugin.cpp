@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -48,7 +49,7 @@ public:
 
 protected:
     void _Execute(HdRenderPassStateSharedPtr const &state,
-                  TfTokenVector const &) override {
+                  TfTokenVector const &renderTags) override {
         if (!_renderer)
             return;
         if (!state->GetCamera()) {
@@ -123,6 +124,13 @@ protected:
             frame.window[2] = int(viewport[2]);
             frame.window[3] = int(viewport[3]);
         }
+        // Hydra syncs only the prims of the tags its passes draw, but a prim
+        // retagged out of them keeps its last data in the store.
+        std::vector<const char *> tags;
+        for (TfToken const &tag : renderTags)
+            tags.push_back(tag.GetText());
+        frame.render_tags = tags.data();
+        frame.render_tag_count = tags.size();
         report(pika_render(_renderer, &frame), "render");
     }
 

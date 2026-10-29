@@ -33,6 +33,7 @@ struct Push {
     camera: Camera,
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
+    smooth: vk::DeviceAddress,
     vertices: vk::DeviceAddress,
     instances: vk::DeviceAddress,
 }
@@ -86,6 +87,7 @@ impl Raster {
             camera,
             points: geometry.points,
             normals: geometry.normals,
+            smooth: geometry.smooth,
             vertices: geometry.vertices,
             instances: geometry.instances,
         };

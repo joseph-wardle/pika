@@ -1,0 +1,48 @@
+sync 1
+mesh /world/strip
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology catmullClark rightHanded
+    face_vertex_counts 4 4
+    face_vertex_indices 0 1 4 3 1 2 5 4
+    holes 1
+  points 6
+    0 0 0
+    1 0 0
+    2 0 0
+    0 1 0
+    1 1 0
+    2 1 0
+  normals constant 1
+    0 0 1
+sync 2
+mesh /world/strip
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  topology bilinear rightHanded
+    face_vertex_counts 4 4
+    face_vertex_indices 0 1 4 3 1 2 5 4
+    holes 0
+  points 6
+    0 0 0
+    1 0 0
+    2 0 0
+    0 1 0
+    1 1 0
+    2 1 0
+  normals constant 1
+    0 0 1

@@ -19,7 +19,7 @@ mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
     0 0 1 0
     0 0 4 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3
@@ -48,7 +48,7 @@ mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
     0 0 1 0
     0 0 4 1
   material ""
-  topology rightHanded
+  topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
   points 3

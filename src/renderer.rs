@@ -13,6 +13,7 @@ use crate::geometry::Geometry;
 use crate::gpu;
 use crate::raster::{self, Raster};
 use crate::shader;
+use crate::smooth::Smooth;
 use crate::store::{self, Store};
 use crate::target::Target;
 use crate::transform::Camera;
@@ -74,6 +75,8 @@ pub struct Frame<'a> {
     pub color: Option<Aov<'a>>,
     pub depth: Option<Aov<'a>>,
     pub normal: Option<Aov<'a>>,
+    /// The render tags the pass draws; none means every tag.
+    pub render_tags: Vec<String>,
 }
 
 /// The depth AOV's clear value: OpenGL's far plane.
@@ -89,6 +92,7 @@ pub struct Renderer {
     // pipelines and buffers are destroyed before their device.
     target: Option<Target>,
     raster: Raster,
+    smooth: Smooth,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
@@ -140,10 +144,12 @@ impl Renderer {
         let stats = output("PIKA_STATS")?;
         let device = instance.open(index)?;
         let mesh = shader::compile("mesh")?;
+        let smooth = shader::compile("smooth")?;
         Ok(Self {
             store: Store::new(),
             target: None,
             raster: Raster::new(&device, &mesh.spirv)?,
+            smooth: Smooth::new(&device, &smooth.spirv)?,
             geometry: Geometry::new(),
             device,
             device_name: format!("{}, validation {validation}", instance.devices[index].name),
@@ -249,8 +255,14 @@ impl Renderer {
         };
         let moved = self.store.take_moved();
         let cb = target.begin()?;
-        self.geometry
-            .update(&self.device, &self.store, &moved, cb)?;
+        self.geometry.update(
+            &self.device,
+            &self.store,
+            &moved,
+            &frame.render_tags,
+            &self.smooth,
+            cb,
+        )?;
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(&[
             vk::ClearColorValue {

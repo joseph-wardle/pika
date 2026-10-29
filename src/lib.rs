@@ -8,6 +8,7 @@ pub mod gpu;
 mod raster;
 mod renderer;
 pub mod shader;
+mod smooth;
 mod store;
 pub mod target;
 mod transform;

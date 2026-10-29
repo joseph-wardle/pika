@@ -12,7 +12,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::renderer::{Aov, Format, Frame, Renderer};
-use crate::store::{InstancePrimvars, Instancing, Interpolation, Normals, Subset, Topology};
+use crate::store::{
+    InstancePrimvars, Instancing, Interpolation, Normals, Scheme, Subset, Topology,
+};
 
 pub const OK: i32 = 0;
 pub const ERROR: i32 = 1;
@@ -33,11 +35,14 @@ pub struct CSubset {
 /// `pika_topology`.
 #[repr(C)]
 pub struct CTopology {
+    scheme: *const c_char,
     face_vertex_counts: *const i32,
     face_count: usize,
     face_vertex_indices: *const i32,
     index_count: usize,
     left_handed: bool,
+    holes: *const i32,
+    hole_count: usize,
     subsets: *const CSubset,
     subset_count: usize,
 }
@@ -75,6 +80,8 @@ pub struct CFrame {
     color: CAov,
     depth: CAov,
     normal: CAov,
+    render_tags: *const *const c_char,
+    render_tag_count: usize,
 }
 
 thread_local! {
@@ -214,6 +221,12 @@ pub unsafe extern "C" fn pika_render(renderer: *const Handle, frame: *const CFra
             }))
         };
         let window = f.window.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
+        // SAFETY: the caller guarantees the frame's arrays and strings.
+        let render_tags = unsafe { slice(f.render_tags, f.render_tag_count) }
+            .iter()
+            // SAFETY: as above.
+            .map(|&t| unsafe { string(t) })
+            .collect::<Result<_, _>>()?;
         let frame = Frame {
             world_to_view: f.world_to_view,
             projection: f.projection,
@@ -224,6 +237,7 @@ pub unsafe extern "C" fn pika_render(renderer: *const Handle, frame: *const CFra
             color: aov(&f.color)?,
             depth: aov(&f.depth)?,
             normal: aov(&f.normal)?,
+            render_tags,
         };
         lock(handle)?.render(frame)
     })
@@ -281,9 +295,13 @@ pub unsafe extern "C" fn pika_mesh_topology(
         }
         let topology = Topology {
             // SAFETY: as above.
+            scheme: Scheme::from_token(&unsafe { string(t.scheme)? })?,
+            // SAFETY: as above.
             face_vertex_counts: unsafe { slice(t.face_vertex_counts, t.face_count) }.to_vec(),
             face_vertex_indices: unsafe { slice(t.face_vertex_indices, t.index_count) }.to_vec(),
             left_handed: t.left_handed,
+            // SAFETY: as above.
+            holes: unsafe { slice(t.holes, t.hole_count) }.to_vec(),
             subsets,
         };
         lock(handle)?.store.set_topology(id, topology)

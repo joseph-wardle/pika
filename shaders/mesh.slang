@@ -11,6 +11,8 @@ struct Push
     float4 eye;
     float *points;
     float *normals;
+    // One per point (src/geometry.rs Layout).
+    float *smooth;
     uint2 *vertices;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
@@ -19,7 +21,8 @@ struct Push
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
 
-static const uint NO_NORMAL = 0xffffffff;
+// A vertex's normal index when its normal is its point's smooth normal.
+static const uint SMOOTH = 0xffffffff;
 
 struct Varyings
 {
@@ -43,7 +46,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint instance : SV_VulkanInstanceID
     float4 *m = push.instances + 7 * instance;
     float4 p = float4(load3(push.points, v.x), 1);
     float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
-    float3 n = v.y == NO_NORMAL ? float3(0) : load3(push.normals, v.y);
+    float3 n = v.y == SMOOTH ? load3(push.smooth, v.x) : load3(push.normals, v.y);
 
     Varyings o;
     o.position = float4(dot(push.view_projection[0], world), dot(push.view_projection[1], world),

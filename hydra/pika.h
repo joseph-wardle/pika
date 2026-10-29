@@ -40,13 +40,17 @@ typedef struct pika_subset {
     size_t face_count;
 } pika_subset;
 
-// HdMeshTopology, untriangulated.
+// HdMeshTopology, untriangulated. `scheme` is USD's subdivision scheme
+// token: "catmullClark", "loop", "bilinear" or "none".
 typedef struct pika_topology {
+    const char *scheme;
     const int32_t *face_vertex_counts;
     size_t face_count;
     const int32_t *face_vertex_indices;
     size_t index_count;
     bool left_handed;
+    const int32_t *holes;
+    size_t hole_count;
     const pika_subset *subsets;
     size_t subset_count;
 } pika_topology;
@@ -86,6 +90,9 @@ typedef struct pika_frame {
     int32_t window[4];
     float clear_color[4];
     pika_aov color, depth, normal;
+    // The render tags the pass draws; none means every tag.
+    const char *const *render_tags;
+    size_t render_tag_count;
 } pika_frame;
 
 typedef struct pika_renderer pika_renderer;
@@ -154,9 +161,10 @@ int pika_counted_new(const pika_renderer *renderer, const char *type, const char
                      uint64_t *out);
 int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
-// Draws the store's meshes into the frame's data window: color is grey,
-// shaded by the normal against the view direction; depth is OpenGL's window
-// depth, cleared to 1; normals are in world space, turned toward the viewer.
+// Draws the store's meshes of the frame's render tags into its data window:
+// color is grey, shaded by the normal against the view direction; depth is
+// OpenGL's window depth, cleared to 1; normals are in world space, turned
+// toward the viewer.
 // Pixels outside the data window are left as they are.
 int pika_render(const pika_renderer *renderer, const pika_frame *frame);
 

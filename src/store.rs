@@ -91,10 +91,45 @@ pub struct Counted {
 /// What changes only when a mesh is remodelled.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Topology {
+    pub scheme: Scheme,
     pub face_vertex_counts: Vec<i32>,
     pub face_vertex_indices: Vec<i32>,
     pub left_handed: bool,
+    /// Faces that are not drawn. They still shape their points' normals.
+    pub holes: Vec<i32>,
     pub subsets: Vec<Subset>,
+}
+
+/// USD's subdivision schemes. Every scheme but `None` is a subdivision
+/// surface, whose normals come from its points, not from a primvar.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Scheme {
+    CatmullClark,
+    Loop,
+    Bilinear,
+    None,
+}
+
+impl Scheme {
+    /// The scheme USD names `token`.
+    pub fn from_token(token: &str) -> Result<Self, String> {
+        match token {
+            "catmullClark" => Ok(Self::CatmullClark),
+            "loop" => Ok(Self::Loop),
+            "bilinear" => Ok(Self::Bilinear),
+            "none" => Ok(Self::None),
+            _ => Err(format!("unknown subdivision scheme {token:?}")),
+        }
+    }
+
+    fn token(self) -> &'static str {
+        match self {
+            Self::CatmullClark => "catmullClark",
+            Self::Loop => "loop",
+            Self::Bilinear => "bilinear",
+            Self::None => "none",
+        }
+    }
 }
 
 /// A GeomSubset: the faces bound to one material.
@@ -156,8 +191,8 @@ pub struct Moved {
     pub points: BTreeSet<u64>,
     /// Meshes whose normals changed, keeping their interpolation and count.
     pub normals: BTreeSet<u64>,
-    /// A transform, visibility or instancing changed: the instances and
-    /// draw records are rewritten.
+    /// A transform, visibility, render tag or instancing changed: the
+    /// instances and draw records are rewritten.
     pub draws: bool,
 }
 
@@ -266,7 +301,11 @@ impl Store {
     }
 
     pub fn set_topology(&mut self, id: u64, topology: Topology) -> Result<(), String> {
-        let bytes = 4 * (topology.face_vertex_counts.len() + topology.face_vertex_indices.len())
+        let bytes = 4
+            * (topology.face_vertex_counts.len()
+                + topology.face_vertex_indices.len()
+                + topology.holes.len())
+            + topology.scheme.token().len()
             + 1
             + topology
                 .subsets
@@ -353,7 +392,7 @@ impl Store {
     pub fn set_render_tag(&mut self, id: u64, tag: String) -> Result<(), String> {
         let bytes = tag.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
         Ok(())
     }
 
@@ -593,9 +632,12 @@ impl fmt::Display for Mesh {
                 } else {
                     "rightHanded"
                 };
-                writeln!(f, "  topology {orientation}")?;
+                writeln!(f, "  topology {} {orientation}", t.scheme.token())?;
                 writeln!(f, "    face_vertex_counts{}", List(&t.face_vertex_counts))?;
                 writeln!(f, "    face_vertex_indices{}", List(&t.face_vertex_indices))?;
+                if !t.holes.is_empty() {
+                    writeln!(f, "    holes{}", List(&t.holes))?;
+                }
                 for s in &t.subsets {
                     writeln!(f, "    subset {:?} faces{}", s.material, List(&s.faces))?;
                 }
@@ -810,7 +852,11 @@ mod tests {
         // A redundant pull moves nothing; a changed one moves only its kind.
         store.set_points(a, vec![[0.0; 3]; 4]).unwrap();
         store.set_visible(a, true).unwrap();
+        store.set_render_tag(a, "geometry".into()).unwrap();
         assert_eq!(store.take_moved(), Moved::default());
+        // A retagged mesh keeps its data, but the passes drawing it change.
+        store.set_render_tag(a, "proxy".into()).unwrap();
+        assert!(store.take_moved().draws);
         store.set_points(a, vec![[1.0; 3]; 4]).unwrap();
         let normals = |values| Normals {
             interpolation: Interpolation::Vertex,
@@ -853,9 +899,11 @@ mod tests {
     fn drawn(store: &mut Store, path: &str, instancing: Option<Instancing>) -> u64 {
         let id = store.insert_mesh(path.into());
         let topology = Topology {
+            scheme: Scheme::None,
             face_vertex_counts: vec![3, 4],
             face_vertex_indices: vec![0, 1, 2, 0, 1, 2, 3],
             left_handed: false,
+            holes: vec![],
             subsets: vec![Subset {
                 material: "/mtl/red".into(),
                 faces: vec![1],
@@ -926,9 +974,11 @@ mod tests {
             .set_topology(
                 b,
                 Topology {
+                    scheme: Scheme::Loop,
                     face_vertex_counts: vec![3],
                     face_vertex_indices: vec![0, 1, 2],
                     left_handed: true,
+                    holes: vec![0],
                     subsets: vec![Subset {
                         material: "/mtl/red".into(),
                         faces: vec![0],
@@ -1000,9 +1050,10 @@ mesh /world/b
     0 0 1 0
     2 0 0 1
   material \"/mtl/blue\"
-  topology leftHanded
+  topology loop leftHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
+    holes 0
     subset \"/mtl/red\" faces 0
   points 3
     0 0 0
