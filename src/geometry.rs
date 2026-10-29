@@ -391,8 +391,8 @@ impl Geometry {
         })
     }
 
-    /// The device-local bytes of every buffer, the staging buffer aside.
-    pub fn bytes(&self) -> u64 {
+    /// The bytes of every buffer, the staging buffer on the host side.
+    pub fn memory(&self) -> gpu::Memory {
         let layout = self.layout.iter().flat_map(|l| {
             [
                 &l.points,
@@ -410,7 +410,11 @@ impl Geometry {
         });
         let draws =
             (self.draws.iter()).flat_map(|d| [&d.instances, &d.owners, &d.boxes, &d.records]);
-        layout.chain(draws).map(|b| b.size).sum()
+        let mut memory = gpu::Memory::default();
+        for b in layout.chain(draws).chain(&self.staging) {
+            memory += b.memory();
+        }
+        memory
     }
 
     /// Writes `copies` into the staging buffer and records them into `cb`.

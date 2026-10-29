@@ -85,6 +85,13 @@ pub struct CAov {
     len: usize,
 }
 
+/// `pika_stat`.
+#[repr(C)]
+pub struct CStat {
+    key: [c_char; 48],
+    value: f64,
+}
+
 /// `pika_frame`.
 #[repr(C)]
 pub struct CFrame {
@@ -212,7 +219,7 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
         // SAFETY: the caller passes ownership of a pointer from `Box::into_raw`.
         let handle = unsafe { Box::from_raw(renderer) };
         let renderer = handle.into_inner().unwrap_or_else(|e| e.into_inner());
-        eprintln!("pika: {}", renderer.report());
+        eprintln!("pika: {}", renderer.stats.summary());
         Ok(())
     })
 }
@@ -655,6 +662,45 @@ pub unsafe extern "C" fn pika_sync_begin(renderer: *const Handle) -> i32 {
 pub unsafe extern "C" fn pika_sync_end(renderer: *const Handle) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.end_sync())
+}
+
+/// Writes the stats the host shows, up to `capacity` of them, to `out`, and
+/// how many to `*count`.
+///
+/// # Safety
+/// `renderer` must be live, `out` valid for `capacity` writes and `count`
+/// for one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_stats(
+    renderer: *const Handle,
+    out: *mut CStat,
+    capacity: usize,
+    count: *mut usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer.
+        let pairs = lock(unsafe { &*renderer })?.stats.host();
+        if pairs.len() > capacity {
+            return Err(format!("{} stats do not fit in {capacity}", pairs.len()));
+        }
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            let mut stat = CStat {
+                key: [0; 48],
+                value: *value,
+            };
+            if key.len() >= stat.key.len() {
+                return Err(format!("the stat key {key} is too long for pika_stat"));
+            }
+            for (c, b) in stat.key.iter_mut().zip(key.bytes()) {
+                *c = b as c_char;
+            }
+            // SAFETY: `i` is below `capacity`, which the caller guarantees.
+            unsafe { out.add(i).write(stat) };
+        }
+        // SAFETY: the caller guarantees one write.
+        unsafe { count.write(pairs.len()) };
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -19,6 +19,9 @@ pub struct DeviceInfo {
     pub api_version: u32,
     pub vram_bytes: u64,
     pub ray_query: bool,
+    /// `VK_EXT_memory_budget`, which says how much of the VRAM this process
+    /// uses and may use.
+    pub memory_budget: bool,
     /// First queue family that supports graphics, compute and timestamps.
     pub queue_family: Option<u32>,
     /// That family's valid timestamp bits.
@@ -220,9 +223,13 @@ impl Instance {
             .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
             .map(|h| h.size)
             .sum();
-        let ray_query = extensions
-            .iter()
-            .any(|e| e.extension_name_as_c_str() == Ok(vk::KHR_RAY_QUERY_NAME));
+        let has = |name| {
+            extensions
+                .iter()
+                .any(|e| e.extension_name_as_c_str() == Ok(name))
+        };
+        let ray_query = has(vk::KHR_RAY_QUERY_NAME);
+        let memory_budget = has(vk::EXT_MEMORY_BUDGET_NAME);
         let wanted = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
         let queue_family = families
             .iter()
@@ -235,6 +242,7 @@ impl Instance {
             api_version: props.api_version,
             vram_bytes,
             ray_query,
+            memory_budget,
             queue_family: queue_family.map(|i| i as u32),
             timestamp_bits: queue_family.map_or(0, |i| families[i].timestamp_valid_bits),
             timestamp_period: props.limits.timestamp_period,
@@ -266,9 +274,12 @@ impl Instance {
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true);
+        let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
+        let extensions = &extensions[..usize::from(info.memory_budget)];
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_features(&features)
+            .enabled_extension_names(extensions)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
         // SAFETY: the physical device belongs to this live instance and
@@ -286,13 +297,15 @@ impl Instance {
         // SAFETY: the physical device belongs to this live instance.
         let memory = unsafe { self.raw.get_physical_device_memory_properties(info.handle) };
         Ok(Device {
-            _instance: self,
+            instance: self,
+            physical: info.handle,
             raw,
             queue_family,
             queue,
             timestamp_bits: info.timestamp_bits,
             timestamp_period: info.timestamp_period,
             memory_types: memory.memory_types_as_slice().to_vec(),
+            memory_budget: info.memory_budget,
         })
     }
 }
@@ -355,13 +368,41 @@ unsafe extern "system" fn count_message(
 
 /// A logical device. It borrows its `Instance` so it cannot outlive it.
 pub struct Device<'a> {
-    _instance: &'a Instance,
+    instance: &'a Instance,
+    physical: vk::PhysicalDevice,
     pub raw: ash::Device,
     pub queue_family: u32,
     pub queue: vk::Queue,
     pub timestamp_bits: u32,
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
+    memory_budget: bool,
+}
+
+impl Device<'_> {
+    /// The bytes of device-local memory this process uses, and the bytes
+    /// the driver lets it use before allocations fail or spill to host
+    /// memory, summed over the device-local heaps. Both are 0 on a driver
+    /// without `VK_EXT_memory_budget`.
+    pub fn budget(&self) -> (u64, u64) {
+        if !self.memory_budget {
+            return (0, 0);
+        }
+        let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        // SAFETY: the physical device belongs to the live instance, and the
+        // extension that fills `budget` is enabled.
+        unsafe {
+            (self.instance.raw)
+                .get_physical_device_memory_properties2(self.physical, &mut properties)
+        };
+        let heaps = properties.memory_properties.memory_heaps_as_slice();
+        (0..heaps.len())
+            .filter(|&i| heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+            .fold((0, 0), |(used, allowed), i| {
+                (used + budget.heap_usage[i], allowed + budget.heap_budget[i])
+            })
+    }
 }
 
 impl Drop for Device<'_> {
@@ -395,6 +436,20 @@ pub fn allocate(
             needs.size
         )
     })
+}
+
+/// Bytes allocated in device-local and in host-visible memory, for the stats.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Memory {
+    pub device: u64,
+    pub host: u64,
+}
+
+impl std::ops::AddAssign for Memory {
+    fn add_assign(&mut self, other: Self) {
+        self.device += other.device;
+        self.host += other.host;
+    }
 }
 
 /// A buffer and the memory only it uses. Device-local buffers have a device
@@ -507,6 +562,20 @@ impl Buffer {
         // SAFETY: `mapped` is the whole of the buffer's memory, at least
         // `size` bytes long.
         unsafe { std::slice::from_raw_parts_mut(self.mapped, self.size as usize) }
+    }
+
+    /// The bytes this buffer holds, on the side it was allocated on.
+    pub fn memory(&self) -> Memory {
+        match self.mapped.is_null() {
+            true => Memory {
+                device: self.size,
+                host: 0,
+            },
+            false => Memory {
+                device: 0,
+                host: self.size,
+            },
+        }
     }
 }
 
@@ -632,6 +701,7 @@ mod tests {
             api_version,
             vram_bytes: vram_gib << 30,
             ray_query: false,
+            memory_budget: false,
             queue_family: Some(0),
             timestamp_bits: 64,
             timestamp_period: 1.0,

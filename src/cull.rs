@@ -161,6 +161,13 @@ impl View {
         self.records.raw
     }
 
+    pub fn memory(&self) -> gpu::Memory {
+        let mut memory = self.records.memory();
+        memory += self.visible.memory();
+        memory += self.drawn.memory();
+        memory
+    }
+
     pub fn visible(&self) -> vk::DeviceAddress {
         self.visible.address
     }

@@ -194,6 +194,19 @@ public:
         return _resources;
     }
 
+    // Hosts show this: usdview's HUD reads gpuMemoryUsed from it.
+    VtDictionary GetRenderStats() const override {
+        VtDictionary stats;
+        if (!_renderer)
+            return stats;
+        pika_stat buffer[128];
+        size_t count = 0;
+        report(pika_stats(_renderer, buffer, std::size(buffer), &count), "reading the stats");
+        for (size_t i = 0; i < count; ++i)
+            stats[buffer[i].key] = VtValue(buffer[i].value);
+        return stats;
+    }
+
     HdAovDescriptor GetDefaultAovDescriptor(TfToken const &name) const override {
         if (name == HdAovTokens->color)
             return HdAovDescriptor(HdFormatFloat16Vec4, false,

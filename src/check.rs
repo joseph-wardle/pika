@@ -3,6 +3,7 @@
 
 use ash::vk;
 
+use pika::commands::Commands;
 use pika::gpu;
 use pika::shader::Shader;
 use pika::target::{self, Target};
@@ -52,8 +53,9 @@ pub fn mismatches(a: &[u8], b: &[u8]) -> usize {
 
 /// The check pipeline drawing into a `SIZE`² RGBA8_UINT target.
 pub struct Offscreen<'a> {
-    // Field order is drop order: the target waits for idle before the
-    // pipeline is destroyed.
+    // Field order is drop order: the commands and target wait for idle
+    // before the pipeline is destroyed.
+    commands: Commands,
     target: Target,
     device: &'a gpu::Device<'a>,
     layout: vk::PipelineLayout,
@@ -62,6 +64,7 @@ pub struct Offscreen<'a> {
 
 impl<'a> Offscreen<'a> {
     pub fn new(device: &'a gpu::Device<'a>, shader: &Shader) -> Result<Self, String> {
+        let commands = Commands::new(device)?;
         let target = Target::new(device, &[(FORMAT, 4)], SIZE as u32, SIZE as u32)?;
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -71,6 +74,7 @@ impl<'a> Offscreen<'a> {
         let layout = unsafe { device.raw.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let mut o = Self {
+            commands,
             target,
             device,
             layout,
@@ -85,9 +89,9 @@ impl<'a> Offscreen<'a> {
     pub fn draw(&mut self, rect: [i32; 4]) -> Result<Vec<u8>, String> {
         // A draw or copy that never lands leaves 0xCD, which no pixel can be.
         self.target.pixels(0).fill(0xCD);
-        let cb = self.target.begin()?;
+        let cb = self.commands.begin()?;
         self.target
-            .begin_rendering(&[vk::ClearColorValue::default()]);
+            .begin_rendering(cb, &[vk::ClearColorValue::default()]);
         let push = Push {
             rect,
             size: [SIZE, SIZE],
@@ -106,8 +110,10 @@ impl<'a> Offscreen<'a> {
             );
             d.cmd_draw(cb, 6, 1, 0, 0);
         }
-        self.target.submit(&[true])?;
-        self.target.wait()?;
+        self.target.end_rendering(cb);
+        self.target.readback(cb, &[true]);
+        self.commands.submit()?;
+        self.commands.wait()?;
         Ok(self.target.pixels(0).to_vec())
     }
 }

@@ -116,6 +116,13 @@ typedef struct pika_frame {
     size_t render_tag_count;
 } pika_frame;
 
+// One stat for the host: a key as PIKA_STATS writes it and its value. A key
+// ending in _ms is milliseconds; any other value is a count.
+typedef struct pika_stat {
+    char key[48];
+    double value;
+} pika_stat;
+
 typedef struct pika_renderer pika_renderer;
 
 // The message for this thread's last failed call, valid until its next one.
@@ -123,13 +130,18 @@ const char *pika_last_error(void);
 
 // One per render delegate: opens a Vulkan device.
 int pika_renderer_new(pika_renderer **out);
-// Prints sync and frame timings and destroys the renderer, even after a panic.
+// Prints the stats summary and destroys the renderer, even after a panic.
 int pika_renderer_free(pika_renderer *renderer);
 
 // Bracket each Hydra sync. The end records the sync's stats and appends them
 // to the file PIKA_STATS names, and the whole store to PIKA_STORE_DUMP's.
 int pika_sync_begin(const pika_renderer *renderer);
 int pika_sync_end(const pika_renderer *renderer);
+
+// Writes up to `capacity` stats to `out` and how many to `*count`: the
+// counts of syncs and frames, the last sync's pairs (keys prefixed sync_),
+// the last frame's, and gpuMemoryUsed, which usdview's HUD shows.
+int pika_stats(const pika_renderer *renderer, pika_stat *out, size_t capacity, size_t *count);
 
 // Adds a mesh and writes its id, never reused, to `*out`.
 int pika_mesh_new(const pika_renderer *renderer, const char *path, uint64_t *out);

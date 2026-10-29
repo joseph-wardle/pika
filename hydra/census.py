@@ -22,9 +22,10 @@ import sys
 
 from pxr import Sdf, Usd, UsdGeom
 
-# Importing the oracle would leave a __pycache__ in the checkout.
+# Importing the scripts would leave a __pycache__ in the checkout.
 sys.dont_write_bytecode = True
 from oracle import over  # noqa: E402
+from stats import percentiles, read  # noqa: E402
 
 # A sync sub-budget, from the feasibility study's frame budget.
 SYNC_P95_MS = 10.42
@@ -82,22 +83,10 @@ def sync(name, stage, camera, first, last, out):
         sys.exit(f"census: husk exited {os.waitstatus_to_exitcode(status)} (see {log})")
     if any(line.startswith("pika: error") for line in open(log)):
         sys.exit(f"census: Pika reported errors (see {log})")
-    rows = []
-    for line in open(stats):
-        if not line.startswith("sync "):
-            continue
-        words = line.split()
-        rows.append({k: float(v) for k, v in zip(words[::2], words[1::2])})
+    rows = read(stats)[2]
     if len(rows) < last - first + 1:
         sys.exit(f"census: {len(rows)} syncs for {last - first + 1} frames (see {log})")
     return rows, usage.ru_maxrss / 2**20
-
-
-def percentiles(values):
-    """p50, p95 and max, nearest rank."""
-    values = sorted(values)
-    rank = lambda p: values[min(len(values) - 1, int(p * len(values)))]
-    return rank(0.5), rank(0.95), values[-1]
 
 
 def ms(values):

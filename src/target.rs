@@ -1,26 +1,20 @@
-//! The images a frame renders into, a depth buffer, the host-visible
-//! buffers the CPU reads them back from, and the timestamps that time the
-//! frame's GPU work.
-
-use std::time::{Duration, Instant};
+//! The images a frame renders into, a depth buffer, and the host-visible
+//! buffers the CPU reads them back from.
 
 use ash::vk;
 
-use crate::gpu::{self, Buffer};
+use crate::gpu::{self, Buffer, Memory};
 
 /// Pika's depth is reversed: 1 at the near plane, 0 at the far plane and
 /// beyond, so the depth buffer is cleared to 0.
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
-
-/// The frame's timestamps: at `begin`, at `begin_cull`, at
-/// `begin_rendering`, after rendering ends and after the readback copies.
-const TIMESTAMPS: u32 = 5;
 
 /// A color image and the buffer it is read back into.
 struct Attachment {
     format: vk::Format,
     image: vk::Image,
     memory: vk::DeviceMemory,
+    bytes: u64,
     view: vk::ImageView,
     readback: Buffer,
 }
@@ -32,35 +26,13 @@ pub struct Target {
     // A copy of the owner's device table. The owner keeps the `gpu::Device`
     // alive longer than this target (field order), which `drop` relies on.
     device: ash::Device,
-    queue: vk::Queue,
     pub width: u32,
     pub height: u32,
     colors: Vec<Attachment>,
     depth: vk::Image,
     depth_memory: vk::DeviceMemory,
+    depth_bytes: u64,
     depth_view: vk::ImageView,
-    pool: vk::CommandPool,
-    commands: vk::CommandBuffer,
-    fence: vk::Fence,
-    timestamps: vk::QueryPool,
-    /// `begin_cull` was called this frame.
-    culling: bool,
-    /// When the frame on the GPU was submitted; `None` once `wait` returns.
-    submitted: Option<Instant>,
-    timestamp_bits: u32,
-    timestamp_period: f32,
-}
-
-/// Where one frame's time went after recording.
-pub struct Times {
-    /// How long `wait` blocked on the fence.
-    pub wait: Duration,
-    /// On the GPU: the work recorded between `begin` and `begin_cull`, then
-    /// until `begin_rendering`, rendering, and the readback copies.
-    pub update: Duration,
-    pub cull: Duration,
-    pub draw: Duration,
-    pub readback: Duration,
 }
 
 impl Target {
@@ -72,24 +44,15 @@ impl Target {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        let d = &device.raw;
         let mut t = Self {
-            device: d.clone(),
-            queue: device.queue,
+            device: device.raw.clone(),
             width,
             height,
             colors: Vec::new(),
             depth: vk::Image::null(),
             depth_memory: vk::DeviceMemory::null(),
+            depth_bytes: 0,
             depth_view: vk::ImageView::null(),
-            pool: vk::CommandPool::null(),
-            commands: vk::CommandBuffer::null(),
-            fence: vk::Fence::null(),
-            timestamps: vk::QueryPool::null(),
-            culling: false,
-            submitted: None,
-            timestamp_bits: device.timestamp_bits,
-            timestamp_period: device.timestamp_period,
         };
         for &(format, bytes_per_pixel) in formats {
             let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
@@ -99,39 +62,19 @@ impl Target {
                 | vk::MemoryPropertyFlags::HOST_CACHED;
             let readback = Buffer::host(device, bytes, vk::BufferUsageFlags::TRANSFER_DST, host)?;
             let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
-            let (image, memory, view) = image(device, format, usage, COLOR, width, height)?;
+            let (image, memory, bytes, view) = image(device, format, usage, COLOR, width, height)?;
             t.colors.push(Attachment {
                 format,
                 image,
                 memory,
+                bytes,
                 view,
                 readback,
             });
         }
         let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
-        (t.depth, t.depth_memory, t.depth_view) =
+        (t.depth, t.depth_memory, t.depth_bytes, t.depth_view) =
             image(device, DEPTH_FORMAT, usage, DEPTH, width, height)?;
-
-        let pool_info =
-            vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family);
-        // SAFETY (this and every call below in `new`): `d` is a live device,
-        // each info struct outlives its call, and each handle passed in was
-        // created on `d` just above.
-        t.pool = unsafe { d.create_command_pool(&pool_info, None) }
-            .map_err(|e| format!("vkCreateCommandPool failed: {e}"))?;
-        let alloc_info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(t.pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        t.commands = unsafe { d.allocate_command_buffers(&alloc_info) }
-            .map_err(|e| format!("vkAllocateCommandBuffers failed: {e}"))?[0];
-        t.fence = unsafe { d.create_fence(&vk::FenceCreateInfo::default(), None) }
-            .map_err(|e| format!("vkCreateFence failed: {e}"))?;
-        let query_info = vk::QueryPoolCreateInfo::default()
-            .query_type(vk::QueryType::TIMESTAMP)
-            .query_count(TIMESTAMPS);
-        t.timestamps = unsafe { d.create_query_pool(&query_info, None) }
-            .map_err(|e| format!("vkCreateQueryPool failed: {e}"))?;
         Ok(t)
     }
 
@@ -146,47 +89,30 @@ impl Target {
     }
 
     /// Attachment `index`'s read-back pixels as tightly packed rows, first
-    /// row first. They are safe to read only between `wait` and the next
-    /// `submit`.
+    /// row first. They are safe to read only between the frame's wait and
+    /// its next submit.
     pub fn pixels(&mut self, index: usize) -> &mut [u8] {
         self.colors[index].readback.bytes()
     }
 
-    /// Starts a frame's command buffer, for uploads before `begin_rendering`.
-    pub fn begin(&mut self) -> Result<vk::CommandBuffer, String> {
-        if self.submitted.is_some() {
-            return Err("a frame began before the last one's wait".into());
+    /// The images' bytes on the device and the readback buffers' on the host.
+    pub fn memory(&self) -> Memory {
+        let mut memory = Memory {
+            device: self.depth_bytes,
+            host: 0,
+        };
+        for a in &self.colors {
+            memory.device += a.bytes;
+            memory += a.readback.memory();
         }
-        let begin = vk::CommandBufferBeginInfo::default()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // SAFETY: the pool and buffer were created on this live device, and
-        // `wait` waited for the last submit, so neither is in use.
-        unsafe {
-            self.device
-                .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
-                .map_err(|e| format!("vkResetCommandPool failed: {e}"))?;
-            self.device
-                .begin_command_buffer(self.commands, &begin)
-                .map_err(|e| format!("vkBeginCommandBuffer failed: {e}"))?;
-            self.device
-                .cmd_reset_query_pool(self.commands, self.timestamps, 0, TIMESTAMPS);
-        }
-        self.timestamp(0);
-        Ok(self.commands)
+        memory
     }
 
     /// Begins dynamic rendering into every attachment, each color cleared to
     /// its value in `clears`, the depth buffer to the far plane. Record draws,
-    /// then call `submit`.
-    pub fn begin_rendering(&mut self, clears: &[vk::ClearColorValue]) {
-        // A query never written would stall `wait` forever.
-        if !self.culling {
-            self.timestamp(1);
-        }
-        self.culling = false;
-        self.timestamp(2);
+    /// then call `end_rendering`.
+    pub fn begin_rendering(&self, cb: vk::CommandBuffer, clears: &[vk::ClearColorValue]) {
         let d = &self.device;
-        let cb = self.commands;
         let mut barriers: Vec<_> = (self.colors.iter())
             .map(|a| {
                 vk::ImageMemoryBarrier2::default()
@@ -238,8 +164,8 @@ impl Target {
             .layer_count(1)
             .color_attachments(&attachments)
             .depth_attachment(&depth);
-        // SAFETY: `cb` is recording (`begin`), every handle was created on
-        // `d`, and the info structs outlive the calls.
+        // SAFETY: `cb` is recording outside rendering, every handle was
+        // created on `d`, and the info structs outlive the calls.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -249,16 +175,17 @@ impl Target {
         }
     }
 
-    /// Ends the frame begun by `begin_rendering`, copies each attachment that
-    /// `read` marks to its readback buffer, and submits it. Call `wait`
-    /// before touching anything the frame uses.
-    pub fn submit(&mut self, read: &[bool]) -> Result<(), String> {
-        // SAFETY: `cb` is recording inside the rendering `begin_rendering`
-        // started.
-        unsafe { self.device.cmd_end_rendering(self.commands) };
-        self.timestamp(3);
+    /// Ends the rendering `begin_rendering` began.
+    pub fn end_rendering(&self, cb: vk::CommandBuffer) {
+        // SAFETY: `cb` is recording inside that rendering.
+        unsafe { self.device.cmd_end_rendering(cb) };
+    }
+
+    /// Records, after `end_rendering`, the copy of each attachment that
+    /// `read` marks into its readback buffer, visible to the host once the
+    /// frame is waited for.
+    pub fn readback(&self, cb: vk::CommandBuffer, read: &[bool]) {
         let d = &self.device;
-        let cb = self.commands;
         let read: Vec<&Attachment> = (self.colors.iter().zip(read))
             .filter(|(_, r)| **r)
             .map(|(a, _)| a)
@@ -301,9 +228,8 @@ impl Target {
                 height: self.height,
                 depth: 1,
             });
-        // SAFETY (this and every call below in `submit`): `cb` is recording
-        // outside rendering, every handle was created on `d`, and the info
-        // structs outlive the calls.
+        // SAFETY: `cb` is recording outside rendering, every handle was
+        // created on `d`, and the info structs outlive the calls.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -318,91 +244,11 @@ impl Target {
                     &[region],
                 );
             }
-            d.cmd_write_timestamp2(
-                cb,
-                vk::PipelineStageFlags2::ALL_COMMANDS,
-                self.timestamps,
-                4,
-            );
             d.cmd_pipeline_barrier2(
                 cb,
                 &vk::DependencyInfo::default().buffer_memory_barriers(&to_host),
             );
-            d.end_command_buffer(cb)
-                .map_err(|e| format!("vkEndCommandBuffer failed: {e}"))?;
-
-            let submit = [vk::CommandBufferSubmitInfo::default().command_buffer(cb)];
-            let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit)];
-            d.reset_fences(&[self.fence])
-                .map_err(|e| format!("vkResetFences failed: {e}"))?;
-            d.queue_submit2(self.queue, &submits, self.fence)
-                .map_err(|e| format!("vkQueueSubmit2 failed: {e}"))?;
         }
-        self.submitted = Some(Instant::now());
-        Ok(())
-    }
-
-    /// Waits for the submitted frame and returns where its time went.
-    pub fn wait(&mut self) -> Result<Times, String> {
-        if self.submitted.is_none() {
-            return Err("waited for a frame that was never submitted".into());
-        }
-        let d = &self.device;
-        let start = Instant::now();
-        // SAFETY: the fence and query pool were created on `d`, and the
-        // submit that signals the fence writes every timestamp.
-        let ticks = unsafe {
-            d.wait_for_fences(&[self.fence], true, u64::MAX)
-                .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
-            let mut ticks = [0u64; TIMESTAMPS as usize];
-            d.get_query_pool_results(
-                self.timestamps,
-                0,
-                &mut ticks,
-                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
-            )
-            .map_err(|e| format!("vkGetQueryPoolResults failed: {e}"))?;
-            ticks
-        };
-        let wait = start.elapsed();
-        self.submitted = None;
-        let between = |a: usize| {
-            elapsed(
-                ticks[a],
-                ticks[a + 1],
-                self.timestamp_bits,
-                self.timestamp_period,
-            )
-        };
-        Ok(Times {
-            wait,
-            update: between(0),
-            cull: between(1),
-            draw: between(2),
-            readback: between(3),
-        })
-    }
-
-    /// Marks the end of the uploads and the start of the views' culling,
-    /// after `begin` and before `begin_rendering`. A frame without it has
-    /// no cull time.
-    pub fn begin_cull(&mut self) {
-        self.timestamp(1);
-        self.culling = true;
-    }
-
-    /// Records timestamp `index`, written once all earlier commands finish.
-    fn timestamp(&mut self, index: u32) {
-        // SAFETY: the command buffer is recording, the pool was created on
-        // this device and reset in `begin`, and `index` is below `TIMESTAMPS`.
-        unsafe {
-            self.device.cmd_write_timestamp2(
-                self.commands,
-                vk::PipelineStageFlags2::ALL_COMMANDS,
-                self.timestamps,
-                index,
-            )
-        };
     }
 
     /// The whole image, for render areas, viewports and scissors.
@@ -425,9 +271,6 @@ impl Drop for Target {
         // The readback buffers drop with `colors`, after this.
         unsafe {
             let _ = d.device_wait_idle();
-            d.destroy_fence(self.fence, None);
-            d.destroy_query_pool(self.timestamps, None);
-            d.destroy_command_pool(self.pool, None);
             for a in &self.colors {
                 d.destroy_image_view(a.view, None);
                 d.destroy_image(a.image, None);
@@ -453,14 +296,8 @@ const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     ..COLOR
 };
 
-/// The time from timestamp `start` to `end` of a counter with `bits` valid
-/// bits, ticking every `period` nanoseconds. The counter may wrap between.
-fn elapsed(start: u64, end: u64, bits: u32, period: f32) -> Duration {
-    let ticks = end.wrapping_sub(start) & (u64::MAX >> (64 - bits));
-    Duration::from_nanos((ticks as f64 * period as f64) as u64)
-}
-
-/// A device-local 2D image with its memory and a view of `range`.
+/// A device-local 2D image with its memory, the bytes allocated for it and
+/// a view of `range`.
 fn image(
     device: &gpu::Device,
     format: vk::Format,
@@ -468,7 +305,7 @@ fn image(
     range: vk::ImageSubresourceRange,
     width: u32,
     height: u32,
-) -> Result<(vk::Image, vk::DeviceMemory, vk::ImageView), String> {
+) -> Result<(vk::Image, vk::DeviceMemory, u64, vk::ImageView), String> {
     let d = &device.raw;
     let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
@@ -508,7 +345,7 @@ fn image(
                 .map_err(|e| format!("vkCreateImageView failed: {e}"))
         });
     match view {
-        Ok(view) => Ok((image, memory, view)),
+        Ok(view) => Ok((image, memory, needs.size, view)),
         Err(e) => {
             unsafe {
                 d.destroy_image(image, None);
@@ -516,21 +353,5 @@ fn image(
             }
             Err(e)
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn elapsed_scales_ticks_and_survives_a_wrap() {
-        let ns = |d: Duration| d.as_nanos();
-        assert_eq!(ns(elapsed(1000, 1500, 64, 1.0)), 500);
-        assert_eq!(ns(elapsed(1000, 1500, 64, 52.08)), 26_040);
-        // A 36-bit counter that wrapped: 16 ticks before and 16 after.
-        assert_eq!(ns(elapsed((1 << 36) - 16, 16, 36, 1.0)), 32);
-        // The same wrap read without the mask is a huge interval.
-        assert!(ns(elapsed((1 << 36) - 16, 16, 64, 1.0)) > 1 << 60);
     }
 }
