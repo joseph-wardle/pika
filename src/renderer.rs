@@ -15,6 +15,7 @@ use crate::raster::{self, Raster};
 use crate::shader;
 use crate::smooth::Smooth;
 use crate::store::{self, Store};
+use crate::subdiv::Subdiv;
 use crate::target::{self, Target};
 use crate::transform::Camera;
 
@@ -92,6 +93,7 @@ pub struct Renderer {
     // pipelines and buffers are destroyed before their device.
     target: Option<Target>,
     raster: Raster,
+    subdiv: Subdiv,
     smooth: Smooth,
     geometry: Geometry,
     device: gpu::Device<'static>,
@@ -154,11 +156,13 @@ impl Renderer {
         let stats = output("PIKA_STATS")?;
         let device = instance.open(index)?;
         let mesh = shader::compile("mesh")?;
+        let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
         Ok(Self {
             store: Store::new(),
             target: None,
             raster: Raster::new(&device, &mesh.spirv)?,
+            subdiv: Subdiv::new(&device, &subdiv.spirv)?,
             smooth: Smooth::new(&device, &smooth.spirv)?,
             geometry: Geometry::new(),
             device,
@@ -271,6 +275,7 @@ impl Renderer {
             &self.store,
             &moved,
             &frame.render_tags,
+            &self.subdiv,
             &self.smooth,
             cb,
         )?;

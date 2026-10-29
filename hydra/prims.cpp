@@ -5,8 +5,12 @@
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/pxOsd/refinerFactory.h>
 #include <pxr/imaging/pxOsd/tokens.h>
 
+#include <opensubdiv/far/stencilTableFactory.h>
+
+#include <memory>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -16,6 +20,60 @@ namespace {
 // An empty VtArray's data may be null, so this casts rather than dereferences.
 const float *xyz(VtVec3fArray const &values) {
     return reinterpret_cast<const float *>(values.cdata());
+}
+
+// The level every subdivision surface is refined to. It is part of Pika's
+// look, so the host's complexity setting (HdDisplayStyle's refineLevel) does
+// not change it.
+constexpr int refine_level = 1;
+
+// The arrays a pika_refined points to.
+struct Refined {
+    std::vector<int32_t> counts, indices, holes;
+    std::vector<uint32_t> offsets;
+    std::vector<int32_t> stencil_indices;
+    std::vector<float> weights;
+};
+
+// Refines `topology` uniformly with OpenSubdiv, through the factory Storm
+// uses, so USD's subdivision tags read as they do there. False when
+// the topology is invalid, which OpenSubdiv does not check, or OpenSubdiv
+// refuses it (a Loop mesh with a quad, say).
+bool refine(HdMeshTopology const &topology, Refined &out) {
+    using namespace OpenSubdiv;
+    if (!topology.GetPxOsdMeshTopology().Validate())
+        return false;
+    PxOsdTopologyRefinerSharedPtr refiner =
+        PxOsdRefinerFactory::Create(topology.GetPxOsdMeshTopology());
+    if (!refiner)
+        return false;
+    refiner->RefineUniform(Far::TopologyRefiner::UniformOptions(refine_level));
+    Far::StencilTableFactory::Options options;
+    options.generateIntermediateLevels = false;
+    std::unique_ptr<Far::StencilTable const> table(
+        Far::StencilTableFactory::Create(*refiner, options));
+    Far::TopologyLevel const &level = refiner->GetLevel(refine_level);
+    if (!table || table->GetNumStencils() != level.GetNumVertices())
+        return false;
+    for (int f = 0; f < level.GetNumFaces(); f++) {
+        Far::ConstIndexArray face = level.GetFaceVertices(f);
+        out.counts.push_back(face.size());
+        out.indices.insert(out.indices.end(), face.begin(), face.end());
+        if (level.IsFaceHole(f))
+            out.holes.push_back(f);
+    }
+    // The table's weight array can be longer than its index array, so each
+    // stencil is read through its own size.
+    for (int i = 0; i < table->GetNumStencils(); i++) {
+        Far::Stencil stencil = table->GetStencil(i);
+        out.offsets.push_back(out.stencil_indices.size());
+        Far::Index const *points = stencil.GetVertexIndices();
+        float const *weights = stencil.GetWeights();
+        out.stencil_indices.insert(out.stencil_indices.end(), points, points + stencil.GetSize());
+        out.weights.insert(out.weights.end(), weights, weights + stencil.GetSize());
+    }
+    out.offsets.push_back(out.stencil_indices.size());
+    return true;
 }
 
 } // namespace
@@ -39,7 +97,7 @@ HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
            HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
            HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
            HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyInstancer |
-           HdChangeTracker::DirtyInstanceIndex;
+           HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtySubdivTags;
 }
 
 void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
@@ -57,7 +115,7 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     std::string const &path = GetId().GetString();
     if (bits & HdChangeTracker::DirtyVisibility)
         report(pika_mesh_visible(_renderer, _id, IsVisible()), path + " visibility");
-    if (bits & HdChangeTracker::DirtyTopology)
+    if (bits & (HdChangeTracker::DirtyTopology | HdChangeTracker::DirtySubdivTags))
         _SyncTopology(delegate);
     if (bits & HdChangeTracker::DirtyPoints)
         _SyncPoints(delegate);
@@ -87,6 +145,28 @@ void PikaMesh::UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderP
 
 void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
     HdMeshTopology topology = GetMeshTopology(delegate);
+    std::string const &path = GetId().GetString();
+    Refined refined;
+    pika_refined r = {};
+    if (topology.GetScheme() != PxOsdOpenSubdivTokens->none) {
+        topology.SetSubdivTags(GetSubdivTags(delegate));
+        if (refine(topology, refined))
+            r = {
+                refined.counts.data(),
+                refined.counts.size(),
+                refined.indices.data(),
+                refined.indices.size(),
+                refined.holes.data(),
+                refined.holes.size(),
+                refined.offsets.data(),
+                refined.offsets.size() - 1,
+                refined.stencil_indices.data(),
+                refined.weights.data(),
+                refined.weights.size(),
+            };
+        else
+            warn(path + ": OpenSubdiv cannot refine it; its cage is drawn");
+    }
     VtIntArray const &counts = topology.GetFaceVertexCounts();
     VtIntArray const &indices = topology.GetFaceVertexIndices();
     VtIntArray const &holes = topology.GetHoleIndices();
@@ -104,8 +184,9 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
         holes.size(),
         subsets.data(),
         subsets.size(),
+        refined.offsets.empty() ? nullptr : &r,
     };
-    report(pika_mesh_topology(_renderer, _id, &t), GetId().GetString() + " topology");
+    report(pika_mesh_topology(_renderer, _id, &t), path + " topology");
 }
 
 void PikaMesh::_SyncPoints(HdSceneDelegate *delegate) {

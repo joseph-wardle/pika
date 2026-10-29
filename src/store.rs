@@ -98,6 +98,41 @@ pub struct Topology {
     /// Faces that are not drawn. They still shape their points' normals.
     pub holes: Vec<i32>,
     pub subsets: Vec<Subset>,
+    /// `None` when the scheme is none or OpenSubdiv refused the mesh: its
+    /// cage is drawn.
+    pub refined: Option<Refined>,
+}
+
+/// A subdivision surface as the delegate's OpenSubdiv refined it, one
+/// uniform level. The refined faces are drawn in place of the cage's, and
+/// each refined point is a stencil: a weighted sum of cage points.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Refined {
+    pub face_vertex_counts: Vec<i32>,
+    pub face_vertex_indices: Vec<i32>,
+    /// The refined faces of the cage's holes.
+    pub holes: Vec<i32>,
+    /// Point i's stencil is entries `offsets[i]` to `offsets[i + 1]` of the
+    /// indices and weights.
+    pub offsets: Vec<u32>,
+    pub indices: Vec<i32>,
+    pub weights: Vec<f32>,
+}
+
+impl Refined {
+    /// The refined points.
+    pub fn point_count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    fn bytes(&self) -> usize {
+        4 * (self.face_vertex_counts.len()
+            + self.face_vertex_indices.len()
+            + self.holes.len()
+            + self.offsets.len()
+            + self.indices.len()
+            + self.weights.len())
+    }
 }
 
 /// USD's subdivision schemes. Every scheme but `None` is a subdivision
@@ -309,6 +344,7 @@ impl Store {
                 + topology.holes.len())
             + topology.scheme.token().len()
             + 1
+            + topology.refined.as_ref().map_or(0, Refined::bytes)
             + topology
                 .subsets
                 .iter()
@@ -645,6 +681,16 @@ impl fmt::Display for Mesh {
                 for s in &t.subsets {
                     writeln!(f, "    subset {:?} faces{}", s.material, List(&s.faces))?;
                 }
+                // The refined faces' order is OpenSubdiv's, and the image
+                // check covers their shape, so only their sizes are dumped.
+                if let Some(r) = &t.refined {
+                    let (faces, points) = (r.face_vertex_counts.len(), r.point_count());
+                    write!(f, "    refined faces {faces} points {points}")?;
+                    if !r.holes.is_empty() {
+                        write!(f, " holes{}", List(&r.holes))?;
+                    }
+                    writeln!(f)?;
+                }
             }
             None => writeln!(f, "  topology {UNSYNCED}")?,
         }
@@ -913,6 +959,7 @@ mod tests {
                 material: "/mtl/red".into(),
                 faces: vec![1],
             }],
+            refined: None,
         };
         store.set_topology(id, topology).unwrap();
         store.set_points(id, vec![[0.0; 3]; 4]).unwrap();
@@ -988,6 +1035,16 @@ mod tests {
                         material: "/mtl/red".into(),
                         faces: vec![0],
                     }],
+                    // The triangle split in four, its corners kept and its
+                    // edges halved.
+                    refined: Some(Refined {
+                        face_vertex_counts: vec![3; 4],
+                        face_vertex_indices: vec![0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
+                        holes: vec![0, 1, 2, 3],
+                        offsets: vec![0, 1, 2, 3, 5, 7, 9],
+                        indices: vec![0, 1, 2, 0, 1, 1, 2, 2, 0],
+                        weights: vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                    }),
                 },
             )
             .unwrap();
@@ -1060,6 +1117,7 @@ mesh /world/b
     face_vertex_indices 0 1 2
     holes 0
     subset \"/mtl/red\" faces 0
+    refined faces 4 points 6 holes 0 1 2 3
   points 3
     0 0 0
     0.5 -0 0

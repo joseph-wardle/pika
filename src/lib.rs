@@ -10,5 +10,6 @@ mod renderer;
 pub mod shader;
 mod smooth;
 mod store;
+mod subdiv;
 pub mod target;
 mod transform;

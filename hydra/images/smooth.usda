@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = "Meshes whose normals are computed: a Catmull-Clark bump with misleading authored normals and a hole, whose points move at frame 2; a left-handed polygonal cone without normals; and a render-purpose and a proxy-purpose tile, which husk and usdrecord each draw one of."
+    doc = "Meshes whose normals are computed: a Catmull-Clark bump with misleading authored normals and a hole, whose points move at frame 2; a left-handed Catmull-Clark cap of three triangles, a quad and a pentagon around a valence-5 point; a left-handed polygonal cone without normals; and a render-purpose and a proxy-purpose tile, which husk and usdrecord each draw one of."
     subLayers = [@settings.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -28,6 +28,14 @@ def Mesh "bump"
     normal3f[] normals = [(0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1), (0.3, -0.2, 1)] (
         interpolation = "vertex"
     )
+}
+
+def Mesh "cap"
+{
+    uniform token orientation = "leftHanded"
+    int[] faceVertexCounts = [3, 3, 3, 4, 5]
+    int[] faceVertexIndices = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5, 6, 0, 6, 7, 8, 1]
+    point3f[] points = [(1.15, -0.52, -4.6), (1.55, -0.52, -5), (1.433, -0.308, -4.9), (1.15, -0.22, -5), (0.867, -0.308, -4.9), (0.75, -0.52, -5), (0.867, -0.732, -4.9), (1.15, -0.82, -5), (1.433, -0.732, -4.9)]
 }
 
 def Mesh "cone"

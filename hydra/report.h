@@ -16,6 +16,11 @@ inline void fail(std::string const &message) {
     TF_RUNTIME_ERROR("Pika: %s", message.c_str());
 }
 
+inline void warn(std::string const &message) {
+    fprintf(stderr, "pika: warning: %s\n", message.c_str());
+    TF_WARN("Pika: %s", message.c_str());
+}
+
 // Reports a failed Pika call, saying what the delegate was doing.
 inline void report(int status, std::string const &what) {
     if (status != PIKA_OK)

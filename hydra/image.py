@@ -19,12 +19,23 @@ What the reference encodes:
   transforms, without the instances its mask (invisibleIds) hides. Only
   meshes of the host's purposes are drawn: husk's default and render,
   usdrecord's default and proxy.
+- A mesh whose subdivisionScheme is not none is drawn refined once, as
+  Pika draws it (one level, whatever the host's refine level): each face
+  splits into quads, one per corner, through the corner's vertex point, its
+  edges' points and the face point, starting at the vertex point, except
+  that a quad's child of corner j has its vertex point at j. Bilinear
+  points are averages. Catmull-Clark points follow the original rules
+  with USD's default boundary, edgeAndCorner: boundary edges are
+  midpoints, boundary vertices (6v + a + b) / 8 of their boundary
+  neighbours, and vertices of a single face stay put. Holes refine with
+  the rest and their child faces are dropped. Other schemes, boundary
+  rules, creases and corners are refused, not approximated.
 - Faces but the holes split into fans around their first vertex, as Hydra
   splits them.
 - Depth is OpenGL's window depth, (z_ndc + 1) / 2, of the hit point.
 - The normal is the authored normal on a mesh whose subdivisionScheme is
-  none. Otherwise, or without one, it is the point's smooth normal, as Hydra
-  computes it: the sum over the point's corners, holes included, of the
+  none. Otherwise, or without one, it is the point's smooth normal on the
+  drawn (refined) faces, as Hydra computes it on its faces: the sum over the point's corners, holes included, of the
   cross product of the edges to the next and previous corner (swapped when
   left-handed), normalized. Either is interpolated, moved by the inverse
   transpose of the world matrix and normalized. A face's front is the side
@@ -60,6 +71,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
+            "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "frame 1's reference"]
 HUSK_PURPOSES = ("default", "render")
 USDRECORD_PURPOSES = ("default", "proxy")
@@ -143,6 +155,90 @@ def smooth_normals(points, counts, indices, left, control=None):
     return [n.GetNormalized() if n.GetLength() > 0 else n for n in sums]
 
 
+def refine(points, counts, indices, holes, scheme, control=None):
+    """One level of uniform refinement: the refined points, face vertex
+    counts, face vertex indices and holes."""
+    points = [Gf.Vec3d(p) for p in points]
+    faces, corner = [], 0
+    for count in counts:
+        faces.append(indices[corner:corner + count])
+        corner += count
+    edges = {}
+    for f, face in enumerate(faces):
+        for j, v in enumerate(face):
+            edges.setdefault(frozenset((v, face[(j + 1) % len(face)])), []).append(f)
+    if any(len(fs) > 2 for fs in edges.values()):
+        raise ValueError("the reference does not refine non-manifold edges")
+    centre = [sum((points[v] for v in face), Gf.Vec3d(0)) / len(face) for face in faces]
+    edge_point = {}
+    for e, fs in edges.items():
+        a, b = (points[v] for v in e)
+        boundary = len(fs) == 1 and control != "boundary rules of the interior"
+        if scheme == UsdGeom.Tokens.bilinear or boundary:
+            edge_point[e] = (a + b) / 2
+        else:
+            edge_point[e] = (a + b + sum((centre[f] for f in fs), Gf.Vec3d(0))) / (2 + len(fs))
+    vertex_point = list(points)
+    if scheme == UsdGeom.Tokens.catmullClark:
+        for v, p in enumerate(points):
+            incident = [f for f, face in enumerate(faces) if v in face]
+            around = [e for e in edges if v in e]
+            boundary = [e for e in around if len(edges[e]) == 1]
+            if control == "boundary rules of the interior":
+                boundary = []
+            if len(incident) == 1 and boundary:
+                continue
+            if boundary:
+                a, b = (points[next(iter(e - {v}))] for e in boundary)
+                vertex_point[v] = (6 * p + a + b) / 8
+                continue
+            n = len(around)
+            q = sum((centre[f] for f in incident), Gf.Vec3d(0)) / len(incident)
+            r = sum((sum((points[u] for u in e), Gf.Vec3d(0)) / 2 for e in around), Gf.Vec3d(0)) / n
+            vertex_point[v] = (q + 2 * r + (n - 3) * p) / n
+    refined = vertex_point
+    index = {}
+    for e, point in edge_point.items():
+        index[e] = len(refined)
+        refined.append(point)
+    out_counts, out_indices, out_holes = [], [], []
+    for f, face in enumerate(faces):
+        middle = len(refined)
+        refined.append(centre[f])
+        for j, v in enumerate(face):
+            after = index[frozenset((v, face[(j + 1) % len(face)]))]
+            before = index[frozenset((face[j - 1], v))]
+            if f in holes:
+                out_holes.append(len(out_counts))
+            out_counts.append(4)
+            child = [v, after, middle, before]
+            # OpenSubdiv rotates a quad's children to keep its parametric
+            # orientation, which decides the diagonal each child is split on.
+            rotation = j if len(face) == 4 else 0
+            out_indices += child[-rotation:] + child[:-rotation] if rotation else child
+    return refined, out_counts, out_indices, set(out_holes)
+
+
+def surface(mesh, time, control=None):
+    """The points, face vertex counts, face vertex indices and holes a
+    mesh is drawn with at `time`."""
+    points = mesh.GetPointsAttr().Get(time)
+    counts = mesh.GetFaceVertexCountsAttr().Get(time)
+    indices = mesh.GetFaceVertexIndicesAttr().Get(time)
+    holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
+    scheme = mesh.GetSubdivisionSchemeAttr().Get(time)
+    if scheme == UsdGeom.Tokens.none or control in ("cage drawn on subdivided meshes",
+                                                    "authored normals on subdivided meshes"):
+        return points, counts, indices, holes
+    if scheme not in (UsdGeom.Tokens.catmullClark, UsdGeom.Tokens.bilinear):
+        raise ValueError(f"{mesh.GetPath()}: the reference does not refine {scheme}")
+    authored = [mesh.GetCreaseIndicesAttr(), mesh.GetCornerIndicesAttr()]
+    if any(a.HasAuthoredValue() for a in authored) or (
+            mesh.GetInterpolateBoundaryAttr().Get(time) != UsdGeom.Tokens.edgeAndCorner):
+        raise ValueError(f"{mesh.GetPath()}: the reference refines only uncreased edgeAndCorner meshes")
+    return refine(points, counts, indices, holes, scheme, control)
+
+
 def triangles(stage, time, purposes, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix,
@@ -152,10 +248,7 @@ def triangles(stage, time, purposes, control=None):
         mesh = UsdGeom.Mesh(prim)
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
-        points = mesh.GetPointsAttr().Get(time)
-        counts = mesh.GetFaceVertexCountsAttr().Get(time)
-        indices = mesh.GetFaceVertexIndicesAttr().Get(time)
-        holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
+        points, counts, indices, holes = surface(mesh, time, control)
         if control == "holes drawn":
             holes = set()
         normals = mesh.GetNormalsAttr().Get(time)
@@ -167,7 +260,7 @@ def triangles(stage, time, purposes, control=None):
         if subdivided or not normals:
             # The points smooth normals are computed from.
             at = FRAMES[0] if control == "frame 1's smooth normals" else time
-            normals = smooth_normals(mesh.GetPointsAttr().Get(at), counts, indices, left, control)
+            normals = smooth_normals(surface(mesh, at, control)[0], counts, indices, left, control)
             interpolation = UsdGeom.Tokens.vertex
         corner = 0
         for face, count in enumerate(counts):
