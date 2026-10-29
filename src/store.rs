@@ -16,6 +16,10 @@ pub struct Store {
     instancers: BTreeMap<u64, Instancer>,
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
+    /// Each mesh's triangles, its cage's then as drawn, counted when its
+    /// topology is set: the census runs every sync, and counting ALab's
+    /// refined faces there cost more than the sync itself.
+    triangles: HashMap<u64, [usize; 2]>,
     stats: Stats,
     moved: Moved,
 }
@@ -266,8 +270,13 @@ pub struct Census {
     pub triangles: usize,
     /// Triangles counting each mesh once, as its data would be stored.
     pub prototype_triangles: usize,
+    /// The same two counts as drawn: a refined mesh's refined faces.
+    pub refined_triangles: usize,
+    pub refined_prototype_triangles: usize,
     /// Points, normals and face indices, counting each mesh once.
     pub geometry_bytes: usize,
+    /// The refined faces and stencils, counting each mesh once.
+    pub refined_bytes: usize,
     /// Materials bound to the meshes or their subsets.
     pub materials: usize,
     pub instancers: usize,
@@ -284,6 +293,7 @@ impl Store {
             instancers: BTreeMap::new(),
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
+            triangles: HashMap::new(),
             stats: Stats::default(),
             moved: Moved::default(),
         }
@@ -332,6 +342,7 @@ impl Store {
 
     pub fn remove_mesh(&mut self, id: u64) -> Result<(), String> {
         self.meshes.remove(&id).ok_or_else(|| stale("mesh", id))?;
+        self.triangles.remove(&id);
         self.stats.removed += 1;
         self.moved.layout = true;
         Ok(())
@@ -351,6 +362,12 @@ impl Store {
                 .map(|s| s.material.len() + 4 * s.faces.len())
                 .sum::<usize>();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
+        let fanned = |counts: &[i32]| -> usize {
+            counts.iter().map(|&n| n.saturating_sub(2) as usize).sum()
+        };
+        let cage = fanned(&topology.face_vertex_counts);
+        let drawn = (topology.refined.as_ref()).map_or(cage, |r| fanned(&r.face_vertex_counts));
+        self.triangles.insert(id, [cage, drawn]);
         self.moved.layout |= write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
         Ok(())
     }
@@ -575,7 +592,7 @@ impl Store {
             ..Default::default()
         };
         let mut materials = BTreeSet::new();
-        for mesh in self.meshes.values() {
+        for (id, mesh) in &self.meshes {
             let (Some(true), Some(topology)) = (mesh.visible, &mesh.topology) else {
                 continue;
             };
@@ -586,13 +603,14 @@ impl Store {
                 Some(Some(i)) => i.indices.len() * repeats(&instancers, &i.instancer)?,
                 _ => 1,
             };
-            let triangles: usize = (topology.face_vertex_counts.iter())
-                .map(|&n| n.saturating_sub(2) as usize)
-                .sum();
+            let [triangles, refined] = self.triangles[id];
             census.meshes += 1;
             census.mesh_instances += instances;
             census.triangles += triangles * instances;
             census.prototype_triangles += triangles;
+            census.refined_triangles += refined * instances;
+            census.refined_prototype_triangles += refined;
+            census.refined_bytes += topology.refined.as_ref().map_or(0, Refined::bytes);
             census.geometry_bytes += 4 * topology.face_vertex_indices.len()
                 + mesh
                     .points
@@ -973,7 +991,7 @@ mod tests {
     #[test]
     fn census_repeats_nested_instances() {
         let mut store = Store::new();
-        drawn(&mut store, "/plain", None);
+        let plain = drawn(&mut store, "/plain", None);
         let at = |instancer: &str, indices: Vec<i32>| {
             let instancer = instancer.into();
             Some(Instancing { instancer, indices })
@@ -1001,6 +1019,30 @@ mod tests {
             (3 * 9, 3 * 2)
         );
         assert_eq!(census.geometry_bytes, 2 * (7 * 4 + 4 * 12));
+        // Nothing is refined, so every triangle is drawn as it is.
+        assert_eq!(
+            (census.refined_triangles, census.refined_prototype_triangles),
+            (3 * 9, 3 * 2)
+        );
+        // Refined into three quads, /plain draws six triangles, not three.
+        let mut topology = store.meshes()[&plain].topology.clone().unwrap();
+        topology.scheme = Scheme::CatmullClark;
+        topology.refined = Some(Refined {
+            face_vertex_counts: vec![4; 3],
+            face_vertex_indices: vec![0; 12],
+            holes: vec![],
+            offsets: vec![0, 1],
+            indices: vec![0],
+            weights: vec![1.0],
+        });
+        store.set_topology(plain, topology).unwrap();
+        let census = store.census().unwrap();
+        assert_eq!(
+            (census.refined_triangles, census.refined_prototype_triangles),
+            (3 * 8 + 6, 3 + 6)
+        );
+        assert_eq!(census.triangles, 3 * 9);
+        assert_eq!(census.refined_bytes, 4 * (3 + 12 + 2 + 1 + 1));
         assert_eq!((census.materials, census.instancers), (2, 2));
         assert_eq!(census.counted["sphereLight"], 2);
 

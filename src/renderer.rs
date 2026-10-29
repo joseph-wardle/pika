@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
+use crate::cull::{self, Cull};
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
@@ -92,7 +93,10 @@ pub struct Renderer {
     // Field order is drop order: the target waits for idle, then the
     // pipelines and buffers are destroyed before their device.
     target: Option<Target>,
+    /// The camera's records and visible instances.
+    view: Option<cull::View>,
     raster: Raster,
+    cull: Cull,
     subdiv: Subdiv,
     smooth: Smooth,
     geometry: Geometry,
@@ -131,6 +135,10 @@ struct FrameStats {
     /// The CPU copy into the host's render buffers.
     place: Duration,
     update: geometry::Update,
+    /// The instances and triangles the camera's view drew.
+    drawn: [u32; 2],
+    /// The device-local bytes of the geometry's buffers.
+    geometry_bytes: u64,
     /// Meshes whose points moved.
     moved: usize,
     /// Meshes whose transform moved.
@@ -156,12 +164,15 @@ impl Renderer {
         let stats = output("PIKA_STATS")?;
         let device = instance.open(index)?;
         let mesh = shader::compile("mesh")?;
+        let cull = shader::compile("cull")?;
         let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
         Ok(Self {
             store: Store::new(),
             target: None,
+            view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
+            cull: Cull::new(&device, &cull.spirv)?,
             subdiv: Subdiv::new(&device, &subdiv.spirv)?,
             smooth: Smooth::new(&device, &smooth.spirv)?,
             geometry: Geometry::new(),
@@ -279,6 +290,19 @@ impl Renderer {
             &self.smooth,
             cb,
         )?;
+        target.begin_cull();
+        let bound = self.geometry.bound();
+        let mut view = match (&bound, &mut self.view) {
+            (None, _) => None,
+            (Some(g), Some(v)) if v.fits(g) => Some(v),
+            (Some(g), slot) => {
+                *slot = None;
+                Some(slot.insert(cull::View::new(&self.device, g)?))
+            }
+        };
+        if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
+            self.cull.record(cb, &camera, geometry, view);
+        }
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(&[
             vk::ClearColorValue {
@@ -287,12 +311,12 @@ impl Renderer {
             clears[0],
             clears[1],
         ]);
-        if let Some(geometry) = self.geometry.bound() {
-            self.raster
-                .draw(cb, formats[0].0, target.area(), camera, &geometry);
+        if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
+            (self.raster).draw(cb, formats[0].0, target.area(), camera, geometry, view);
         }
         let read = [&frame.color, &frame.depth, &frame.normal].map(Option::is_some);
         let times = target.finish(&read)?;
+        let drawn = view.map_or([0; 2], |v| v.drawn());
         let record = start.elapsed() - times.wait;
 
         let placing = Instant::now();
@@ -322,6 +346,8 @@ impl Renderer {
             target: times,
             place: placing.elapsed(),
             update,
+            drawn,
+            geometry_bytes: self.geometry.bytes(),
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
             read_bytes,
@@ -363,10 +389,11 @@ impl Renderer {
         let frames = |time: fn(&FrameStats) -> Duration| percentiles(self.frames.iter().map(time));
         format!(
             "{syncs}; {} frames, last at {width}×{height} with {color:?} color: \
-             on the GPU, update {}, draw {}, readback {}; on the CPU, record {}, \
+             on the GPU, update {}, cull {}, draw {}, readback {}; on the CPU, record {}, \
              wait {}, copy into the render buffers {}",
             self.frames.len(),
             frames(|f| f.target.update),
+            frames(|f| f.target.cull),
             frames(|f| f.target.draw),
             frames(|f| f.target.readback),
             frames(|f| f.record),
@@ -427,7 +454,8 @@ fn stats_line(
     line += &format!(
         " inserted {} removed {} mesh_bytes {} mesh_redundant_bytes {} instancer_bytes {} \
          instancer_redundant_bytes {} curve_bytes {} meshes {} mesh_instances {} triangles {} \
-         prototype_triangles {} geometry_bytes {} materials {} instancers {} curves {}",
+         prototype_triangles {} refined_triangles {} refined_prototype_triangles {} \
+         geometry_bytes {} refined_bytes {} materials {} instancers {} curves {}",
         s.inserted,
         s.removed,
         s.mesh.pulled,
@@ -439,7 +467,10 @@ fn stats_line(
         census.mesh_instances,
         census.triangles,
         census.prototype_triangles,
+        census.refined_triangles,
+        census.refined_prototype_triangles,
         census.geometry_bytes,
+        census.refined_bytes,
         census.materials,
         census.instancers,
         census.curves,
@@ -451,23 +482,29 @@ fn stats_line(
 }
 
 /// One frame as `key value` pairs. The GPU's update is the uploads and the
-/// smooth normal pass; `layout` and `draws` are 1 when they were rewritten.
+/// stencil and smooth normal passes; `layout` and `draws` are 1 when they
+/// were rewritten.
 fn frame_line(index: usize, f: &FrameStats) -> String {
     let ms = |t: Duration| t.as_secs_f64() * 1e3;
     format!(
         "frame {index} width {} height {} record_ms {:.3} wait_ms {:.3} place_ms {:.3} \
-         gpu_update_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} uploaded_bytes {} \
-         read_bytes {} moved_meshes {} moved_transforms {} layout {} draws {}\n",
+         gpu_update_ms {:.3} gpu_cull_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} \
+         uploaded_bytes {} read_bytes {} drawn_instances {} drawn_triangles {} \
+         geometry_bytes {} moved_meshes {} moved_transforms {} layout {} draws {}\n",
         f.width,
         f.height,
         ms(f.record),
         ms(f.target.wait),
         ms(f.place),
         ms(f.target.update),
+        ms(f.target.cull),
         ms(f.target.draw),
         ms(f.target.readback),
         f.update.bytes,
         f.read_bytes,
+        f.drawn[0],
+        f.drawn[1],
+        f.geometry_bytes,
         f.moved,
         f.transforms,
         u8::from(f.update.layout),
@@ -500,6 +537,7 @@ mod tests {
             target: target::Times {
                 wait: ms(5.25),
                 update: ms(0.875),
+                cull: ms(0.125),
                 draw: ms(2.0),
                 readback: ms(1.375),
             },
@@ -509,6 +547,8 @@ mod tests {
                 layout: false,
                 draws: true,
             },
+            drawn: [1274, 11_550_000],
+            geometry_bytes: 1 << 30,
             moved: 338,
             transforms: 12,
             read_bytes: 20_995_200,
@@ -516,8 +556,10 @@ mod tests {
         assert_eq!(
             frame_line(7, &stats),
             "frame 7 width 1620 height 1080 record_ms 1.500 wait_ms 5.250 place_ms 4.500 \
-             gpu_update_ms 0.875 gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
-             read_bytes 20995200 moved_meshes 338 moved_transforms 12 layout 0 draws 1\n"
+             gpu_update_ms 0.875 gpu_cull_ms 0.125 gpu_draw_ms 2.000 gpu_readback_ms 1.375 \
+             uploaded_bytes 4096 read_bytes 20995200 drawn_instances 1274 \
+             drawn_triangles 11550000 geometry_bytes 1073741824 moved_meshes 338 \
+             moved_transforms 12 layout 0 draws 1\n"
         );
     }
 }

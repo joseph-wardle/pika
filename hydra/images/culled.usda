@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    doc = "Meshes the cull pass must keep although their box centres are out of view: a wall whose points move at frame 2 to cross the right edge, a floor crossing the near plane with its centre behind the camera, and an instance of a Catmull-Clark card crossing the left edge. Also a cube that moves from behind the camera into view, and card instances in view, off to the right (one moving into view at frame 2) and behind the camera."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+# At z = -5 the view spans x in (-1.8, 1.8) and y in (-1.0125, 1.0125).
+def Mesh "wall"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points.timeSamples = {
+        1: [(2, -0.3, -5), (6, -0.3, -5.5), (6, 0.3, -5.5), (2, 0.3, -5)],
+        2: [(1.2, -0.3, -5), (6, -0.3, -5.5), (6, 0.3, -5.5), (1.2, 0.3, -5)],
+    }
+}
+
+def Mesh "floor"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1, -0.9, 20), (1, -0.9, 20), (1, -0.9, -6), (-1, -0.9, -6)]
+}
+
+def Mesh "visitor"
+{
+    uniform token subdivisionScheme = "none"
+    double3 xformOp:translate.timeSamples = {
+        1: (0, 0, 3),
+        2: (-1.1, 0.5, -6),
+    }
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 3, 2, 2, 3, 5, 4, 4, 5, 7, 6, 6, 7, 1, 0, 1, 7, 5, 3, 6, 0, 2, 4]
+    point3f[] points = [(-0.2, -0.2, 0.2), (0.2, -0.2, 0.2), (-0.2, 0.2, 0.2), (0.2, 0.2, 0.2), (-0.2, 0.2, -0.2), (0.2, 0.2, -0.2), (-0.2, -0.2, -0.2), (0.2, -0.2, -0.2)]
+}
+
+def PointInstancer "scatter"
+{
+    rel prototypes = [</scatter/protos/card>]
+    int[] protoIndices = [0, 0, 0, 0]
+    point3f[] positions.timeSamples = {
+        1: [(0.3, 0.4, -5), (5, 0, -5), (0, 0, 4), (-1.95, 0.55, -5)],
+        2: [(0.3, 0.4, -5), (0.9, -0.3, -5), (0, 0, 4), (-1.95, 0.55, -5)],
+    }
+    quath[] orientations = [(0, 0, 0, 1), (1, 0, 0, 0), (1, 0, 0, 0), (1, 0, 0, 0)]
+
+    def Scope "protos"
+    {
+        # Gently bumped, so its smooth normals turn slowly across a pixel.
+        def Mesh "card"
+        {
+            uniform token subdivisionScheme = "catmullClark"
+            int[] faceVertexCounts = [4, 4, 4, 4]
+            int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+            point3f[] points = [(-0.3, -0.3, 0), (0, -0.3, 0), (0.3, -0.3, 0), (-0.3, 0, 0), (0, 0, 0.1), (0.3, 0, 0), (-0.3, 0.3, 0), (0, 0.3, 0), (0.3, 0.3, 0)]
+        }
+    }
+}

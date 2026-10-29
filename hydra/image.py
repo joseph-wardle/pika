@@ -18,7 +18,9 @@ What the reference encodes:
   instance proxies, point instancers' prototypes at USD's instance
   transforms, without the instances its mask (invisibleIds) hides. Only
   meshes of the host's purposes are drawn: husk's default and render,
-  usdrecord's default and proxy.
+  usdrecord's default and proxy. Nothing is culled: Pika keeps an instance
+  unless its box is wholly outside one plane of the view's frustum, so it
+  must draw exactly what the reference does.
 - A mesh whose subdivisionScheme is not none is drawn refined once, as
   Pika draws it (one level, whatever the host's refine level): each face
   splits into quads, one per corner, through the corner's vertex point, its
@@ -72,7 +74,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
             "cage drawn on subdivided meshes", "boundary rules of the interior",
-            "purposes ignored", "frame 1's reference"]
+            "purposes ignored", "culled by box centre", "frame 1's reference"]
 HUSK_PURPOSES = ("default", "render")
 USDRECORD_PURPOSES = ("default", "proxy")
 
@@ -249,6 +251,10 @@ def triangles(stage, time, purposes, control=None):
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
         points, counts, indices, holes = surface(mesh, time, control)
+        cage = Gf.Range3d()
+        for p in mesh.GetPointsAttr().Get(time):
+            cage.UnionWith(Gf.Vec3d(p))
+        centre = world.Transform(cage.GetMidpoint())
         if control == "holes drawn":
             holes = set()
         normals = mesh.GetNormalsAttr().Get(time)
@@ -283,6 +289,7 @@ def triangles(stage, time, purposes, control=None):
                     "normals": [normal(c) for c in cs],
                     "normal_matrix": normal_matrix,
                     "left": left,
+                    "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
                 })
             corner += count
@@ -309,6 +316,11 @@ def reference(stage, time, width, height, purposes, control=None):
         misread_orientations(stage, time)
     tris = triangles(stage, time, purposes, control)
     stage.GetSessionLayer().Clear()
+    if control == "culled by box centre":
+        def seen(p):
+            c = to_clip.Transform(p)
+            return f.GetNearFar().Contains(-f.ComputeViewMatrix().Transform(p)[2]) and all(abs(v) <= 1 for v in (c[0], c[1]))
+        tris = [t for t in tris if seen(t["centre"])]
     shift = 0.5 if control == "half a pixel right" else 0.0
 
     image = {

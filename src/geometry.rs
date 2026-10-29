@@ -9,7 +9,9 @@
 //! on the meshes whose points moved, and rewrites the instances of meshes
 //! whose transform moved. It rewrites every instance and draw record when a
 //! visibility, render tag or instancer changes, or a moved mesh's instance
-//! count does. Each mesh is one draw record, of all its instances.
+//! count does. Each mesh is one draw record, of the instances of it that the
+//! cull pass finds in a view; its box, in its own space, is recomputed when
+//! its points move.
 //!
 //! A subdivision surface the delegate refined is drawn as its refined faces,
 //! whose points the stencil pass writes from its cage. A mesh's normals are
@@ -43,6 +45,9 @@ struct Range {
     first_vertex: i32,
     first_index: u32,
     index_count: u32,
+    /// How far a refined point can lie outside its cage's box, as a fraction
+    /// of the box's size on each axis (see `stencils`); 0 when not refined.
+    spread: f32,
 }
 
 /// What changes only when a mesh is remodelled, and the buffers sized by it.
@@ -77,14 +82,35 @@ struct Layout {
     indices: Buffer,
 }
 
-/// Each drawn mesh's rows of the instances, which its draw record draws.
-type Rows = BTreeMap<u64, std::ops::Range<usize>>;
+/// A drawn mesh's draw record and its rows of the instances.
+#[derive(Clone, Debug, PartialEq)]
+struct Row {
+    record: u32,
+    instances: std::ops::Range<usize>,
+}
+
+type Rows = BTreeMap<u64, Row>;
+
+/// The instances and their draw records, before upload.
+struct DrawTables {
+    instances: Vec<Instance>,
+    /// Each instance's draw record.
+    owners: Vec<u32>,
+    /// Each record's box: its mesh's low corner, then its high one.
+    boxes: Vec<[f32; 6]>,
+    /// No record has instances until the cull pass counts a view's.
+    records: Vec<vk::DrawIndexedIndirectCommand>,
+    rows: Rows,
+}
 
 /// The instances and their draw records, sized to fit.
 struct Draws {
     instances: Buffer,
+    owners: Buffer,
+    boxes: Buffer,
     records: Buffer,
     count: u32,
+    instance_count: u32,
     rows: Rows,
 }
 
@@ -98,16 +124,20 @@ pub struct Geometry {
     staging: Option<Buffer>,
 }
 
-/// The addresses and buffers the mesh pass binds.
+/// The addresses and buffers the cull and mesh passes bind.
 pub struct Bound {
     pub points: vk::DeviceAddress,
     pub normals: vk::DeviceAddress,
     pub smooth: vk::DeviceAddress,
     pub vertices: vk::DeviceAddress,
     pub instances: vk::DeviceAddress,
+    pub owners: vk::DeviceAddress,
+    pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
+    /// The draw records without instances, which each view copies.
     pub records: vk::Buffer,
     pub count: u32,
+    pub instance_count: u32,
 }
 
 /// What one frame's `update` wrote.
@@ -223,8 +253,9 @@ impl Geometry {
             }
         }
 
-        let records;
+        let tables;
         let mut patches = Vec::new();
+        let mut boxes = Vec::new();
         let mut rewrite = rebuilt || moved.draws || self.draws.is_none() || self.tags != tags;
         if let (false, Some(draws)) = (rewrite, &self.draws) {
             match patch(store, &layout.ranges, &draws.rows, &moved.transforms, tags) {
@@ -238,45 +269,72 @@ impl Geometry {
                     offset: (first * size_of::<Instance>()) as u64,
                 });
             }
+            for id in &moved.points {
+                let (Some(row), Some(range)) = (draws.rows.get(id), layout.ranges.get(id)) else {
+                    continue;
+                };
+                boxes.push((row.record, mesh_box(&store.meshes()[id], range.spread)));
+            }
+            for (record, b) in &boxes {
+                copies.push(Upload {
+                    bytes: bytes(b),
+                    buffer: draws.boxes.raw,
+                    offset: *record as u64 * 24,
+                });
+            }
         }
         if rewrite {
             self.tags = tags.to_vec();
-            let (instances, commands, rows) = draws(store, &layout.ranges, tags);
-            records = (instances, commands);
+            tables = draws(store, &layout.ranges, tags);
+            let t = &tables;
             let draws = match self.draws.take() {
                 Some(d)
-                    if d.instances.size >= size(&records.0)
-                        && d.records.size >= size(&records.1) =>
+                    if d.instances.size >= size(&t.instances)
+                        && d.owners.size >= size(&t.owners)
+                        && d.boxes.size >= size(&t.boxes)
+                        && d.records.size >= size(&t.records) =>
                 {
                     d
                 }
-                _ => Draws {
-                    instances: Buffer::device_local(
-                        device,
-                        size(&records.0),
-                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                    )?,
-                    records: Buffer::device_local(
-                        device,
-                        size(&records.1),
-                        vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                    )?,
-                    count: 0,
-                    rows: Rows::new(),
-                },
+                _ => {
+                    let storage =
+                        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+                    let copied =
+                        vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
+                    Draws {
+                        instances: Buffer::device_local(device, size(&t.instances), storage)?,
+                        owners: Buffer::device_local(device, size(&t.owners), storage)?,
+                        boxes: Buffer::device_local(device, size(&t.boxes), storage)?,
+                        records: Buffer::device_local(device, size(&t.records), copied)?,
+                        count: 0,
+                        instance_count: 0,
+                        rows: Rows::new(),
+                    }
+                }
             };
             let draws = self.draws.insert(Draws {
-                count: records.1.len() as u32,
-                rows,
+                count: t.records.len() as u32,
+                instance_count: t.instances.len() as u32,
+                rows: t.rows.clone(),
                 ..draws
             });
             copies.push(Upload {
-                bytes: bytes(&records.0),
+                bytes: bytes(&t.instances),
                 buffer: draws.instances.raw,
                 offset: 0,
             });
             copies.push(Upload {
-                bytes: bytes(&records.1),
+                bytes: bytes(&t.owners),
+                buffer: draws.owners.raw,
+                offset: 0,
+            });
+            copies.push(Upload {
+                bytes: bytes(&t.boxes),
+                buffer: draws.boxes.raw,
+                offset: 0,
+            });
+            copies.push(Upload {
+                bytes: bytes(&t.records),
                 buffer: draws.records.raw,
                 offset: 0,
             });
@@ -324,10 +382,35 @@ impl Geometry {
             smooth: layout.smooth.address,
             vertices: layout.vertices.address,
             instances: draws.instances.address,
+            owners: draws.owners.address,
+            boxes: draws.boxes.address,
             indices: layout.indices.raw,
             records: draws.records.raw,
             count: draws.count,
+            instance_count: draws.instance_count,
         })
+    }
+
+    /// The device-local bytes of every buffer, the staging buffer aside.
+    pub fn bytes(&self) -> u64 {
+        let layout = self.layout.iter().flat_map(|l| {
+            [
+                &l.points,
+                &l.cage,
+                &l.stencils,
+                &l.stencil_indices,
+                &l.stencil_weights,
+                &l.normals,
+                &l.smooth,
+                &l.offsets,
+                &l.corners,
+                &l.vertices,
+                &l.indices,
+            ]
+        });
+        let draws =
+            (self.draws.iter()).flat_map(|d| [&d.instances, &d.owners, &d.boxes, &d.records]);
+        layout.chain(draws).map(|b| b.size).sum()
     }
 
     /// Writes `copies` into the staging buffer and records them into `cb`.
@@ -373,12 +456,12 @@ impl Geometry {
                 vk::PipelineStageFlags2::COMPUTE_SHADER
                     | vk::PipelineStageFlags2::VERTEX_SHADER
                     | vk::PipelineStageFlags2::INDEX_INPUT
-                    | vk::PipelineStageFlags2::DRAW_INDIRECT,
+                    | vk::PipelineStageFlags2::COPY,
             )
             .dst_access_mask(
                 vk::AccessFlags2::SHADER_STORAGE_READ
                     | vk::AccessFlags2::INDEX_READ
-                    | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+                    | vk::AccessFlags2::TRANSFER_READ,
             );
         // SAFETY: `cb` is recording outside any rendering.
         unsafe {
@@ -466,6 +549,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     first_vertex: first_vertex as i32,
                     first_index: first_index as u32,
                     index_count: (tables.indices.len() - first_index) as u32,
+                    spread: t.refined.as_ref().map_or(0.0, spread),
                 },
             );
             points += drawn as u64;
@@ -704,12 +788,64 @@ fn stencils(
             "stencil index {bad} is not one of {cage_count} points"
         ));
     }
+    // The cull pass's boxes rely on every stencil being an affine
+    // combination (see `spread`), as subdivision's are.
+    if let Some(p) = (offsets.windows(2)).position(|w| {
+        let sum: f32 = refined.weights[w[0] as usize..w[1] as usize].iter().sum();
+        (sum - 1.0).abs() > 1e-3
+    }) {
+        return Err(format!("stencil {p}'s weights do not sum to 1"));
+    }
     let first_entry = tables.stencil_indices.len() as u32;
     let starts = &offsets[..offsets.len() - 1];
     (tables.stencils).extend(starts.iter().map(|&o| first_entry + o));
     (tables.stencil_indices).extend(refined.indices.iter().map(|&p| first_cage + p as u32));
     (tables.stencil_weights).extend_from_slice(&refined.weights);
     Ok(())
+}
+
+/// How far outside its cage's box a refined point can lie, as a fraction of
+/// the box's size on each axis. A stencil's weights sum to 1, so its point
+/// is the box's high corner less a weighted sum of each cage point's
+/// distance below it: the positive weights pull it inside, and only the
+/// negative ones, which Catmull-Clark gives a vertex of valence 2, push it
+/// out, by at most their sum times the box's size.
+fn spread(refined: &Refined) -> f32 {
+    (refined.offsets.windows(2))
+        .map(|w| {
+            let weights = &refined.weights[w[0] as usize..w[1] as usize];
+            weights
+                .iter()
+                .filter(|&&w| w < 0.0)
+                .map(|w| -w)
+                .sum::<f32>()
+        })
+        .fold(0.0, f32::max)
+}
+
+/// The box around a mesh's cage points, grown by `spread` of its size: the
+/// low corner, then the high one. It holds every point drawn.
+fn mesh_box(mesh: &Mesh, spread: f32) -> [f32; 6] {
+    let points = mesh.points.as_deref().unwrap_or_default();
+    if points.is_empty() {
+        return [0.0; 6];
+    }
+    let (mut lo, mut hi) = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    for p in points {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    let grow: [f32; 3] = std::array::from_fn(|k| spread * (hi[k] - lo[k]));
+    [
+        lo[0] - grow[0],
+        lo[1] - grow[1],
+        lo[2] - grow[2],
+        hi[0] + grow[0],
+        hi[1] + grow[1],
+        hi[2] + grow[2],
+    ]
 }
 
 /// Appends each point's corners, as Hydra's Hd_VertexAdjacency lists them:
@@ -749,37 +885,43 @@ fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mu
 }
 
 /// One draw record per visible mesh of render `tags` (or of any, when there
-/// are none), drawing it at each of its instances, and each mesh's rows.
-fn draws(
-    store: &Store,
-    ranges: &BTreeMap<u64, Range>,
-    tags: &[String],
-) -> (Vec<Instance>, Vec<vk::DrawIndexedIndirectCommand>, Rows) {
+/// are none), with its box and its rows of the instances it is drawn at.
+fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawTables {
     let instancers = by_path(store);
-    let mut instances = Vec::new();
-    let mut records = Vec::new();
-    let mut rows = Rows::new();
+    let mut t = DrawTables {
+        instances: Vec::new(),
+        owners: Vec::new(),
+        boxes: Vec::new(),
+        records: Vec::new(),
+        rows: Rows::new(),
+    };
     for (&id, range) in ranges {
-        let first = instances.len();
-        instances.extend(mesh_instances(
-            &instancers,
-            &store.meshes()[&id],
-            range,
-            tags,
-        ));
-        if instances.len() == first {
+        let mesh = &store.meshes()[&id];
+        let first = t.instances.len();
+        t.instances
+            .extend(mesh_instances(&instancers, mesh, range, tags));
+        if t.instances.len() == first {
             continue;
         }
-        rows.insert(id, first..instances.len());
-        records.push(vk::DrawIndexedIndirectCommand {
+        let record = t.records.len() as u32;
+        t.owners.resize(t.instances.len(), record);
+        t.rows.insert(
+            id,
+            Row {
+                record,
+                instances: first..t.instances.len(),
+            },
+        );
+        t.boxes.push(mesh_box(mesh, range.spread));
+        t.records.push(vk::DrawIndexedIndirectCommand {
             index_count: range.index_count,
-            instance_count: (instances.len() - first) as u32,
+            instance_count: 0,
             first_index: range.first_index,
             vertex_offset: range.first_vertex,
             first_instance: first as u32,
         });
     }
-    (instances, records, rows)
+    t
 }
 
 /// The instances of the meshes whose transform moved, each with its first
@@ -799,7 +941,7 @@ fn patch(
             continue;
         };
         let instances = mesh_instances(&instancers, &store.meshes()[id], range, tags);
-        let rows = rows.get(id).cloned().unwrap_or_default();
+        let rows = rows.get(id).map_or(0..0, |r| r.instances.clone());
         if instances.len() != rows.len() {
             return None;
         }
@@ -1037,6 +1179,46 @@ mod tests {
         assert!(with(|r| r.offsets.swap(1, 2)).contains("do not divide"));
         assert!(with(|r| r.face_vertex_indices[5] = 4).contains("index 4 is not one of 4"));
         assert!(with(|r| r.holes[0] = 2).contains("hole index 2"));
+        assert!(with(|r| r.weights[0] = 0.5).contains("stencil 0's weights do not sum to 1"));
+    }
+
+    /// Each refined point, as the stencil pass writes it.
+    fn refined_points(r: &Refined, cage: &[[f32; 3]]) -> Vec<[f32; 3]> {
+        (r.offsets.windows(2))
+            .map(|w| {
+                let entries = w[0] as usize..w[1] as usize;
+                std::array::from_fn(|k| {
+                    (entries.clone())
+                        .map(|e| r.weights[e] * cage[r.indices[e] as usize][k])
+                        .sum()
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn boxes_hold_every_refined_point() {
+        let mut m = refined();
+        m.points = Some(vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [0.0, 2.0, 1.0],
+            [2.0, 1.0, 0.0],
+        ]);
+        // Point 3's stencil leans on a negative weight, as Catmull-Clark's
+        // does at a vertex of valence 2, and lands outside the cage's box.
+        let r = m.topology.as_mut().unwrap().refined.as_mut().unwrap();
+        r.weights[4..6].copy_from_slice(&[-0.5, 1.5]);
+        let r = r.clone();
+        let points = refined_points(&r, m.points.as_ref().unwrap());
+        assert_eq!(points[3], [-1.0, -0.5, 0.0]);
+        let inside =
+            |b: [f32; 6]| (points.iter()).all(|p| (0..3).all(|k| b[k] <= p[k] && p[k] <= b[k + 3]));
+        assert_eq!(spread(&r), 0.5);
+        assert!(inside(mesh_box(&m, spread(&r))));
+        // The control: the cage's own box misses it.
+        assert!(!inside(mesh_box(&m, 0.0)));
     }
 
     #[test]
@@ -1081,6 +1263,7 @@ mod tests {
                 first_vertex: 0,
                 first_index: 0,
                 index_count: 9,
+                spread: 0.0,
             };
             ranges.insert(id, range);
         }
@@ -1092,7 +1275,7 @@ mod tests {
         let (store, ranges) = drawn(&[("/final", "render"), ("/draft", "proxy")]);
         let drawn = |tags: &[&str]| {
             let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
-            draws(&store, &ranges, &tags).1.len()
+            draws(&store, &ranges, &tags).records.len()
         };
         // A retagged mesh keeps its data in the store, so drawing filters.
         assert_eq!(drawn(&["geometry", "render"]), 1);
@@ -1103,15 +1286,47 @@ mod tests {
     }
 
     #[test]
+    fn records_start_empty_and_instances_name_theirs() {
+        let (store, ranges) = drawn(&[("/a", "render"), ("/b", "render")]);
+        let t = draws(&store, &ranges, &[]);
+        // The cull pass counts each view's instances.
+        assert!(t.records.iter().all(|r| r.instance_count == 0));
+        assert_eq!(t.owners, [0, 1]);
+        assert_eq!(
+            (t.records.iter().map(|r| r.first_instance)).collect::<Vec<_>>(),
+            [0, 1]
+        );
+        assert_eq!(t.boxes.len(), 2);
+        let rows: Vec<_> = t.rows.values().cloned().collect();
+        assert_eq!(
+            rows,
+            [
+                Row {
+                    record: 0,
+                    instances: 0..1
+                },
+                Row {
+                    record: 1,
+                    instances: 1..2
+                }
+            ]
+        );
+    }
+
+    #[test]
     fn moved_transforms_patch_their_rows() {
         let (mut store, ranges) = drawn(&[("/a", "render"), ("/b", "render"), ("/c", "render")]);
-        let (mut instances, _, rows) = draws(&store, &ranges, &[]);
+        let DrawTables {
+            mut instances,
+            rows,
+            ..
+        } = draws(&store, &ranges, &[]);
         let ids: Vec<u64> = ranges.keys().copied().collect();
         let mut moved = IDENTITY;
         moved[12] = 2.0;
         store.set_transform(ids[1], moved).unwrap();
         let transforms = store.take_moved().transforms;
-        let (rewritten, ..) = draws(&store, &ranges, &[]);
+        let rewritten = draws(&store, &ranges, &[]).instances;
         assert_ne!(instances, rewritten);
         for (first, patch) in patch(&store, &ranges, &rows, &transforms, &[]).unwrap() {
             instances[first..first + patch.len()].copy_from_slice(&patch);
