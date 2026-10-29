@@ -1,5 +1,6 @@
-//! The images a frame renders into, a depth buffer, and the host-visible
-//! buffers the CPU reads them back from.
+//! The images a frame renders into, a depth buffer, the host-visible
+//! buffers the CPU reads them back from, and the timestamps that time the
+//! frame's GPU work.
 
 use std::time::{Duration, Instant};
 
@@ -10,6 +11,10 @@ use crate::gpu::{self, Buffer};
 /// Pika's depth is reversed: 1 at the near plane, 0 at the far plane and
 /// beyond, so the depth buffer is cleared to 0.
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+
+/// The frame's timestamps: at `begin`, at `begin_rendering`, after
+/// rendering ends and after the readback copies.
+const TIMESTAMPS: u32 = 4;
 
 /// A color image and the buffer it is read back into.
 struct Attachment {
@@ -37,6 +42,20 @@ pub struct Target {
     pool: vk::CommandPool,
     commands: vk::CommandBuffer,
     fence: vk::Fence,
+    timestamps: vk::QueryPool,
+    timestamp_bits: u32,
+    timestamp_period: f32,
+}
+
+/// Where one frame's time went after recording.
+pub struct Times {
+    /// From the submit until the fence signalled.
+    pub wait: Duration,
+    /// On the GPU: the work recorded between `begin` and `begin_rendering`,
+    /// rendering, and the readback copies.
+    pub update: Duration,
+    pub draw: Duration,
+    pub readback: Duration,
 }
 
 impl Target {
@@ -61,6 +80,9 @@ impl Target {
             pool: vk::CommandPool::null(),
             commands: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
+            timestamps: vk::QueryPool::null(),
+            timestamp_bits: device.timestamp_bits,
+            timestamp_period: device.timestamp_period,
         };
         for &(format, bytes_per_pixel) in formats {
             let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
@@ -98,6 +120,11 @@ impl Target {
             .map_err(|e| format!("vkAllocateCommandBuffers failed: {e}"))?[0];
         t.fence = unsafe { d.create_fence(&vk::FenceCreateInfo::default(), None) }
             .map_err(|e| format!("vkCreateFence failed: {e}"))?;
+        let query_info = vk::QueryPoolCreateInfo::default()
+            .query_type(vk::QueryType::TIMESTAMP)
+            .query_count(TIMESTAMPS);
+        t.timestamps = unsafe { d.create_query_pool(&query_info, None) }
+            .map_err(|e| format!("vkCreateQueryPool failed: {e}"))?;
         Ok(t)
     }
 
@@ -131,7 +158,10 @@ impl Target {
             self.device
                 .begin_command_buffer(self.commands, &begin)
                 .map_err(|e| format!("vkBeginCommandBuffer failed: {e}"))?;
+            self.device
+                .cmd_reset_query_pool(self.commands, self.timestamps, 0, TIMESTAMPS);
         }
+        self.timestamp(0);
         Ok(self.commands)
     }
 
@@ -139,6 +169,7 @@ impl Target {
     /// its value in `clears`, the depth buffer to the far plane. Record draws,
     /// then call `finish`.
     pub fn begin_rendering(&mut self, clears: &[vk::ClearColorValue]) {
+        self.timestamp(1);
         let d = &self.device;
         let cb = self.commands;
         let mut barriers: Vec<_> = (self.colors.iter())
@@ -204,9 +235,12 @@ impl Target {
     }
 
     /// Ends the frame begun by `begin_rendering`: copies each attachment that
-    /// `read` marks to its readback buffer, submits and waits. Returns how
-    /// long the submit took to complete.
-    pub fn finish(&mut self, read: &[bool]) -> Result<Duration, String> {
+    /// `read` marks to its readback buffer, submits and waits.
+    pub fn finish(&mut self, read: &[bool]) -> Result<Times, String> {
+        // SAFETY: `cb` is recording inside the rendering `begin_rendering`
+        // started.
+        unsafe { self.device.cmd_end_rendering(self.commands) };
+        self.timestamp(2);
         let d = &self.device;
         let cb = self.commands;
         let read: Vec<&Attachment> = (self.colors.iter().zip(read))
@@ -252,10 +286,9 @@ impl Target {
                 depth: 1,
             });
         // SAFETY (this and every call below in `finish`): `cb` is recording
-        // inside the rendering `begin_rendering` started, every handle was
-        // created on `d`, and the info structs outlive the calls.
+        // outside rendering, every handle was created on `d`, and the info
+        // structs outlive the calls.
         unsafe {
-            d.cmd_end_rendering(cb);
             d.cmd_pipeline_barrier2(
                 cb,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
@@ -269,6 +302,12 @@ impl Target {
                     &[region],
                 );
             }
+            d.cmd_write_timestamp2(
+                cb,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                self.timestamps,
+                3,
+            );
             d.cmd_pipeline_barrier2(
                 cb,
                 &vk::DependencyInfo::default().buffer_memory_barriers(&to_host),
@@ -285,8 +324,44 @@ impl Target {
                 .map_err(|e| format!("vkQueueSubmit2 failed: {e}"))?;
             d.wait_for_fences(&[self.fence], true, u64::MAX)
                 .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
-            Ok(start.elapsed())
+            let wait = start.elapsed();
+            let mut ticks = [0u64; TIMESTAMPS as usize];
+            d.get_query_pool_results(
+                self.timestamps,
+                0,
+                &mut ticks,
+                vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
+            )
+            .map_err(|e| format!("vkGetQueryPoolResults failed: {e}"))?;
+            let between = |a: usize| {
+                elapsed(
+                    ticks[a],
+                    ticks[a + 1],
+                    self.timestamp_bits,
+                    self.timestamp_period,
+                )
+            };
+            Ok(Times {
+                wait,
+                update: between(0),
+                draw: between(1),
+                readback: between(2),
+            })
         }
+    }
+
+    /// Records timestamp `index`, written once all earlier commands finish.
+    fn timestamp(&mut self, index: u32) {
+        // SAFETY: the command buffer is recording, the pool was created on
+        // this device and reset in `begin`, and `index` is below `TIMESTAMPS`.
+        unsafe {
+            self.device.cmd_write_timestamp2(
+                self.commands,
+                vk::PipelineStageFlags2::ALL_COMMANDS,
+                self.timestamps,
+                index,
+            )
+        };
     }
 
     /// The whole image, for render areas, viewports and scissors.
@@ -310,6 +385,7 @@ impl Drop for Target {
         unsafe {
             let _ = d.device_wait_idle();
             d.destroy_fence(self.fence, None);
+            d.destroy_query_pool(self.timestamps, None);
             d.destroy_command_pool(self.pool, None);
             for a in &self.colors {
                 d.destroy_image_view(a.view, None);
@@ -335,6 +411,13 @@ const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     aspect_mask: vk::ImageAspectFlags::DEPTH,
     ..COLOR
 };
+
+/// The time from timestamp `start` to `end` of a counter with `bits` valid
+/// bits, ticking every `period` nanoseconds. The counter may wrap between.
+fn elapsed(start: u64, end: u64, bits: u32, period: f32) -> Duration {
+    let ticks = end.wrapping_sub(start) & (u64::MAX >> (64 - bits));
+    Duration::from_nanos((ticks as f64 * period as f64) as u64)
+}
 
 /// A device-local 2D image with its memory and a view of `range`.
 fn image(
@@ -392,5 +475,21 @@ fn image(
             }
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn elapsed_scales_ticks_and_survives_a_wrap() {
+        let ns = |d: Duration| d.as_nanos();
+        assert_eq!(ns(elapsed(1000, 1500, 64, 1.0)), 500);
+        assert_eq!(ns(elapsed(1000, 1500, 64, 52.08)), 26_040);
+        // A 36-bit counter that wrapped: 16 ticks before and 16 after.
+        assert_eq!(ns(elapsed((1 << 36) - 16, 16, 36, 1.0)), 32);
+        // The same wrap read without the mask is a huge interval.
+        assert!(ns(elapsed((1 << 36) - 16, 16, 64, 1.0)) > 1 << 60);
     }
 }

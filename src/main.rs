@@ -45,7 +45,7 @@ fn run() -> Result<(), String> {
 
     let index = gpu::choose(&instance.devices).ok_or(
         "no suitable Vulkan device: Pika needs a GPU with Vulkan 1.3 and a graphics+compute \
-         queue. Check the driver with `vulkaninfo --summary`.",
+         queue with timestamps. Check the driver with `vulkaninfo --summary`.",
     )?;
     let device = instance.open(index)?;
     println!(

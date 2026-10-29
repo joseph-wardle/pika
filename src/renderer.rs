@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use crate::geometry::Geometry;
+use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
 use crate::shader;
 use crate::smooth::Smooth;
 use crate::store::{self, Store};
-use crate::target::Target;
+use crate::target::{self, Target};
 use crate::transform::Camera;
 
 /// The render buffer formats Pika writes, as Hydra names them. Color is
@@ -99,15 +99,15 @@ pub struct Renderer {
     /// `PIKA_STORE_DUMP`: the file each sync's store is appended to, for the
     /// fixture checks. Writing it changes nothing about rendering.
     dump: Option<(String, File)>,
-    /// `PIKA_STATS`: the file each sync's stats and census are appended to,
-    /// one line each, for hydra/census.py.
+    /// `PIKA_STATS`: the file each sync's stats and census, and each frame's
+    /// stats, are appended to, one line each, for hydra/census.py.
     stats: Option<(String, File)>,
     sync_start: Option<Instant>,
     /// When the last sync began, so each sync's line can say how long the
     /// host took from one sync to the next.
     last_start: Option<Instant>,
     syncs: Vec<Sync>,
-    frames: Vec<FrameTimes>,
+    frames: Vec<FrameStats>,
     /// The size and color format of the last frame, for the report.
     last: Option<(u32, u32, Format)>,
 }
@@ -119,11 +119,19 @@ struct Sync {
     stats: store::Stats,
 }
 
-/// Where one frame's time went: the GPU uploads, draws and copy to host
-/// memory, then the CPU copy into the host's render buffers.
-struct FrameTimes {
-    submit: Duration,
-    copy: Duration,
+/// Where one frame's time went, and what it rewrote and read back.
+struct FrameStats {
+    width: u32,
+    height: u32,
+    /// The CPU's work before the submit: updating the geometry and recording.
+    record: Duration,
+    target: target::Times,
+    /// The CPU copy into the host's render buffers.
+    place: Duration,
+    update: geometry::Update,
+    /// Meshes whose points moved.
+    moved: usize,
+    read_bytes: u64,
 }
 
 impl Renderer {
@@ -134,7 +142,7 @@ impl Renderer {
             .map_err(Clone::clone)?;
         let index = gpu::choose(&instance.devices).ok_or(
             "no suitable Vulkan device: Pika needs a GPU with Vulkan 1.3 and a graphics+compute \
-             queue. Check the driver with `vulkaninfo --summary`.",
+             queue with timestamps. Check the driver with `vulkaninfo --summary`.",
         )?;
         let validation = match instance.validation_messages() {
             Some(_) => "on (sync)",
@@ -196,6 +204,7 @@ impl Renderer {
     /// Draws the store's meshes into the frame's data window, and copies
     /// each bound AOV into its render buffer.
     pub fn render(&mut self, frame: Frame) -> Result<(), String> {
+        let start = Instant::now();
         let [x, y, w, h] = frame.window;
         if w == 0 || h == 0 || x + w > frame.width || y + h > frame.height {
             return Err(format!(
@@ -255,7 +264,7 @@ impl Renderer {
         };
         let moved = self.store.take_moved();
         let cb = target.begin()?;
-        self.geometry.update(
+        let update = self.geometry.update(
             &self.device,
             &self.store,
             &moved,
@@ -276,9 +285,10 @@ impl Renderer {
                 .draw(cb, formats[0].0, target.area(), camera, &geometry);
         }
         let read = [&frame.color, &frame.depth, &frame.normal].map(Option::is_some);
-        let submit = target.finish(&read)?;
+        let times = target.finish(&read)?;
+        let record = start.elapsed() - times.wait;
 
-        let start = Instant::now();
+        let placing = Instant::now();
         for (i, aov) in [frame.color, frame.depth, frame.normal]
             .into_iter()
             .enumerate()
@@ -294,10 +304,25 @@ impl Renderer {
                 );
             }
         }
-        self.frames.push(FrameTimes {
-            submit,
-            copy: start.elapsed(),
-        });
+        let read_bytes = (formats.iter().zip(read))
+            .filter(|(_, r)| *r)
+            .map(|(f, _)| (f.1 * w as usize * h as usize) as u64)
+            .sum();
+        let stats = FrameStats {
+            width: w,
+            height: h,
+            record,
+            target: times,
+            place: placing.elapsed(),
+            update,
+            moved: moved.points.len(),
+            read_bytes,
+        };
+        if let Some((path, file)) = &mut self.stats {
+            file.write_all(frame_line(self.frames.len() + 1, &stats).as_bytes())
+                .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))?;
+        }
+        self.frames.push(stats);
         self.last = Some((w, h, color));
         Ok(())
     }
@@ -327,12 +352,18 @@ impl Renderer {
         let Some((width, height, color)) = self.last else {
             return format!("{syncs}; no frames rendered");
         };
+        let frames = |time: fn(&FrameStats) -> Duration| percentiles(self.frames.iter().map(time));
         format!(
             "{syncs}; {} frames, last at {width}×{height} with {color:?} color: \
-             upload, draw and readback {}; copy into the render buffers {}",
+             on the GPU, update {}, draw {}, readback {}; on the CPU, record {}, \
+             wait {}, copy into the render buffers {}",
             self.frames.len(),
-            percentiles(self.frames.iter().map(|f| f.submit)),
-            percentiles(self.frames.iter().map(|f| f.copy)),
+            frames(|f| f.target.update),
+            frames(|f| f.target.draw),
+            frames(|f| f.target.readback),
+            frames(|f| f.record),
+            frames(|f| f.target.wait),
+            frames(|f| f.place),
         )
     }
 }
@@ -411,6 +442,30 @@ fn stats_line(
     line + "\n"
 }
 
+/// One frame as `key value` pairs. The GPU's update is the uploads and the
+/// smooth normal pass; `layout` and `draws` are 1 when they were rewritten.
+fn frame_line(index: usize, f: &FrameStats) -> String {
+    let ms = |t: Duration| t.as_secs_f64() * 1e3;
+    format!(
+        "frame {index} width {} height {} record_ms {:.3} wait_ms {:.3} place_ms {:.3} \
+         gpu_update_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} uploaded_bytes {} \
+         read_bytes {} moved_meshes {} layout {} draws {}\n",
+        f.width,
+        f.height,
+        ms(f.record),
+        ms(f.target.wait),
+        ms(f.place),
+        ms(f.target.update),
+        ms(f.target.draw),
+        ms(f.target.readback),
+        f.update.bytes,
+        f.read_bytes,
+        f.moved,
+        u8::from(f.update.layout),
+        u8::from(f.update.draws),
+    )
+}
+
 /// The median and maximum of a non-empty set of times.
 fn percentiles(times: impl Iterator<Item = Duration>) -> String {
     let mut ms: Vec<f64> = times.map(|t| t.as_secs_f64() * 1e3).collect();
@@ -420,4 +475,39 @@ fn percentiles(times: impl Iterator<Item = Duration>) -> String {
         ms[ms.len() / 2],
         ms[ms.len() - 1]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_line_is_key_value_pairs() {
+        let ms = |t: f64| Duration::from_secs_f64(t / 1e3);
+        let stats = FrameStats {
+            width: 1620,
+            height: 1080,
+            record: ms(1.5),
+            target: target::Times {
+                wait: ms(5.25),
+                update: ms(0.875),
+                draw: ms(2.0),
+                readback: ms(1.375),
+            },
+            place: ms(4.5),
+            update: geometry::Update {
+                bytes: 4096,
+                layout: false,
+                draws: true,
+            },
+            moved: 338,
+            read_bytes: 20_995_200,
+        };
+        assert_eq!(
+            frame_line(7, &stats),
+            "frame 7 width 1620 height 1080 record_ms 1.500 wait_ms 5.250 place_ms 4.500 \
+             gpu_update_ms 0.875 gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
+             read_bytes 20995200 moved_meshes 338 layout 0 draws 1\n"
+        );
+    }
 }

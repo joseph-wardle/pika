@@ -18,8 +18,12 @@ pub struct DeviceInfo {
     pub api_version: u32,
     pub vram_bytes: u64,
     pub ray_query: bool,
-    /// First queue family that supports both graphics and compute.
+    /// First queue family that supports graphics, compute and timestamps.
     pub queue_family: Option<u32>,
+    /// That family's valid timestamp bits.
+    pub timestamp_bits: u32,
+    /// Nanoseconds per timestamp tick.
+    pub timestamp_period: f32,
 }
 
 impl DeviceInfo {
@@ -30,7 +34,7 @@ impl DeviceInfo {
         } else if self.api_version < REQUIRED_API {
             Some("needs Vulkan 1.3")
         } else if self.queue_family.is_none() {
-            Some("no graphics+compute queue")
+            Some("no graphics+compute queue with timestamps")
         } else {
             None
         }
@@ -221,8 +225,7 @@ impl Instance {
         let wanted = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
         let queue_family = families
             .iter()
-            .position(|f| f.queue_flags.contains(wanted))
-            .map(|i| i as u32);
+            .position(|f| f.queue_flags.contains(wanted) && f.timestamp_valid_bits > 0);
 
         Ok(DeviceInfo {
             handle: pd,
@@ -231,7 +234,9 @@ impl Instance {
             api_version: props.api_version,
             vram_bytes,
             ray_query,
-            queue_family,
+            queue_family: queue_family.map(|i| i as u32),
+            timestamp_bits: queue_family.map_or(0, |i| families[i].timestamp_valid_bits),
+            timestamp_period: props.limits.timestamp_period,
         })
     }
 
@@ -239,9 +244,12 @@ impl Instance {
     /// with dynamic rendering and synchronization2 enabled.
     pub fn open(&self, index: usize) -> Result<Device<'_>, String> {
         let info = &self.devices[index];
-        let queue_family = info
-            .queue_family
-            .ok_or_else(|| format!("{} has no graphics+compute queue", info.name))?;
+        let queue_family = info.queue_family.ok_or_else(|| {
+            format!(
+                "{} has no graphics+compute queue with timestamps",
+                info.name
+            )
+        })?;
         let priorities = [1.0];
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
@@ -281,6 +289,8 @@ impl Instance {
             raw,
             queue_family,
             queue,
+            timestamp_bits: info.timestamp_bits,
+            timestamp_period: info.timestamp_period,
             memory_types: memory.memory_types_as_slice().to_vec(),
         })
     }
@@ -348,6 +358,8 @@ pub struct Device<'a> {
     pub raw: ash::Device,
     pub queue_family: u32,
     pub queue: vk::Queue,
+    pub timestamp_bits: u32,
+    pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
 }
 
@@ -510,6 +522,8 @@ mod tests {
             vram_bytes: vram_gib << 30,
             ray_query: false,
             queue_family: Some(0),
+            timestamp_bits: 64,
+            timestamp_period: 1.0,
         }
     }
 
@@ -572,7 +586,7 @@ mod tests {
         assert_eq!(devices[1].unsuitable_reason(), Some("needs Vulkan 1.3"));
         assert_eq!(
             devices[2].unsuitable_reason(),
-            Some("no graphics+compute queue")
+            Some("no graphics+compute queue with timestamps")
         );
     }
 }

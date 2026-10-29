@@ -88,6 +88,15 @@ pub struct Bound {
     pub count: u32,
 }
 
+/// What one frame's `update` wrote.
+pub struct Update {
+    pub bytes: u64,
+    /// The layout was rebuilt.
+    pub layout: bool,
+    /// The instances and draw records were rewritten.
+    pub draws: bool,
+}
+
 /// One copy into a device-local buffer.
 struct Upload<'a> {
     bytes: &'a [u8],
@@ -108,8 +117,8 @@ impl Geometry {
     /// Records into `cb` the uploads of what moved, the smooth normals of
     /// moved points, and barriers making them visible to the mesh pass, which
     /// draws the meshes of render `tags` (all of them when there are none).
-    /// Returns the bytes uploaded. No GPU work may be pending: buffers are
-    /// replaced and the staging buffer rewritten.
+    /// No GPU work may be pending: buffers are replaced and the staging
+    /// buffer rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -118,7 +127,7 @@ impl Geometry {
         tags: &[String],
         smooth: &Smooth,
         cb: vk::CommandBuffer,
-    ) -> Result<u64, String> {
+    ) -> Result<Update, String> {
         let mut copies = Vec::new();
         let built;
         let rebuilt = moved.layout || self.layout.is_none();
@@ -172,7 +181,8 @@ impl Geometry {
         }
 
         let records;
-        if rebuilt || moved.draws || self.draws.is_none() || self.tags != tags {
+        let rewrite = rebuilt || moved.draws || self.draws.is_none() || self.tags != tags;
+        if rewrite {
             self.tags = tags.to_vec();
             let (instances, commands) = draws(store, &layout.ranges, tags);
             records = (instances, commands);
@@ -212,7 +222,7 @@ impl Geometry {
                 offset: 0,
             });
         }
-        let uploaded = self.record(device, &copies, cb)?;
+        let bytes = self.record(device, &copies, cb)?;
         if rebuilt || !moved.points.is_empty() {
             let layout = self.layout.as_ref().expect("built above");
             smooth.record(
@@ -239,7 +249,11 @@ impl Geometry {
                 )
             };
         }
-        Ok(uploaded)
+        Ok(Update {
+            bytes,
+            layout: rebuilt,
+            draws: rewrite,
+        })
     }
 
     /// The buffers to draw from, once `update` has run.
