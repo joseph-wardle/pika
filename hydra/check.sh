@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # The delegate's check, run on a GPU host with Houdini (not in CI).
 #
-# Builds the delegate and renders hydra/scenes/cube.usda in husk, twice: with
-# husk's default product, which binds color as HdFormatFloat32Vec4, and with
-# the scene's /render/half settings, which bind HdFormatFloat16Vec4. Every
-# frame must be exactly Pika's clear color, and must differ from the host's
-# clear value (0, 0, 0, 0), which is what husk saves when Pika writes nothing.
-# The validation layer must be on and report nothing from Pika.
+# Builds the delegate and runs hydra/image.py, which renders each scene in
+# hydra/images/ in husk (color as HdFormatFloat32Vec4, depth and normal) and
+# in usdrecord (HdFormatFloat16Vec4 color), and compares the images with a ray
+# cast from USD. usdrecord draws on a private Xvnc display, started here. The
+# validation layer must be on and report nothing from Pika.
 #
 # Then it syncs each scene in hydra/fixtures/ for two frames, running the
 # scene's .py script (if any) on husk's stage between them, and compares
@@ -19,12 +18,9 @@ HFS=${HFS:-/opt/hfs21.0}
 SDK=${VULKAN_SDK:?set VULKAN_SDK to the SDK\'s x86_64 directory, for its validation layer}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$ROOT/target/hydra/check
-FRAMES=24
-# src/renderer.rs CLEAR.
-CLEAR=0.25,0.5,0.75,1
 
 make -C "$ROOT/hydra" --no-print-directory
-mkdir -p "$OUT/float32" "$OUT/float16" "$OUT/fixtures"
+mkdir -p "$OUT/images" "$OUT/fixtures"
 
 # houdini_setup_bash reads unset variables.
 set +u
@@ -34,22 +30,13 @@ export PXR_PLUGINPATH_NAME=$ROOT/target/hydra
 export LD_LIBRARY_PATH=$SDK/lib:${LD_LIBRARY_PATH:-}
 export VK_ADD_LAYER_PATH=$SDK/share/vulkan/explicit_layer.d
 
-hoiiotool --pattern constant:color=$CLEAR 1920x1080 4 -d half -o "$OUT/expected.exr"
-hoiiotool --pattern constant:color=0,0,0,0 1920x1080 4 -d half -o "$OUT/unwritten.exr"
-
 failed=0
 fail() {
     echo "FAIL: $*"
     failed=1
 }
 
-# same <a> <b>: whether two images are identical. Houdini's idiff is not
-# OIIO's, so this uses hoiiotool, which fails on a one-ULP half difference.
-same() {
-    hoiiotool --fail 0 --warn 0 "$1" "$2" --diff >/dev/null
-}
-
-# clean <name> <log>: whether a husk log shows Pika validated and error free.
+# clean <name> <log>: whether a husk or usdrecord log shows Pika validated and error free.
 clean() {
     grep -q "^pika: rendering on .*validation on (sync)" "$2" ||
         fail "$1: Pika did not open a device with validation on"
@@ -59,27 +46,6 @@ clean() {
     grep "^validation:" "$2" | grep -v "libvk_swiftshader.so was found to differ" &&
         fail "$1: the validation layer reported messages"
     return 0
-}
-
-# render <name> [husk options]: renders FRAMES frames into $OUT/<name>/.
-render() {
-    local name=$1
-    shift
-    husk -V 1 -R Pika --disable-motionblur -f 1 -n $FRAMES --res 1920 1080 "$@" \
-        -o "$OUT/$name/cube.\$F4.exr" hydra/scenes/cube.usda >"$OUT/$name.log" 2>&1 ||
-        fail "$name: husk exited $? (see $OUT/$name.log)"
-
-    clean "$name" "$OUT/$name.log"
-
-    local f exact=0 control=0
-    for f in "$OUT/$name"/cube.*.exr; do
-        same "$OUT/expected.exr" "$f" && exact=$((exact + 1))
-        same "$OUT/unwritten.exr" "$f" || control=$((control + 1))
-    done
-    echo "$name: $exact of $FRAMES frames are exactly the clear color; $control differ from unwritten"
-    [ $exact -eq $FRAMES ] || fail "$name: frames differ from the clear color"
-    [ $control -eq $FRAMES ] || fail "$name: frames match an unwritten buffer"
-    grep "^pika: .* frames, last at" "$OUT/$name.log" || fail "$name: no frame timings"
 }
 
 # store_after <n> <dump>: the store as sync n left it.
@@ -108,8 +74,22 @@ fixture() {
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
-render float32 -c /world/camera
-render float16 -s /render/half
+# Xvnc writes the display it chose to fd 3. It listens on no port, only on
+# a socket in $OUT.
+rm -f "$OUT/display" "$OUT/vnc"
+Xvnc -displayfd 3 -rfbport -1 -rfbunixpath "$OUT/vnc" -nolisten tcp -SecurityTypes None \
+    -geometry 640x480 -depth 24 3>"$OUT/display" 2>"$OUT/xvnc.log" &
+xvnc=$!
+trap 'kill $xvnc' EXIT
+until [ -s "$OUT/display" ]; do
+    kill -0 $xvnc 2>/dev/null || { echo "Xvnc did not start (see $OUT/xvnc.log)"; exit 1; }
+    sleep 0.1
+done
+DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/image.py" "$OUT/images" usdrecord ||
+    fail "the images differ from their references (see above)"
+for log in "$OUT"/images/*.log; do
+    clean "$(basename "$log" .log)" "$log"
+done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 for f in "${fixtures[@]}"; do
     fixture "$f"

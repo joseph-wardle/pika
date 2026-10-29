@@ -17,6 +17,7 @@ pub struct Store {
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
     stats: Stats,
+    moved: Moved,
 }
 
 /// Each field is `None` until Hydra first hands it over.
@@ -144,6 +145,22 @@ impl Interpolation {
     }
 }
 
+/// What changed since the renderer last took it, so a frame uploads only
+/// that. Only changed values count: a redundant pull moves nothing.
+#[derive(PartialEq, Debug, Default)]
+pub struct Moved {
+    /// A mesh was added, removed or remodelled, or its points or normals
+    /// changed size or kind: the layout of every mesh's data is rebuilt.
+    pub layout: bool,
+    /// Meshes whose points changed, keeping their count.
+    pub points: BTreeSet<u64>,
+    /// Meshes whose normals changed, keeping their interpolation and count.
+    pub normals: BTreeSet<u64>,
+    /// A transform, visibility or instancing changed: the instances and
+    /// draw records are rewritten.
+    pub draws: bool,
+}
+
 /// What one Hydra sync did to the store.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Stats {
@@ -196,7 +213,17 @@ impl Store {
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
             stats: Stats::default(),
+            moved: Moved::default(),
         }
+    }
+
+    pub fn meshes(&self) -> &BTreeMap<u64, Mesh> {
+        &self.meshes
+    }
+
+    /// What changed since the last call.
+    pub fn take_moved(&mut self) -> Moved {
+        std::mem::take(&mut self.moved)
     }
 
     fn new_id(&mut self) -> u64 {
@@ -223,12 +250,14 @@ impl Store {
                 render_tag: None,
             },
         );
+        self.moved.layout = true;
         id
     }
 
     pub fn remove_mesh(&mut self, id: u64) -> Result<(), String> {
         self.meshes.remove(&id).ok_or_else(|| stale("mesh", id))?;
         self.stats.removed += 1;
+        self.moved.layout = true;
         Ok(())
     }
 
@@ -241,14 +270,22 @@ impl Store {
                 .map(|s| s.material.len() + 4 * s.faces.len())
                 .sum::<usize>();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
+        self.moved.layout |= write(&mut self.stats.mesh, &mut mesh.topology, topology, bytes);
         Ok(())
     }
 
     pub fn set_points(&mut self, id: u64, points: Vec<[f32; 3]>) -> Result<(), String> {
         let bytes = size_of_val(points.as_slice());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.points, points, bytes);
+        let count = mesh.points.as_ref().map(Vec::len);
+        let resized = count != Some(points.len());
+        if write(&mut self.stats.mesh, &mut mesh.points, points, bytes) {
+            if resized {
+                self.moved.layout = true;
+            } else {
+                self.moved.points.insert(id);
+            }
+        }
         Ok(())
     }
 
@@ -258,19 +295,27 @@ impl Store {
             .as_ref()
             .map_or(0, |n| size_of_val(n.values.as_slice()));
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.normals, normals, bytes);
+        let kind = |n: &Option<Normals>| n.as_ref().map(|n| (n.interpolation, n.values.len()));
+        let reshaped = mesh.normals.as_ref().map(kind) != Some(kind(&normals));
+        if write(&mut self.stats.mesh, &mut mesh.normals, normals, bytes) {
+            if reshaped {
+                self.moved.layout = true;
+            } else {
+                self.moved.normals.insert(id);
+            }
+        }
         Ok(())
     }
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.transform, transform, 128);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.transform, transform, 128);
         Ok(())
     }
 
     pub fn set_visible(&mut self, id: u64, visible: bool) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.visible, visible, 1);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.visible, visible, 1);
         Ok(())
     }
 
@@ -284,7 +329,7 @@ impl Store {
             .as_ref()
             .map_or(0, |i| i.instancer.len() + 4 * i.indices.len());
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.mesh,
             &mut mesh.instancing,
             instancing,
@@ -318,6 +363,7 @@ impl Store {
             primvars: None,
         };
         self.instancers.insert(id, instancer);
+        self.moved.draws = true;
         id
     }
 
@@ -326,6 +372,7 @@ impl Store {
             .remove(&id)
             .ok_or_else(|| stale("instancer", id))?;
         self.stats.removed += 1;
+        self.moved.draws = true;
         Ok(())
     }
 
@@ -342,7 +389,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.parent,
             parent,
@@ -356,7 +403,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.transform,
             transform,
@@ -381,7 +428,7 @@ impl Store {
             .instancers
             .get_mut(&id)
             .ok_or_else(|| stale("instancer", id))?;
-        write(
+        self.moved.draws |= write(
             &mut self.stats.instancer,
             &mut instancer.primvars,
             primvars,
@@ -668,14 +715,15 @@ fn stale(kind: &str, id: u64) -> String {
 }
 
 /// Stores one pulled field, counting its bytes as redundant when Hydra handed
-/// over the same value before.
-fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) {
+/// over the same value before. Returns whether the value changed.
+fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) -> bool {
     stats.pulled += bytes;
     if slot.as_ref() == Some(&value) {
         stats.redundant += bytes;
-    } else {
-        *slot = Some(value);
+        return false;
     }
+    *slot = Some(value);
+    true
 }
 
 #[cfg(test)]
@@ -746,6 +794,44 @@ mod tests {
             store.meshes[&a].points.as_ref().unwrap()[0],
             [0.0, 1.0, 3.0]
         );
+    }
+
+    #[test]
+    fn moved_holds_only_what_changed() {
+        let mut store = Store::new();
+        let a = drawn(&mut store, "/a", None);
+        assert!(store.take_moved().layout);
+        assert_eq!(store.take_moved(), Moved::default());
+
+        // A redundant pull moves nothing; a changed one moves only its kind.
+        store.set_points(a, vec![[0.0; 3]; 4]).unwrap();
+        store.set_visible(a, true).unwrap();
+        assert_eq!(store.take_moved(), Moved::default());
+        store.set_points(a, vec![[1.0; 3]; 4]).unwrap();
+        let normals = |values| Normals {
+            interpolation: Interpolation::Vertex,
+            values,
+        };
+        store
+            .set_normals(a, Some(normals(vec![[0.0; 3]; 4])))
+            .unwrap();
+        let moved = store.take_moved();
+        // Normals arriving for the first time change the layout.
+        assert_eq!((moved.layout, &moved.points), (true, &BTreeSet::from([a])));
+        store
+            .set_normals(a, Some(normals(vec![[1.0; 3]; 4])))
+            .unwrap();
+        store.set_transform(a, [1.0; 16]).unwrap();
+        let moved = store.take_moved();
+        assert_eq!((moved.layout, moved.draws), (false, true));
+        assert_eq!(moved.normals, BTreeSet::from([a]));
+
+        // Changing the point count moves the layout, not the points.
+        store.set_points(a, vec![[1.0; 3]; 5]).unwrap();
+        let moved = store.take_moved();
+        assert!(moved.layout && moved.points.is_empty());
+        store.remove_mesh(a).unwrap();
+        assert!(store.take_moved().layout);
     }
 
     #[test]

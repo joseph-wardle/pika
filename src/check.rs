@@ -1,13 +1,11 @@
 //! The first-frame check: draws a known rectangle offscreen and compares the
 //! read-back pixels with the image it must produce.
 
-use std::io::{Cursor, ErrorKind};
-use std::process::Command;
-
 use ash::vk;
 
 use pika::gpu;
-use pika::target::Target;
+use pika::shader::Shader;
+use pika::target::{self, Target};
 
 /// Width and height of the target. A power of two keeps the shader's pixel to
 /// NDC mapping exact, and positions must fit the 8-bit channels.
@@ -25,55 +23,6 @@ pub const SHIFTED: [i32; 4] = [17, 8, 57, 40];
 pub const SHIFTED_MISMATCHES: usize = 2 * (RECT[3] - RECT[1]) as usize;
 
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UINT;
-
-// Read at run time from the source tree, so `cargo run` must run from a checkout.
-const SHADER_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/check.slang");
-
-/// `check.slang` compiled to SPIR-V, with entry points `vs` and `fs`.
-pub struct Shader {
-    pub slangc_version: String,
-    pub spirv: Vec<u32>,
-}
-
-/// Compiles `check.slang` with the `slangc` on `PATH`.
-pub fn compile() -> Result<Shader, String> {
-    let version = slangc(&["-v"])?;
-    // slangc prints its version to stderr.
-    let slangc_version = String::from_utf8_lossy(&version.stderr).trim().to_owned();
-
-    let output = slangc(&[
-        SHADER_PATH,
-        "-target",
-        "spirv",
-        "-fvk-use-entrypoint-name",
-        "-warnings-as-errors",
-        "all",
-    ])?;
-    if !output.status.success() {
-        return Err(format!(
-            "slangc failed on {SHADER_PATH}:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    let spirv = ash::util::read_spv(&mut Cursor::new(&output.stdout))
-        .map_err(|e| format!("slangc wrote invalid SPIR-V for {SHADER_PATH}: {e}"))?;
-    Ok(Shader {
-        slangc_version,
-        spirv,
-    })
-}
-
-fn slangc(args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new("slangc").args(args).output().map_err(|e| {
-        if e.kind() == ErrorKind::NotFound {
-            "slangc is not on PATH. Install Slang 2026.9.2 \
-             (https://github.com/shader-slang/slang/releases) and put its bin/ on PATH."
-                .into()
-        } else {
-            format!("could not run slangc: {e}")
-        }
-    })
-}
 
 /// The image a draw of `rect` must produce: tightly packed RGBA8_UINT rows,
 /// `[x, y, 1, 255]` inside the rectangle and zero outside.
@@ -113,7 +62,7 @@ pub struct Offscreen<'a> {
 
 impl<'a> Offscreen<'a> {
     pub fn new(device: &'a gpu::Device<'a>, shader: &Shader) -> Result<Self, String> {
-        let target = Target::new(device, FORMAT, 4, SIZE as u32, SIZE as u32)?;
+        let target = Target::new(device, &[(FORMAT, 4)], SIZE as u32, SIZE as u32)?;
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .size(size_of::<Push>() as u32)];
@@ -135,8 +84,10 @@ impl<'a> Offscreen<'a> {
     /// tightly packed RGBA8 rows.
     pub fn draw(&mut self, rect: [i32; 4]) -> Result<Vec<u8>, String> {
         // A draw or copy that never lands leaves 0xCD, which no pixel can be.
-        self.target.pixels().fill(0xCD);
-        let cb = self.target.begin(vk::ClearValue::default())?;
+        self.target.pixels(0).fill(0xCD);
+        let cb = self.target.begin()?;
+        self.target
+            .begin_rendering(&[vk::ClearColorValue::default()]);
         let push = Push {
             rect,
             size: [SIZE, SIZE],
@@ -155,8 +106,8 @@ impl<'a> Offscreen<'a> {
             );
             d.cmd_draw(cb, 6, 1, 0, 0);
         }
-        self.target.finish()?;
-        Ok(self.target.pixels().to_vec())
+        self.target.finish(&[true])?;
+        Ok(self.target.pixels(0).to_vec())
     }
 }
 
@@ -190,7 +141,8 @@ impl Push {
 }
 
 /// The check pipeline: no vertex input, no blending (integer formats cannot
-/// blend), two-sided, rendering to one `FORMAT` attachment.
+/// blend), two-sided, rendering to one `FORMAT` attachment. The target's
+/// depth buffer is attached but unused.
 fn pipeline(
     d: &ash::Device,
     layout: vk::PipelineLayout,
@@ -236,8 +188,10 @@ fn pipeline(
         .color_write_mask(vk::ColorComponentFlags::RGBA)];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
     let formats = [FORMAT];
-    let mut rendering =
-        vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&formats)
+        .depth_attachment_format(target::DEPTH_FORMAT);
+    let depth = vk::PipelineDepthStencilStateCreateInfo::default();
     let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
         .vertex_input_state(&vertex_input)
@@ -246,6 +200,7 @@ fn pipeline(
         .rasterization_state(&rasterization)
         .multisample_state(&multisample)
         .color_blend_state(&blend)
+        .depth_stencil_state(&depth)
         .layout(layout)
         .push_next(&mut rendering);
     // SAFETY: `d` is live, `module` and `layout` were created on it, and

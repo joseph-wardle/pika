@@ -1,0 +1,46 @@
+#usda 1.0
+(
+    doc = "A quad, a triangle and a pentagon in one plane tilted away from the camera, with face-varying normals. The tilt changes at frame 2."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Xform "tilt"
+{
+    double3 xformOp:translate = (0.2, -0.3, -6)
+    float xformOp:rotateX.timeSamples = {
+        1: -60,
+        2: -45,
+    }
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+
+    def Mesh "shapes"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 3, 5]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        point3f[] points = [
+            (-2, -1.5, 0), (-0.6, -1.5, 0), (-0.6, 1.5, 0), (-2, 1.5, 0),
+            (-0.3, -1.5, 0), (0.6, -1.5, 0), (0.1, 1.5, 0),
+            (1.4, -1.5, 0), (2.2, -0.6, 0), (2, 1.2, 0), (1.1, 1.5, 0), (0.8, -0.3, 0),
+        ]
+        normal3f[] normals = [
+            (-0.2, -0.2, 1), (0.2, -0.2, 1), (0.2, 0.2, 1), (-0.2, 0.2, 1),
+            (0, -0.4, 1), (0.4, 0, 1), (0, 0.4, 1),
+            (0, 0, 1), (0.3, 0, 1), (0.3, 0.3, 1), (0, 0.3, 1), (-0.3, 0, 1),
+        ] (
+            interpolation = "faceVarying"
+        )
+    }
+}

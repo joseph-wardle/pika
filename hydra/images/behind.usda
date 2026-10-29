@@ -1,0 +1,56 @@
+#usda 1.0
+(
+    doc = "Three quads whose fronts are decided three ways: one seen from behind, one left-handed and one mirrored by its transform. Each has a uniform normal."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+# Wound clockwise as the camera sees it: the camera sees its back.
+def Mesh "back"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.6, -0.6, -5), (-1.6, 0.6, -5), (-0.7, 0.6, -5), (-0.7, -0.6, -5)]
+    normal3f[] normals = [(0.3, 0.2, -1)] (
+        interpolation = "uniform"
+    )
+}
+
+# Also wound clockwise, but left-handed: the camera sees its front.
+def Mesh "left"
+{
+    uniform token subdivisionScheme = "none"
+    uniform token orientation = "leftHanded"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.45, -0.6, -5), (-0.45, 0.6, -5), (0.45, 0.6, -5), (0.45, -0.6, -5)]
+    normal3f[] normals = [(-0.3, 0.2, 1)] (
+        interpolation = "uniform"
+    )
+}
+
+# Wound counter-clockwise, then mirrored in x: the camera sees its front.
+def Mesh "mirror"
+{
+    uniform token subdivisionScheme = "none"
+    float3 xformOp:scale = (-1, 1, 1)
+    uniform token[] xformOpOrder = ["xformOp:scale"]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.6, -0.6, -5), (-0.7, -0.6, -5), (-0.7, 0.6, -5), (-1.6, 0.6, -5)]
+    normal3f[] normals = [(0.3, -0.2, 1)] (
+        interpolation = "uniform"
+    )
+}

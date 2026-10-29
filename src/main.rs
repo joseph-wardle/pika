@@ -9,7 +9,7 @@ mod check;
 
 use std::process::ExitCode;
 
-use pika::gpu;
+use pika::{gpu, shader};
 
 fn main() -> ExitCode {
     match run() {
@@ -52,7 +52,7 @@ fn run() -> Result<(), String> {
         "opened [{index}] {}, queue family {}",
         instance.devices[index].name, device.queue_family
     );
-    let shader = check::compile()?;
+    let shader = shader::compile("check")?;
     println!(
         "slangc {}: check.slang is {} SPIR-V words",
         shader.slangc_version,
