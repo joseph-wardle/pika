@@ -30,22 +30,10 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-// The pika_format of a render buffer, or false when Pika writes none.
-bool Format(HdFormat format, pika_format *out) {
-    switch (format) {
-    case HdFormatFloat16Vec4: *out = PIKA_FLOAT16_VEC4; return true;
-    case HdFormatFloat32Vec4: *out = PIKA_FLOAT32_VEC4; return true;
-    case HdFormatFloat32: *out = PIKA_FLOAT32; return true;
-    case HdFormatFloat32Vec3: *out = PIKA_FLOAT32_VEC3; return true;
-    default: return false;
-    }
-}
-
 class PikaRenderPass final : public HdRenderPass {
 public:
-    PikaRenderPass(HdRenderIndex *index, HdRprimCollection const &collection,
-                   pika_renderer *renderer)
-        : HdRenderPass(index, collection), _renderer(renderer) {}
+    PikaRenderPass(HdRenderIndex *index, HdRprimCollection const &collection, Pika &pika)
+        : HdRenderPass(index, collection), _pika(pika) {}
 
     // usdview re-renders a pass that is not converged only while paused,
     // and usdrecord and husk until it is, so playback overlaps frames and a
@@ -55,7 +43,8 @@ public:
 protected:
     void _Execute(HdRenderPassStateSharedPtr const &state,
                   TfTokenVector const &renderTags) override {
-        if (!_renderer)
+        pika_renderer *renderer = _pika.renderer();
+        if (!renderer)
             return;
         if (!state->GetCamera()) {
             fail("the render pass has no camera");
@@ -81,11 +70,7 @@ protected:
             auto *buffer = static_cast<PikaRenderBuffer *>(bound);
             if (!buffer)
                 continue;
-            if (!Format(buffer->GetFormat(), &slot->format)) {
-                fail("the " + aov.aovName.GetString() + " AOV is " +
-                     TfEnum::GetName(buffer->GetFormat()) + ", which Pika does not write");
-                continue;
-            }
+            slot->format = buffer->FormatName();
             if (first && (buffer->GetWidth() != first->GetWidth() ||
                           buffer->GetHeight() != first->GetHeight())) {
                 fail("the " + aov.aovName.GetString() + " render buffer's size differs from " +
@@ -138,25 +123,19 @@ protected:
         frame.render_tag_count = tags.size();
         // A failed render keeps no frame on the GPU to wait for.
         _converged = true;
-        report(pika_render(_renderer, &frame, &_converged), "render");
+        _pika.report(pika_render(renderer, &frame, &_converged), "render");
     }
 
 private:
-    pika_renderer *_renderer;
+    Pika &_pika;
     bool _converged = true;
 };
 
 class PikaRenderDelegate final : public HdRenderDelegate {
 public:
-    PikaRenderDelegate() { _Open(); }
+    PikaRenderDelegate() = default;
     explicit PikaRenderDelegate(HdRenderSettingsMap const &settings)
-        : HdRenderDelegate(settings) {
-        _Open();
-    }
-    ~PikaRenderDelegate() override {
-        if (_renderer)
-            report(pika_renderer_free(_renderer), "shutting down");
-    }
+        : HdRenderDelegate(settings) {}
 
     // Supporting a type changes what Hydra hands over, so the counted types
     // leave out the implicit surfaces (cube, sphere...), which Hydra
@@ -197,11 +176,13 @@ public:
     // Hosts show this: usdview's HUD reads gpuMemoryUsed from it.
     VtDictionary GetRenderStats() const override {
         VtDictionary stats;
-        if (!_renderer)
+        pika_renderer *renderer = _pika.renderer();
+        if (!renderer)
             return stats;
         pika_stat buffer[128];
         size_t count = 0;
-        report(pika_stats(_renderer, buffer, std::size(buffer), &count), "reading the stats");
+        _pika.report(pika_stats(renderer, buffer, std::size(buffer), &count),
+                     "reading the stats");
         for (size_t i = 0; i < count; ++i)
             stats[buffer[i].key] = VtValue(buffer[i].value);
         return stats;
@@ -221,28 +202,28 @@ public:
 
     HdRenderPassSharedPtr CreateRenderPass(
         HdRenderIndex *index, HdRprimCollection const &collection) override {
-        return std::make_shared<PikaRenderPass>(index, collection, _renderer);
+        return std::make_shared<PikaRenderPass>(index, collection, _pika);
     }
 
     HdInstancer *CreateInstancer(HdSceneDelegate *delegate,
                                  SdfPath const &id) override {
-        return new PikaInstancer(delegate, id, _renderer);
+        return new PikaInstancer(delegate, id, _pika);
     }
     void DestroyInstancer(HdInstancer *instancer) override { delete instancer; }
 
     HdRprim *CreateRprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->mesh)
-            return new PikaMesh(id, _renderer);
+            return new PikaMesh(id, _pika);
         if (typeId == HdPrimTypeTokens->basisCurves)
-            return new PikaCurves(id, _renderer);
-        return new PikaCountedRprim(typeId, id, _renderer);
+            return new PikaCurves(id, _pika);
+        return new PikaCountedRprim(typeId, id, _pika);
     }
     void DestroyRprim(HdRprim *rprim) override { delete rprim; }
 
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera)
             return new HdCamera(id);
-        return new PikaCountedSprim(typeId, id, _renderer);
+        return new PikaCountedSprim(typeId, id, _pika);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {
         return CreateSprim(typeId, SdfPath::EmptyPath());
@@ -261,19 +242,17 @@ public:
 
     // Hydra calls Update before its prim syncs and CommitResources after.
     void Update() override {
-        if (_renderer)
-            report(pika_sync_begin(_renderer), "beginning a sync");
+        if (pika_renderer *renderer = _pika.renderer())
+            _pika.report(pika_sync_begin(renderer), "beginning a sync");
     }
     void CommitResources(HdChangeTracker *) override {
-        if (_renderer)
-            report(pika_sync_end(_renderer), "ending a sync");
+        if (pika_renderer *renderer = _pika.renderer())
+            _pika.report(pika_sync_end(renderer), "ending a sync");
     }
 
 private:
     // Without a renderer the delegate still loads, and renders nothing.
-    void _Open() { report(pika_renderer_new(&_renderer), "opening a GPU"); }
-
-    pika_renderer *_renderer = nullptr;
+    Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
 };

@@ -2,6 +2,7 @@
 #include "report.h"
 
 #include <pxr/base/gf/quath.h>
+#include <pxr/base/tf/enum.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -78,18 +79,14 @@ bool refine(HdMeshTopology const &topology, Refined &out) {
 
 } // namespace
 
-PikaMesh::PikaMesh(SdfPath const &id, pika_renderer *renderer) : HdMesh(id) {
-    if (!renderer)
-        return;
-    int status = pika_mesh_new(renderer, id.GetText(), &_id);
-    report(status, "adding mesh " + id.GetString());
-    if (status == PIKA_OK)
-        _renderer = renderer;
+PikaMesh::PikaMesh(SdfPath const &id, Pika &pika) : HdMesh(id), _pika(pika) {
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_mesh_new(renderer, id.GetText(), &_id), "adding mesh " + id.GetString());
 }
 
 PikaMesh::~PikaMesh() {
-    if (_renderer)
-        report(pika_mesh_free(_renderer, _id), "removing mesh " + GetId().GetString());
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_mesh_free(renderer, _id), "removing mesh " + GetId().GetString());
 }
 
 HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
@@ -108,42 +105,43 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     _UpdateInstancer(delegate, dirtyBits);
     HdDirtyBits bits = *dirtyBits;
     *dirtyBits = HdChangeTracker::Clean;
-    if (!_renderer)
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer)
         return;
     HdInstancer::_SyncInstancerAndParents(delegate->GetRenderIndex(), GetInstancerId());
 
     std::string const &path = GetId().GetString();
     if (bits & HdChangeTracker::DirtyVisibility)
-        report(pika_mesh_visible(_renderer, _id, IsVisible()), path + " visibility");
+        _pika.report(pika_mesh_visible(renderer, _id, IsVisible()), path + " visibility");
     if (bits & (HdChangeTracker::DirtyTopology | HdChangeTracker::DirtySubdivTags))
-        _SyncTopology(delegate);
+        _SyncTopology(delegate, renderer);
     if (bits & HdChangeTracker::DirtyPoints)
-        _SyncPoints(delegate);
+        _SyncPoints(delegate, renderer);
     // Normals have their own dirty bit, but an edit can also arrive as a
     // general primvar change.
     if (bits & (HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar))
-        _SyncNormals(delegate);
+        _SyncNormals(delegate, renderer);
     if (bits & HdChangeTracker::DirtyTransform) {
         GfMatrix4d matrix = delegate->GetTransform(GetId());
-        report(pika_mesh_transform(_renderer, _id, matrix.data()), path + " transform");
+        _pika.report(pika_mesh_transform(renderer, _id, matrix.data()), path + " transform");
     }
     if (bits & HdChangeTracker::DirtyMaterialId)
-        report(pika_mesh_material(_renderer, _id, delegate->GetMaterialId(GetId()).GetText()),
-               path + " material");
+        _pika.report(pika_mesh_material(renderer, _id, delegate->GetMaterialId(GetId()).GetText()),
+                     path + " material");
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
-        _SyncInstancing(delegate);
+        _SyncInstancing(delegate, renderer);
 }
 
 // Hydra calls this for every rprim with a dirty render tag, before it decides
 // which ones to sync.
 void PikaMesh::UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) {
     HdMesh::UpdateRenderTag(delegate, renderParam);
-    if (_renderer)
-        report(pika_mesh_render_tag(_renderer, _id, GetRenderTag().GetText()),
-               GetId().GetString() + " render tag");
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_mesh_render_tag(renderer, _id, GetRenderTag().GetText()),
+                     GetId().GetString() + " render tag");
 }
 
-void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
+void PikaMesh::_SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer) {
     HdMeshTopology topology = GetMeshTopology(delegate);
     std::string const &path = GetId().GetString();
     Refined refined;
@@ -186,10 +184,10 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate) {
         subsets.size(),
         refined.offsets.empty() ? nullptr : &r,
     };
-    report(pika_mesh_topology(_renderer, _id, &t), path + " topology");
+    _pika.report(pika_mesh_topology(renderer, _id, &t), path + " topology");
 }
 
-void PikaMesh::_SyncPoints(HdSceneDelegate *delegate) {
+void PikaMesh::_SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer) {
     VtValue value = GetPoints(delegate);
     if (!value.IsHolding<VtVec3fArray>()) {
         fail(GetId().GetString() + ": points are " + value.GetTypeName() +
@@ -197,21 +195,20 @@ void PikaMesh::_SyncPoints(HdSceneDelegate *delegate) {
         return;
     }
     VtVec3fArray const &points = value.UncheckedGet<VtVec3fArray>();
-    report(pika_mesh_points(_renderer, _id, xyz(points), points.size()),
+    _pika.report(pika_mesh_points(renderer, _id, xyz(points), points.size()),
            GetId().GetString() + " points");
 }
 
-void PikaMesh::_SyncNormals(HdSceneDelegate *delegate) {
-    static const std::pair<HdInterpolation, pika_interpolation> interpolations[] = {
-        {HdInterpolationConstant, PIKA_CONSTANT},
-        {HdInterpolationUniform, PIKA_UNIFORM},
-        {HdInterpolationVarying, PIKA_VARYING},
-        {HdInterpolationVertex, PIKA_VERTEX},
-        {HdInterpolationFaceVarying, PIKA_FACE_VARYING},
+void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) {
+    // The interpolations a mesh primvar can have.
+    static const HdInterpolation interpolations[] = {
+        HdInterpolationConstant, HdInterpolationUniform, HdInterpolationVarying,
+        HdInterpolationVertex,   HdInterpolationFaceVarying,
     };
     std::string const &path = GetId().GetString();
-    for (auto [hd, pika] : interpolations) {
-        for (HdPrimvarDescriptor const &primvar : GetPrimvarDescriptors(delegate, hd)) {
+    for (HdInterpolation interpolation : interpolations) {
+        for (HdPrimvarDescriptor const &primvar :
+             GetPrimvarDescriptors(delegate, interpolation)) {
             if (primvar.name != HdTokens->normals)
                 continue;
             VtValue value = GetNormals(delegate);
@@ -221,38 +218,38 @@ void PikaMesh::_SyncNormals(HdSceneDelegate *delegate) {
                 return;
             }
             VtVec3fArray const &normals = value.UncheckedGet<VtVec3fArray>();
-            report(pika_mesh_normals(_renderer, _id, pika, xyz(normals), normals.size()),
-                   path + " normals");
+            // Hydra's display name for an interpolation is USD's token.
+            std::string token = TfEnum::GetDisplayName(interpolation);
+            _pika.report(pika_mesh_normals(renderer, _id, token.c_str(), xyz(normals),
+                                           normals.size()),
+                         path + " normals");
             return;
         }
     }
-    report(pika_mesh_no_normals(_renderer, _id), path + " normals");
+    _pika.report(pika_mesh_no_normals(renderer, _id), path + " normals");
 }
 
-void PikaMesh::_SyncInstancing(HdSceneDelegate *delegate) {
+void PikaMesh::_SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer) {
     SdfPath const &instancer = GetInstancerId();
     VtIntArray indices;
     if (!instancer.IsEmpty())
         indices = delegate->GetInstanceIndices(instancer, GetId());
-    report(pika_mesh_instancer(_renderer, _id, instancer.GetText(), indices.cdata(),
-                               indices.size()),
-           GetId().GetString() + " instancer");
+    _pika.report(pika_mesh_instancer(renderer, _id, instancer.GetText(), indices.cdata(),
+                                     indices.size()),
+                 GetId().GetString() + " instancer");
 }
 
-PikaInstancer::PikaInstancer(HdSceneDelegate *delegate, SdfPath const &id,
-                             pika_renderer *renderer)
-    : HdInstancer(delegate, id) {
-    if (!renderer)
-        return;
-    int status = pika_instancer_new(renderer, id.GetText(), &_id);
-    report(status, "adding instancer " + id.GetString());
-    if (status == PIKA_OK)
-        _renderer = renderer;
+PikaInstancer::PikaInstancer(HdSceneDelegate *delegate, SdfPath const &id, Pika &pika)
+    : HdInstancer(delegate, id), _pika(pika) {
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_instancer_new(renderer, id.GetText(), &_id),
+                     "adding instancer " + id.GetString());
 }
 
 PikaInstancer::~PikaInstancer() {
-    if (_renderer)
-        report(pika_instancer_free(_renderer, _id), "removing instancer " + GetId().GetString());
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_instancer_free(renderer, _id),
+                     "removing instancer " + GetId().GetString());
 }
 
 HdDirtyBits PikaInstancer::GetInitialDirtyBitsMask() const {
@@ -263,7 +260,8 @@ HdDirtyBits PikaInstancer::GetInitialDirtyBitsMask() const {
 void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
     _UpdateInstancer(delegate, dirtyBits);
     HdDirtyBits bits = *dirtyBits;
-    if (!_renderer)
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer)
         return;
     std::string const &path = GetId().GetString();
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex)) {
@@ -271,19 +269,19 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
         VtIntArray indices;
         if (!parent.IsEmpty())
             indices = delegate->GetInstanceIndices(parent, GetId());
-        report(pika_instancer_parent(_renderer, _id, parent.GetText(), indices.cdata(),
+        _pika.report(pika_instancer_parent(renderer, _id, parent.GetText(), indices.cdata(),
                                      indices.size()),
                path + " parent");
     }
     if (bits & HdChangeTracker::DirtyTransform) {
         GfMatrix4d matrix = delegate->GetInstancerTransform(GetId());
-        report(pika_instancer_transform(_renderer, _id, matrix.data()), path + " transform");
+        _pika.report(pika_instancer_transform(renderer, _id, matrix.data()), path + " transform");
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
-        _SyncPrimvars(delegate);
+        _SyncPrimvars(delegate, renderer);
 }
 
-void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate) {
+void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer) {
     std::string const &path = GetId().GetString();
     // Kept alive until the call: the primvars point into them.
     VtMatrix4dArray transforms;
@@ -332,21 +330,18 @@ void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate) {
             fail(path + ": " + primvar.name.GetString() + " is " + value.GetTypeName() +
                  "; Pika reads matrix4d transforms and float3 or quaternion parts");
     }
-    report(pika_instancer_primvars(_renderer, _id, &p), path + " primvars");
+    _pika.report(pika_instancer_primvars(renderer, _id, &p), path + " primvars");
 }
 
-PikaCurves::PikaCurves(SdfPath const &id, pika_renderer *renderer) : HdBasisCurves(id) {
-    if (!renderer)
-        return;
-    int status = pika_curves_new(renderer, id.GetText(), &_id);
-    report(status, "adding curves " + id.GetString());
-    if (status == PIKA_OK)
-        _renderer = renderer;
+PikaCurves::PikaCurves(SdfPath const &id, Pika &pika) : HdBasisCurves(id), _pika(pika) {
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_curves_new(renderer, id.GetText(), &_id),
+                     "adding curves " + id.GetString());
 }
 
 PikaCurves::~PikaCurves() {
-    if (_renderer)
-        report(pika_curves_free(_renderer, _id), "removing curves " + GetId().GetString());
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_curves_free(renderer, _id), "removing curves " + GetId().GetString());
 }
 
 HdDirtyBits PikaCurves::GetInitialDirtyBitsMask() const {
@@ -359,7 +354,8 @@ void PikaCurves::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *d
     _UpdateVisibility(delegate, dirtyBits);
     HdDirtyBits bits = *dirtyBits;
     *dirtyBits = HdChangeTracker::Clean;
-    if (!_renderer)
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer)
         return;
     size_t bytes = 0;
     if (bits & HdChangeTracker::DirtyTopology) {
@@ -372,23 +368,24 @@ void PikaCurves::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *d
         bytes += GetPrimvar(delegate, HdTokens->points).GetArraySize() * sizeof(GfVec3f);
     if (bits & HdChangeTracker::DirtyWidths)
         bytes += delegate->Get(GetId(), HdTokens->widths).GetArraySize() * sizeof(float);
-    report(pika_curves_pulled(_renderer, _id, bytes), GetId().GetString() + " curves");
+    _pika.report(pika_curves_pulled(renderer, _id, bytes), GetId().GetString() + " curves");
 }
 
-PikaCount::PikaCount(TfToken const &type, SdfPath const &id, pika_renderer *renderer)
-    : _path(id) {
+PikaCount::PikaCount(TfToken const &type, SdfPath const &id, Pika &pika)
+    : _pika(pika), _path(id) {
     // Hydra's fallback prims have no path and stand for nothing in the scene.
-    if (!renderer || id.IsEmpty())
+    if (id.IsEmpty())
         return;
-    int status = pika_counted_new(renderer, type.GetText(), id.GetText(), &_id);
-    report(status, "adding " + type.GetString() + " " + id.GetString());
-    if (status == PIKA_OK)
-        _renderer = renderer;
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_counted_new(renderer, type.GetText(), id.GetText(), &_id),
+                     "adding " + type.GetString() + " " + id.GetString());
 }
 
 PikaCount::~PikaCount() {
-    if (_renderer)
-        report(pika_counted_free(_renderer, _id), "removing " + _path.GetString());
+    // Store ids start at 1: a fallback prim was never added.
+    pika_renderer *renderer = _id ? _pika.renderer() : nullptr;
+    if (renderer)
+        _pika.report(pika_counted_free(renderer, _id), "removing " + _path.GetString());
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

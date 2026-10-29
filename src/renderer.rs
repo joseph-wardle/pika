@@ -35,14 +35,14 @@ pub enum Format {
 }
 
 impl Format {
-    /// The value `pika.h` passes for this format.
-    pub fn from_abi(value: u32) -> Result<Self, String> {
-        match value {
-            1 => Ok(Self::Float16Vec4),
-            2 => Ok(Self::Float32Vec4),
-            3 => Ok(Self::Float32),
-            4 => Ok(Self::Float32Vec3),
-            _ => Err(format!("unknown pika_format {value}")),
+    /// The format Hydra names `name`.
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "HdFormatFloat16Vec4" => Ok(Self::Float16Vec4),
+            "HdFormatFloat32Vec4" => Ok(Self::Float32Vec4),
+            "HdFormatFloat32" => Ok(Self::Float32),
+            "HdFormatFloat32Vec3" => Ok(Self::Float32Vec3),
+            _ => Err(format!("{name} is not a render buffer format Pika writes")),
         }
     }
 

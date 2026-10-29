@@ -3,8 +3,8 @@
 //! Calls go one way: C++ calls Rust and Rust never calls back. Every entry
 //! returns a status and catches panics, so a Rust bug cannot take down the
 //! host. A panic while the renderer is locked poisons it, and every later
-//! call on it fails, so the delegate renders nothing rather than a frame from
-//! half-updated state.
+//! call on it fails, so the delegate stops calling and renders nothing rather
+//! than a frame from half-updated state.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
@@ -80,7 +80,7 @@ pub struct CInstancePrimvars {
 /// `pika_aov`.
 #[repr(C)]
 pub struct CAov {
-    format: u32,
+    format: *const c_char,
     pixels: *mut u8,
     len: usize,
 }
@@ -240,12 +240,14 @@ pub unsafe extern "C" fn pika_render(
     call(|| {
         // SAFETY: the caller guarantees the renderer and the frame.
         let (handle, f) = unsafe { (&*renderer, &*frame) };
-        let aov = |a: &CAov| -> Result<Option<Aov>, String> {
+        let aov = |a: &CAov, name: &str| -> Result<Option<Aov>, String> {
             if a.pixels.is_null() {
                 return Ok(None);
             }
+            // SAFETY: the caller guarantees the format string.
+            let format = unsafe { string(a.format)? };
             Ok(Some(Aov {
-                format: Format::from_abi(a.format)?,
+                format: Format::from_name(&format).map_err(|e| format!("the {name} AOV: {e}"))?,
                 // SAFETY: the caller guarantees `len` writable bytes.
                 pixels: unsafe { std::slice::from_raw_parts_mut(a.pixels, a.len) },
             }))
@@ -264,9 +266,9 @@ pub unsafe extern "C" fn pika_render(
             height: f.height,
             window,
             clear_color: f.clear_color,
-            color: aov(&f.color)?,
-            depth: aov(&f.depth)?,
-            normal: aov(&f.normal)?,
+            color: aov(&f.color, "color")?,
+            depth: aov(&f.depth, "depth")?,
+            normal: aov(&f.normal, "normal")?,
             render_tags,
         };
         let done = lock(handle)?.render(frame)?;
@@ -369,20 +371,23 @@ pub unsafe extern "C" fn pika_mesh_points(
 }
 
 /// # Safety
-/// `renderer` must be live, and `normals` valid for `count` reads.
+/// `renderer` must be live, `interpolation` a NUL-terminated string and
+/// `normals` valid for `count` reads.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_normals(
     renderer: *const Handle,
     id: u64,
-    interpolation: u32,
+    interpolation: *const c_char,
     normals: *const [f32; 3],
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the array.
-        let (handle, values) = unsafe { (&*renderer, slice(normals, count).to_vec()) };
+        // SAFETY: the caller guarantees the renderer, the string and the array.
+        let (handle, token) = unsafe { (&*renderer, string(interpolation)?) };
+        // SAFETY: as above.
+        let values = unsafe { slice(normals, count) }.to_vec();
         let normals = Normals {
-            interpolation: Interpolation::from_abi(interpolation)?,
+            interpolation: Interpolation::from_token(&token)?,
             values,
         };
         lock(handle)?.store.set_normals(id, Some(normals))
