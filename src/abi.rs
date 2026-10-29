@@ -217,13 +217,19 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
     })
 }
 
-/// Renders one frame into the render buffers it binds.
+/// Renders one frame into the render buffers it binds, and writes to
+/// `*converged` whether they now hold this frame rather than the one before.
 ///
 /// # Safety
-/// `renderer` must be live, `frame` valid for reads, and each bound AOV's
-/// `pixels` valid for `len` byte writes for the duration of the call.
+/// `renderer` must be live, `frame` valid for reads, each bound AOV's
+/// `pixels` valid for `len` byte writes for the duration of the call, and
+/// `converged` valid for one write.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pika_render(renderer: *const Handle, frame: *const CFrame) -> i32 {
+pub unsafe extern "C" fn pika_render(
+    renderer: *const Handle,
+    frame: *const CFrame,
+    converged: *mut bool,
+) -> i32 {
     call(|| {
         // SAFETY: the caller guarantees the renderer and the frame.
         let (handle, f) = unsafe { (&*renderer, &*frame) };
@@ -256,7 +262,10 @@ pub unsafe extern "C" fn pika_render(renderer: *const Handle, frame: *const CFra
             normal: aov(&f.normal)?,
             render_tags,
         };
-        lock(handle)?.render(frame)
+        let done = lock(handle)?.render(frame)?;
+        // SAFETY: the caller guarantees one write.
+        unsafe { *converged = done };
+        Ok(())
     })
 }
 

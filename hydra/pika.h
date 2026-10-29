@@ -187,7 +187,10 @@ int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 // OpenGL's window depth, cleared to 1; normals are in world space, turned
 // toward the viewer.
 // Pixels outside the data window are left as they are.
-int pika_render(const pika_renderer *renderer, const pika_frame *frame);
+// While frames change, the buffers get the frame before this one, which
+// leaves this one's GPU work running while the host works; `*converged` is
+// false until a call with nothing changed delivers it.
+int pika_render(const pika_renderer *renderer, const pika_frame *frame, bool *converged);
 
 #ifdef __cplusplus
 }

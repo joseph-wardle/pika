@@ -15,7 +15,7 @@ use crate::gpu;
 use crate::raster::{self, Raster};
 use crate::shader;
 use crate::smooth::Smooth;
-use crate::store::{self, Store};
+use crate::store::{self, Moved, Store};
 use crate::subdiv::Subdiv;
 use crate::target::{self, Target};
 use crate::transform::Camera;
@@ -116,6 +116,61 @@ pub struct Renderer {
     frames: Vec<FrameStats>,
     /// The size and color format of the last frame, for the report.
     last: Option<(u32, u32, Format)>,
+    /// The frame on the GPU, waiting to be placed.
+    pending: Option<Pending>,
+    /// The buffers the last frame was placed into, and what it was drawn from.
+    placed: Option<(Buffers, Inputs)>,
+}
+
+/// What a frame's image depends on besides the store and its buffers.
+#[derive(Clone, PartialEq)]
+struct Inputs {
+    world_to_view: [f64; 16],
+    projection: [f64; 16],
+    clear_color: [f32; 4],
+    render_tags: Vec<String>,
+}
+
+/// The render buffers a frame is placed into, known only by size, data
+/// window and, for each AOV, format, address and length. The host's
+/// buffers are taken to hold the last frame placed into ones that match.
+#[derive(Clone, Copy, PartialEq)]
+struct Buffers {
+    width: u32,
+    height: u32,
+    window: [u32; 4],
+    aovs: [Option<(Format, usize, usize)>; 3],
+}
+
+impl Buffers {
+    fn of(frame: &Frame) -> Self {
+        let aov = |a: &Option<Aov>| {
+            (a.as_ref()).map(|a| (a.format, a.pixels.as_ptr() as usize, a.pixels.len()))
+        };
+        Self {
+            width: frame.width,
+            height: frame.height,
+            window: frame.window,
+            aovs: [aov(&frame.color), aov(&frame.depth), aov(&frame.normal)],
+        }
+    }
+}
+
+/// A frame submitted to the GPU, with what placing it and its stats need.
+struct Pending {
+    buffers: Buffers,
+    inputs: Inputs,
+    color: Format,
+    /// Each attachment's format and bytes per pixel, and whether it was read.
+    formats: [(vk::Format, usize); 3],
+    read: [bool; 3],
+    record: Duration,
+    update: geometry::Update,
+    /// Whether the camera's view was culled, so its counts are this frame's.
+    culled: bool,
+    moved: usize,
+    transforms: usize,
+    latent: bool,
 }
 
 /// One Hydra sync, from the render delegate's `Update` to its
@@ -144,6 +199,8 @@ struct FrameStats {
     /// Meshes whose transform moved.
     transforms: usize,
     read_bytes: u64,
+    /// The frame was placed a call later than it was drawn.
+    latent: bool,
 }
 
 impl Renderer {
@@ -185,6 +242,8 @@ impl Renderer {
             syncs: Vec::new(),
             frames: Vec::new(),
             last: None,
+            pending: None,
+            placed: None,
         })
     }
 
@@ -219,9 +278,17 @@ impl Renderer {
     }
 
     /// Draws the store's meshes into the frame's data window, and copies
-    /// each bound AOV into its render buffer.
-    pub fn render(&mut self, frame: Frame) -> Result<(), String> {
-        let start = Instant::now();
+    /// each bound AOV into its render buffer. Returns whether the buffers
+    /// now hold this frame.
+    ///
+    /// While frames change, each call hands back the frame before and leaves
+    /// this one on the GPU, so its work overlaps the host's until the next
+    /// call: drawing and waiting in one call would put every GPU pass in
+    /// series with the host's own frame time. A call that changes nothing
+    /// waits for the frame on the GPU and returns true. A frame drawn into
+    /// buffers that do not hold the last frame is drawn and waited for at
+    /// once.
+    pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let [x, y, w, h] = frame.window;
         if w == 0 || h == 0 || x + w > frame.width || y + h > frame.height {
             return Err(format!(
@@ -270,7 +337,26 @@ impl Renderer {
             raster::NORMAL_AOV,
         ];
         let camera = Camera::new(&frame.world_to_view, &frame.projection)?;
+        let buffers = Buffers::of(&frame);
+        let inputs = Inputs {
+            world_to_view: frame.world_to_view,
+            projection: frame.projection,
+            clear_color: frame.clear_color,
+            render_tags: frame.render_tags.clone(),
+        };
+        let mut aovs = [frame.color, frame.depth, frame.normal];
 
+        let moved = self.store.take_moved();
+        if let Some(pending) = self.pending.take() {
+            self.collect(pending, &buffers, &mut aovs)?;
+        }
+        let placed = self.placed.as_ref();
+        if moved == Moved::default() && placed == Some(&(buffers, inputs.clone())) {
+            return Ok(true);
+        }
+        let latent = placed.is_some_and(|(b, _)| *b == buffers);
+
+        let start = Instant::now();
         let target = match &mut self.target {
             Some(t) if t.fits(&formats, w, h) => t,
             slot => {
@@ -279,13 +365,12 @@ impl Renderer {
                 slot.insert(Target::new(&self.device, &formats, w, h)?)
             }
         };
-        let moved = self.store.take_moved();
         let cb = target.begin()?;
         let update = self.geometry.update(
             &self.device,
             &self.store,
             &moved,
-            &frame.render_tags,
+            &inputs.render_tags,
             &self.subdiv,
             &self.smooth,
             cb,
@@ -306,7 +391,7 @@ impl Renderer {
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(&[
             vk::ClearColorValue {
-                float32: frame.clear_color,
+                float32: inputs.clear_color,
             },
             clears[0],
             clears[1],
@@ -314,50 +399,88 @@ impl Renderer {
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
             (self.raster).draw(cb, formats[0].0, target.area(), camera, geometry, view);
         }
-        let read = [&frame.color, &frame.depth, &frame.normal].map(Option::is_some);
-        let times = target.finish(&read)?;
-        let drawn = view.map_or([0; 2], |v| v.drawn());
-        let record = start.elapsed() - times.wait;
+        let read = aovs.each_ref().map(Option::is_some);
+        target.submit(&read)?;
+        let pending = Pending {
+            buffers,
+            inputs,
+            color,
+            formats,
+            read,
+            record: start.elapsed(),
+            update,
+            culled: view.is_some(),
+            moved: moved.points.len(),
+            transforms: moved.transforms.len(),
+            latent,
+        };
+        if latent {
+            self.pending = Some(pending);
+            return Ok(false);
+        }
+        self.collect(pending, &buffers, &mut aovs)?;
+        Ok(true)
+    }
 
+    /// Waits for the pending frame and copies it into `aovs`, if they are
+    /// the buffers it was drawn for, then records its stats.
+    fn collect(
+        &mut self,
+        pending: Pending,
+        buffers: &Buffers,
+        aovs: &mut [Option<Aov>; 3],
+    ) -> Result<(), String> {
+        let target = (self.target.as_mut()).ok_or("a frame is pending without its target")?;
+        let times = target.wait()?;
+        let drawn = match (&mut self.view, pending.culled) {
+            (Some(view), true) => view.drawn(),
+            _ => [0; 2],
+        };
         let placing = Instant::now();
-        for (i, aov) in [frame.color, frame.depth, frame.normal]
-            .into_iter()
-            .enumerate()
-        {
-            if let Some(aov) = aov {
-                place(
-                    target.pixels(i),
-                    formats[i].1,
-                    aov,
-                    frame.width,
-                    frame.height,
-                    frame.window,
-                );
+        let [x, y, w, h] = pending.buffers.window;
+        let fits = pending.buffers == *buffers;
+        if fits {
+            for (i, aov) in aovs.iter_mut().enumerate() {
+                if let Some(aov) = aov {
+                    let (width, height) = (buffers.width, buffers.height);
+                    let window = [x, y, w, h];
+                    place(
+                        target.pixels(i),
+                        pending.formats[i].1,
+                        aov,
+                        width,
+                        height,
+                        window,
+                    );
+                }
             }
         }
-        let read_bytes = (formats.iter().zip(read))
+        let place = placing.elapsed();
+        let read_bytes = (pending.formats.iter().zip(pending.read))
             .filter(|(_, r)| *r)
             .map(|(f, _)| (f.1 * w as usize * h as usize) as u64)
             .sum();
         let stats = FrameStats {
             width: w,
             height: h,
-            record,
+            record: pending.record,
             target: times,
-            place: placing.elapsed(),
-            update,
+            place,
+            update: pending.update,
             drawn,
             geometry_bytes: self.geometry.bytes(),
-            moved: moved.points.len(),
-            transforms: moved.transforms.len(),
+            moved: pending.moved,
+            transforms: pending.transforms,
             read_bytes,
+            latent: pending.latent,
         };
         if let Some((path, file)) = &mut self.stats {
             file.write_all(frame_line(self.frames.len() + 1, &stats).as_bytes())
                 .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))?;
         }
         self.frames.push(stats);
-        self.last = Some((w, h, color));
+        self.last = Some((w, h, pending.color));
+        self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())
     }
 
@@ -407,7 +530,7 @@ impl Renderer {
 /// `stride` bytes per pixel, into an AOV's render buffer of `width` ×
 /// `height`, at the data window. Each pixel keeps the buffer's bytes per
 /// pixel of its value, dropping the attachment's extra channel.
-fn place(src: &[u8], stride: usize, aov: Aov, width: u32, height: u32, window: [u32; 4]) {
+fn place(src: &[u8], stride: usize, aov: &mut Aov, width: u32, height: u32, window: [u32; 4]) {
     let [x, y, w, h] = window.map(|v| v as usize);
     let size = aov.format.bytes_per_pixel();
     // The window's bottom row, counted up from the buffer's bottom row.
@@ -483,14 +606,14 @@ fn stats_line(
 
 /// One frame as `key value` pairs. The GPU's update is the uploads and the
 /// stencil and smooth normal passes; `layout` and `draws` are 1 when they
-/// were rewritten.
+/// were rewritten, and `latent` when the frame was placed a call late.
 fn frame_line(index: usize, f: &FrameStats) -> String {
     let ms = |t: Duration| t.as_secs_f64() * 1e3;
     format!(
         "frame {index} width {} height {} record_ms {:.3} wait_ms {:.3} place_ms {:.3} \
          gpu_update_ms {:.3} gpu_cull_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} \
          uploaded_bytes {} read_bytes {} drawn_instances {} drawn_triangles {} \
-         geometry_bytes {} moved_meshes {} moved_transforms {} layout {} draws {}\n",
+         geometry_bytes {} moved_meshes {} moved_transforms {} layout {} draws {} latent {}\n",
         f.width,
         f.height,
         ms(f.record),
@@ -509,6 +632,7 @@ fn frame_line(index: usize, f: &FrameStats) -> String {
         f.transforms,
         u8::from(f.update.layout),
         u8::from(f.update.draws),
+        u8::from(f.latent),
     )
 }
 
@@ -552,6 +676,7 @@ mod tests {
             moved: 338,
             transforms: 12,
             read_bytes: 20_995_200,
+            latent: true,
         };
         assert_eq!(
             frame_line(7, &stats),
@@ -559,7 +684,7 @@ mod tests {
              gpu_update_ms 0.875 gpu_cull_ms 0.125 gpu_draw_ms 2.000 gpu_readback_ms 1.375 \
              uploaded_bytes 4096 read_bytes 20995200 drawn_instances 1274 \
              drawn_triangles 11550000 geometry_bytes 1073741824 moved_meshes 338 \
-             moved_transforms 12 layout 0 draws 1\n"
+             moved_transforms 12 layout 0 draws 1 latent 1\n"
         );
     }
 }

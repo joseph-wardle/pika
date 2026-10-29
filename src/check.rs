@@ -106,7 +106,8 @@ impl<'a> Offscreen<'a> {
             );
             d.cmd_draw(cb, 6, 1, 0, 0);
         }
-        self.target.finish(&[true])?;
+        self.target.submit(&[true])?;
+        self.target.wait()?;
         Ok(self.target.pixels(0).to_vec())
     }
 }
@@ -115,7 +116,7 @@ impl Drop for Offscreen<'_> {
     fn drop(&mut self) {
         let d = &self.device.raw;
         // SAFETY: both handles were created on `d` or are null, which destroy
-        // calls accept, and no submit is pending: `finish` waits for each one.
+        // calls accept, and no submit is pending: `draw` waits for each one.
         unsafe {
             d.destroy_pipeline(self.pipeline, None);
             d.destroy_pipeline_layout(self.layout, None);

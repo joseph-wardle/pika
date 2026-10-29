@@ -47,6 +47,11 @@ public:
                    pika_renderer *renderer)
         : HdRenderPass(index, collection), _renderer(renderer) {}
 
+    // usdview re-renders a pass that is not converged only while paused,
+    // and usdrecord and husk until it is, so playback overlaps frames and a
+    // still image is always the current frame.
+    bool IsConverged() const override { return _converged; }
+
 protected:
     void _Execute(HdRenderPassStateSharedPtr const &state,
                   TfTokenVector const &renderTags) override {
@@ -131,11 +136,14 @@ protected:
             tags.push_back(tag.GetText());
         frame.render_tags = tags.data();
         frame.render_tag_count = tags.size();
-        report(pika_render(_renderer, &frame), "render");
+        // A failed render keeps no frame on the GPU to wait for.
+        _converged = true;
+        report(pika_render(_renderer, &frame, &_converged), "render");
     }
 
 private:
     pika_renderer *_renderer;
+    bool _converged = true;
 };
 
 class PikaRenderDelegate final : public HdRenderDelegate {

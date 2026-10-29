@@ -67,8 +67,15 @@ fixture() {
     # UsdImaging names native instance prototypes after hashes that change
     # from run to run.
     sed -i -E 's/(_purpose|_geomModel)[0-9a-f]+/\1#/g' "$OUT/fixtures/$name.dump"
-    diff -u "$dir/$name.dump" "$OUT/fixtures/$name.dump" ||
+    diff -u "$dir/$name.dump" <(awk '/^sync /{ on = ($2 <= 2) } on' "$OUT/fixtures/$name.dump") ||
         fail "$name: the store differs from $name.dump"
+    # husk renders frame 2 again until Pika reports it delivered; those
+    # renders' syncs must change nothing.
+    local n
+    for n in $(seq 3 "$(grep -c '^sync ' "$OUT/fixtures/$name.dump")"); do
+        [ "$(store_after "$n" "$OUT/fixtures/$name.dump")" = "$(store_after 2 "$OUT/fixtures/$name.dump")" ] ||
+            fail "$name: sync $n, a render repeated for frame 2, changed the store"
+    done
     [ "$(store_after 2 "$OUT/fixtures/$name.dump")" != "$(store_after 1 "$dir/$name.dump")" ] ||
         fail "$name: frame 2's store matches frame 1's expectation"
 }
