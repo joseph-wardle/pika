@@ -6,16 +6,17 @@
 //! pass's table and every mesh's ranges) is rebuilt only when a mesh is
 //! added, removed or remodelled. A playing frame writes only the points and
 //! normals that moved, recomputes the smooth normals when points moved, and
-//! rewrites the instances and draw records when a transform, visibility,
-//! render tag or instancer changes. Each mesh is one draw record, of all its
-//! instances.
+//! rewrites the instances of meshes whose transform moved. It rewrites every
+//! instance and draw record when a visibility, render tag or instancer
+//! changes, or a moved mesh's instance count does. Each mesh is one draw
+//! record, of all its instances.
 //!
 //! A mesh's normals are its authored ones only when it is not subdivided,
 //! as USD specifies; Hydra hands them over on subdivided meshes too.
 //! Otherwise they are its smooth normals, which the smooth normal pass
 //! computes from the cage.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ash::vk;
 
@@ -59,11 +60,15 @@ struct Layout {
     indices: Buffer,
 }
 
+/// Each drawn mesh's rows of the instances, which its draw record draws.
+type Rows = BTreeMap<u64, std::ops::Range<usize>>;
+
 /// The instances and their draw records, sized to fit.
 struct Draws {
     instances: Buffer,
     records: Buffer,
     count: u32,
+    rows: Rows,
 }
 
 /// The buffers the mesh pass reads.
@@ -181,10 +186,24 @@ impl Geometry {
         }
 
         let records;
-        let rewrite = rebuilt || moved.draws || self.draws.is_none() || self.tags != tags;
+        let mut patches = Vec::new();
+        let mut rewrite = rebuilt || moved.draws || self.draws.is_none() || self.tags != tags;
+        if let (false, Some(draws)) = (rewrite, &self.draws) {
+            match patch(store, &layout.ranges, &draws.rows, &moved.transforms, tags) {
+                Some(p) => patches = p,
+                None => rewrite = true,
+            }
+            for (first, instances) in &patches {
+                copies.push(Upload {
+                    bytes: bytes(instances),
+                    buffer: draws.instances.raw,
+                    offset: (first * size_of::<Instance>()) as u64,
+                });
+            }
+        }
         if rewrite {
             self.tags = tags.to_vec();
-            let (instances, commands) = draws(store, &layout.ranges, tags);
+            let (instances, commands, rows) = draws(store, &layout.ranges, tags);
             records = (instances, commands);
             let draws = match self.draws.take() {
                 Some(d)
@@ -205,10 +224,12 @@ impl Geometry {
                         vk::BufferUsageFlags::INDIRECT_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                     )?,
                     count: 0,
+                    rows: Rows::new(),
                 },
             };
             let draws = self.draws.insert(Draws {
                 count: records.1.len() as u32,
+                rows,
                 ..draws
             });
             copies.push(Upload {
@@ -550,52 +571,28 @@ fn point_corners(topology: &Topology, point_count: usize, first_point: u32, tabl
 }
 
 /// One draw record per visible mesh of render `tags` (or of any, when there
-/// are none), drawing it at each of its instances. A mesh whose instancers
-/// do not fit together is left out, with a warning.
+/// are none), drawing it at each of its instances, and each mesh's rows.
 fn draws(
     store: &Store,
     ranges: &BTreeMap<u64, Range>,
     tags: &[String],
-) -> (Vec<Instance>, Vec<vk::DrawIndexedIndirectCommand>) {
-    let instancers: HashMap<&str, &Instancer> = (store.instancers().values())
-        .map(|i| (i.path.as_str(), i))
-        .collect();
+) -> (Vec<Instance>, Vec<vk::DrawIndexedIndirectCommand>, Rows) {
+    let instancers = by_path(store);
     let mut instances = Vec::new();
     let mut records = Vec::new();
+    let mut rows = Rows::new();
     for (&id, range) in ranges {
-        let mesh = &store.meshes()[&id];
-        let (Some(true), Some(instancing), Some(transform), Some(topology)) = (
-            mesh.visible,
-            &mesh.instancing,
-            &mesh.transform,
-            &mesh.topology,
-        ) else {
-            continue;
-        };
-        let tagged = (mesh.render_tag.as_ref()).is_some_and(|t| tags.contains(t));
-        if range.index_count == 0 || !(tagged || tags.is_empty()) {
-            continue;
-        }
-        let matrices = match instancing {
-            None => vec![*transform],
-            Some(i) => match instance_transforms(&instancers, i) {
-                Ok(m) => m.iter().map(|m| multiply(transform, m)).collect(),
-                Err(e) => {
-                    eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
-                    continue;
-                }
-            },
-        };
         let first = instances.len();
-        let left_handed = topology.left_handed;
-        instances.extend(
-            matrices
-                .iter()
-                .filter_map(|m| Instance::new(m, left_handed)),
-        );
+        instances.extend(mesh_instances(
+            &instancers,
+            &store.meshes()[&id],
+            range,
+            tags,
+        ));
         if instances.len() == first {
             continue;
         }
+        rows.insert(id, first..instances.len());
         records.push(vk::DrawIndexedIndirectCommand {
             index_count: range.index_count,
             instance_count: (instances.len() - first) as u32,
@@ -604,7 +601,77 @@ fn draws(
             first_instance: first as u32,
         });
     }
-    (instances, records)
+    (instances, records, rows)
+}
+
+/// The instances of the meshes whose transform moved, each with its first
+/// row. `None` when a mesh's instance count changed, so the rows no longer
+/// fit and every record must be rewritten.
+fn patch(
+    store: &Store,
+    ranges: &BTreeMap<u64, Range>,
+    rows: &Rows,
+    transforms: &BTreeSet<u64>,
+    tags: &[String],
+) -> Option<Vec<(usize, Vec<Instance>)>> {
+    let instancers = by_path(store);
+    let mut patches = Vec::new();
+    for id in transforms {
+        let Some(range) = ranges.get(id) else {
+            continue;
+        };
+        let instances = mesh_instances(&instancers, &store.meshes()[id], range, tags);
+        let rows = rows.get(id).cloned().unwrap_or_default();
+        if instances.len() != rows.len() {
+            return None;
+        }
+        if !instances.is_empty() {
+            patches.push((rows.start, instances));
+        }
+    }
+    Some(patches)
+}
+
+/// The instances `mesh` is drawn at in a pass of render `tags`. None when it
+/// is invisible, unsynced, empty or of another tag, or when its instancers do
+/// not fit together, with a warning.
+fn mesh_instances(
+    instancers: &HashMap<&str, &Instancer>,
+    mesh: &Mesh,
+    range: &Range,
+    tags: &[String],
+) -> Vec<Instance> {
+    let (Some(true), Some(instancing), Some(transform), Some(topology)) = (
+        mesh.visible,
+        &mesh.instancing,
+        &mesh.transform,
+        &mesh.topology,
+    ) else {
+        return Vec::new();
+    };
+    let tagged = (mesh.render_tag.as_ref()).is_some_and(|t| tags.contains(t));
+    if range.index_count == 0 || !(tagged || tags.is_empty()) {
+        return Vec::new();
+    }
+    let matrices = match instancing {
+        None => vec![*transform],
+        Some(i) => match instance_transforms(instancers, i) {
+            Ok(m) => m.iter().map(|m| multiply(transform, m)).collect(),
+            Err(e) => {
+                eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
+                return Vec::new();
+            }
+        },
+    };
+    (matrices.iter())
+        .filter_map(|m| Instance::new(m, topology.left_handed))
+        .collect()
+}
+
+fn by_path(store: &Store) -> HashMap<&str, &Instancer> {
+    (store.instancers().values())
+        .map(|i| (i.path.as_str(), i))
+        .collect()
 }
 
 fn size<T>(values: &[T]) -> u64 {
@@ -750,20 +817,19 @@ mod tests {
         assert!(tables(&m).err().unwrap().contains("hole index 2"));
     }
 
-    #[test]
-    fn draws_are_of_the_passes_tags() {
+    const IDENTITY: [f64; 16] = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+    ];
+
+    /// A store of drawn meshes, one per path and render tag, and their ranges.
+    fn drawn(meshes: &[(&str, &str)]) -> (Store, BTreeMap<u64, Range>) {
         let mut store = Store::new();
         let mut ranges = BTreeMap::new();
-        for (path, tag) in [("/final", "render"), ("/draft", "proxy")] {
+        for &(path, tag) in meshes {
             let id = store.insert_mesh(path.into());
             let m = mesh(Scheme::None, None);
             store.set_topology(id, m.topology.unwrap()).unwrap();
-            let mut identity = [0.0; 16];
-            identity[0] = 1.0;
-            identity[5] = 1.0;
-            identity[10] = 1.0;
-            identity[15] = 1.0;
-            store.set_transform(id, identity).unwrap();
+            store.set_transform(id, IDENTITY).unwrap();
             store.set_visible(id, true).unwrap();
             store.set_instancing(id, None).unwrap();
             store.set_render_tag(id, tag.into()).unwrap();
@@ -777,6 +843,12 @@ mod tests {
             };
             ranges.insert(id, range);
         }
+        (store, ranges)
+    }
+
+    #[test]
+    fn draws_are_of_the_passes_tags() {
+        let (store, ranges) = drawn(&[("/final", "render"), ("/draft", "proxy")]);
         let drawn = |tags: &[&str]| {
             let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
             draws(&store, &ranges, &tags).1.len()
@@ -787,5 +859,28 @@ mod tests {
         assert_eq!(drawn(&["guide"]), 0);
         // No tags draws every tag, as Hydra's own filter does.
         assert_eq!(drawn(&[]), 2);
+    }
+
+    #[test]
+    fn moved_transforms_patch_their_rows() {
+        let (mut store, ranges) = drawn(&[("/a", "render"), ("/b", "render"), ("/c", "render")]);
+        let (mut instances, _, rows) = draws(&store, &ranges, &[]);
+        let ids: Vec<u64> = ranges.keys().copied().collect();
+        let mut moved = IDENTITY;
+        moved[12] = 2.0;
+        store.set_transform(ids[1], moved).unwrap();
+        let transforms = store.take_moved().transforms;
+        let (rewritten, ..) = draws(&store, &ranges, &[]);
+        assert_ne!(instances, rewritten);
+        for (first, patch) in patch(&store, &ranges, &rows, &transforms, &[]).unwrap() {
+            instances[first..first + patch.len()].copy_from_slice(&patch);
+        }
+        assert_eq!(instances, rewritten);
+
+        // The control: a transform that flattens the mesh drops its instance,
+        // so the rows after it shift.
+        store.set_transform(ids[1], [0.0; 16]).unwrap();
+        let transforms = store.take_moved().transforms;
+        assert_eq!(patch(&store, &ranges, &rows, &transforms, &[]), None);
     }
 }

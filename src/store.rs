@@ -191,8 +191,10 @@ pub struct Moved {
     pub points: BTreeSet<u64>,
     /// Meshes whose normals changed, keeping their interpolation and count.
     pub normals: BTreeSet<u64>,
-    /// A transform, visibility, render tag or instancing changed: the
-    /// instances and draw records are rewritten.
+    /// Meshes whose transform changed: only their instances are rewritten.
+    pub transforms: BTreeSet<u64>,
+    /// A visibility, render tag or instancing changed: the instances and
+    /// draw records are rewritten.
     pub draws: bool,
 }
 
@@ -352,7 +354,9 @@ impl Store {
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.transform, transform, 128);
+        if write(&mut self.stats.mesh, &mut mesh.transform, transform, 128) {
+            self.moved.transforms.insert(id);
+        }
         Ok(())
     }
 
@@ -873,8 +877,9 @@ mod tests {
             .unwrap();
         store.set_transform(a, [1.0; 16]).unwrap();
         let moved = store.take_moved();
-        assert_eq!((moved.layout, moved.draws), (false, true));
+        assert_eq!((moved.layout, moved.draws), (false, false));
         assert_eq!(moved.normals, BTreeSet::from([a]));
+        assert_eq!(moved.transforms, BTreeSet::from([a]));
 
         // Changing the point count moves the layout, not the points.
         store.set_points(a, vec![[1.0; 3]; 5]).unwrap();

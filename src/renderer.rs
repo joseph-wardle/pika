@@ -131,6 +131,8 @@ struct FrameStats {
     update: geometry::Update,
     /// Meshes whose points moved.
     moved: usize,
+    /// Meshes whose transform moved.
+    transforms: usize,
     read_bytes: u64,
 }
 
@@ -316,6 +318,7 @@ impl Renderer {
             place: placing.elapsed(),
             update,
             moved: moved.points.len(),
+            transforms: moved.transforms.len(),
             read_bytes,
         };
         if let Some((path, file)) = &mut self.stats {
@@ -449,7 +452,7 @@ fn frame_line(index: usize, f: &FrameStats) -> String {
     format!(
         "frame {index} width {} height {} record_ms {:.3} wait_ms {:.3} place_ms {:.3} \
          gpu_update_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} uploaded_bytes {} \
-         read_bytes {} moved_meshes {} layout {} draws {}\n",
+         read_bytes {} moved_meshes {} moved_transforms {} layout {} draws {}\n",
         f.width,
         f.height,
         ms(f.record),
@@ -461,6 +464,7 @@ fn frame_line(index: usize, f: &FrameStats) -> String {
         f.update.bytes,
         f.read_bytes,
         f.moved,
+        f.transforms,
         u8::from(f.update.layout),
         u8::from(f.update.draws),
     )
@@ -501,13 +505,14 @@ mod tests {
                 draws: true,
             },
             moved: 338,
+            transforms: 12,
             read_bytes: 20_995_200,
         };
         assert_eq!(
             frame_line(7, &stats),
             "frame 7 width 1620 height 1080 record_ms 1.500 wait_ms 5.250 place_ms 4.500 \
              gpu_update_ms 0.875 gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
-             read_bytes 20995200 moved_meshes 338 layout 0 draws 1\n"
+             read_bytes 20995200 moved_meshes 338 moved_transforms 12 layout 0 draws 1\n"
         );
     }
 }
