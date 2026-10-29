@@ -45,13 +45,15 @@ pub struct Target {
     timestamps: vk::QueryPool,
     /// `begin_cull` was called this frame.
     culling: bool,
+    /// When the frame on the GPU was submitted; `None` once `wait` returns.
+    submitted: Option<Instant>,
     timestamp_bits: u32,
     timestamp_period: f32,
 }
 
 /// Where one frame's time went after recording.
 pub struct Times {
-    /// From the submit until the fence signalled.
+    /// How long `wait` blocked on the fence.
     pub wait: Duration,
     /// On the GPU: the work recorded between `begin` and `begin_cull`, then
     /// until `begin_rendering`, rendering, and the readback copies.
@@ -85,6 +87,7 @@ impl Target {
             fence: vk::Fence::null(),
             timestamps: vk::QueryPool::null(),
             culling: false,
+            submitted: None,
             timestamp_bits: device.timestamp_bits,
             timestamp_period: device.timestamp_period,
         };
@@ -143,18 +146,21 @@ impl Target {
     }
 
     /// Attachment `index`'s read-back pixels as tightly packed rows, first
-    /// row first. No GPU work is pending outside `finish`, so they are safe
-    /// to read or overwrite here.
+    /// row first. They are safe to read only between `wait` and the next
+    /// `submit`.
     pub fn pixels(&mut self, index: usize) -> &mut [u8] {
         self.colors[index].readback.bytes()
     }
 
     /// Starts a frame's command buffer, for uploads before `begin_rendering`.
     pub fn begin(&mut self) -> Result<vk::CommandBuffer, String> {
+        if self.submitted.is_some() {
+            return Err("a frame began before the last one's wait".into());
+        }
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
         // SAFETY: the pool and buffer were created on this live device, and
-        // `finish` waited for the last submit, so neither is in use.
+        // `wait` waited for the last submit, so neither is in use.
         unsafe {
             self.device
                 .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
@@ -171,9 +177,9 @@ impl Target {
 
     /// Begins dynamic rendering into every attachment, each color cleared to
     /// its value in `clears`, the depth buffer to the far plane. Record draws,
-    /// then call `finish`.
+    /// then call `submit`.
     pub fn begin_rendering(&mut self, clears: &[vk::ClearColorValue]) {
-        // A query never written would stall `finish` forever.
+        // A query never written would stall `wait` forever.
         if !self.culling {
             self.timestamp(1);
         }
@@ -243,9 +249,10 @@ impl Target {
         }
     }
 
-    /// Ends the frame begun by `begin_rendering`: copies each attachment that
-    /// `read` marks to its readback buffer, submits and waits.
-    pub fn finish(&mut self, read: &[bool]) -> Result<Times, String> {
+    /// Ends the frame begun by `begin_rendering`, copies each attachment that
+    /// `read` marks to its readback buffer, and submits it. Call `wait`
+    /// before touching anything the frame uses.
+    pub fn submit(&mut self, read: &[bool]) -> Result<(), String> {
         // SAFETY: `cb` is recording inside the rendering `begin_rendering`
         // started.
         unsafe { self.device.cmd_end_rendering(self.commands) };
@@ -294,7 +301,7 @@ impl Target {
                 height: self.height,
                 depth: 1,
             });
-        // SAFETY (this and every call below in `finish`): `cb` is recording
+        // SAFETY (this and every call below in `submit`): `cb` is recording
         // outside rendering, every handle was created on `d`, and the info
         // structs outlive the calls.
         unsafe {
@@ -328,12 +335,25 @@ impl Target {
             let submits = [vk::SubmitInfo2::default().command_buffer_infos(&submit)];
             d.reset_fences(&[self.fence])
                 .map_err(|e| format!("vkResetFences failed: {e}"))?;
-            let start = Instant::now();
             d.queue_submit2(self.queue, &submits, self.fence)
                 .map_err(|e| format!("vkQueueSubmit2 failed: {e}"))?;
+        }
+        self.submitted = Some(Instant::now());
+        Ok(())
+    }
+
+    /// Waits for the submitted frame and returns where its time went.
+    pub fn wait(&mut self) -> Result<Times, String> {
+        if self.submitted.is_none() {
+            return Err("waited for a frame that was never submitted".into());
+        }
+        let d = &self.device;
+        let start = Instant::now();
+        // SAFETY: the fence and query pool were created on `d`, and the
+        // submit that signals the fence writes every timestamp.
+        let ticks = unsafe {
             d.wait_for_fences(&[self.fence], true, u64::MAX)
                 .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
-            let wait = start.elapsed();
             let mut ticks = [0u64; TIMESTAMPS as usize];
             d.get_query_pool_results(
                 self.timestamps,
@@ -342,22 +362,25 @@ impl Target {
                 vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
             )
             .map_err(|e| format!("vkGetQueryPoolResults failed: {e}"))?;
-            let between = |a: usize| {
-                elapsed(
-                    ticks[a],
-                    ticks[a + 1],
-                    self.timestamp_bits,
-                    self.timestamp_period,
-                )
-            };
-            Ok(Times {
-                wait,
-                update: between(0),
-                cull: between(1),
-                draw: between(2),
-                readback: between(3),
-            })
-        }
+            ticks
+        };
+        let wait = start.elapsed();
+        self.submitted = None;
+        let between = |a: usize| {
+            elapsed(
+                ticks[a],
+                ticks[a + 1],
+                self.timestamp_bits,
+                self.timestamp_period,
+            )
+        };
+        Ok(Times {
+            wait,
+            update: between(0),
+            cull: between(1),
+            draw: between(2),
+            readback: between(3),
+        })
     }
 
     /// Marks the end of the uploads and the start of the views' culling,
