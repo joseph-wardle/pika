@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use ash::vk;
 
 use crate::commands::Commands;
-use crate::cull::{self, Cull};
+use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
@@ -21,6 +21,7 @@ use crate::store::{Moved, Store};
 use crate::subdiv::Subdiv;
 use crate::target::Target;
 use crate::transform::Camera;
+use crate::view::View;
 
 /// The render buffer formats Pika writes, as Hydra names them. Color is
 /// half or full float, as the host asks: husk asks for `HdFormatFloat32Vec4`,
@@ -97,8 +98,8 @@ pub struct Renderer {
     // the pipelines and buffers are destroyed before their device.
     commands: Commands,
     target: Option<Target>,
-    /// The camera's records and visible instances.
-    view: Option<cull::View>,
+    /// The camera's view: its constants, records and visible instances.
+    view: Option<View>,
     raster: Raster,
     cull: Cull,
     subdiv: Subdiv,
@@ -333,11 +334,12 @@ impl Renderer {
             (Some(g), Some(v)) if v.fits(g) => Some(v),
             (Some(g), slot) => {
                 *slot = None;
-                Some(slot.insert(cull::View::new(&self.device, g)?))
+                Some(slot.insert(View::new(&self.device, g)?))
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            self.cull.record(cb, &camera, geometry, view);
+            view.begin(cb, &camera, geometry);
+            self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
@@ -352,7 +354,7 @@ impl Renderer {
             ],
         );
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
-            (self.raster).draw(cb, formats[0].0, target.area(), camera, geometry, view);
+            (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
         target.end_rendering(cb);
         self.commands.mark("draw")?;
@@ -422,11 +424,7 @@ impl Renderer {
         let (vram_used, vram_budget) = self.device.budget();
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
-            views: self
-                .view
-                .as_ref()
-                .map(cull::View::memory)
-                .unwrap_or_default(),
+            views: self.view.as_ref().map(View::memory).unwrap_or_default(),
             targets: target.memory(),
             vram_used,
             vram_budget,

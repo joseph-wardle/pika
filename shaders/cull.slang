@@ -1,27 +1,17 @@
 // The cull pass: for one view, each mesh instance whose box is inside the
 // view's frustum is added to its draw record's visible instances.
-// src/geometry.rs writes the records with no instances; this pass counts
-// them, and shaders/mesh.slang reads each instance through the visible list.
+// src/view.rs starts the records with no instances; this pass counts them,
+// and shaders/mesh.slang reads each instance through the visible list.
+
+#include "view.slang"
 
 struct Push
 {
-    // World to clip space (src/transform.rs Camera), depth reversed.
-    float4 view_projection[4];
-    // 7 per instance (src/transform.rs Instance).
-    float4 *instances;
-    // Each instance's draw record.
-    uint *owners;
-    // Per record: the low corner of its mesh's box, then the high one.
-    float *boxes;
-    // vk::DrawIndexedIndirectCommand, 5 per record: index_count,
-    // instance_count, first_index, vertex_offset, first_instance.
-    Atomic<uint> *records;
-    // Indexed by first_instance and a record's slots.
-    uint *visible;
-    // The instances and triangles drawn.
-    Atomic<uint> *drawn;
+    View *view;
+    // The instances this dispatch tests.
     uint first;
     uint count;
+    // The threads dispatched.
     uint stride;
     uint unused;
 };
@@ -32,8 +22,7 @@ ConstantBuffer<Push> push;
 float4 clip(float4 *m, float3 p)
 {
     float4 world = float4(dot(m[0], float4(p, 1)), dot(m[1], float4(p, 1)), dot(m[2], float4(p, 1)), 1);
-    return float4(dot(push.view_projection[0], world), dot(push.view_projection[1], world),
-                  dot(push.view_projection[2], world), dot(push.view_projection[3], world));
+    return project(push.view, world);
 }
 
 // Whether the box may be seen: false only when all 8 corners are outside
@@ -59,17 +48,18 @@ bool seen(float4 *m, float3 lo, float3 hi)
 [numthreads(64, 1, 1)]
 void cs(uint3 thread : SV_DispatchThreadID)
 {
+    View *view = push.view;
     for (uint i = thread.x; i < push.count; i += push.stride)
     {
         uint instance = push.first + i;
-        uint r = push.owners[instance];
-        float *box = push.boxes + 6 * r;
-        if (!seen(push.instances + 7 * instance, float3(box[0], box[1], box[2]),
+        uint r = view->owners[instance];
+        float *box = view->boxes + 6 * r;
+        if (!seen(view->instances + 7 * instance, float3(box[0], box[1], box[2]),
                   float3(box[3], box[4], box[5])))
             continue;
-        uint slot = push.records[5 * r + 1].increment();
-        push.visible[push.records[5 * r + 4].load() + slot] = instance;
-        push.drawn[0].increment();
-        push.drawn[1].add(push.records[5 * r].load() / 3);
+        uint slot = view->records[5 * r + 1].increment();
+        view->visible[view->records[5 * r + 4].load() + slot] = instance;
+        view->drawn[0].increment();
+        view->drawn[1].add(view->records[5 * r].load() / 3);
     }
 }
