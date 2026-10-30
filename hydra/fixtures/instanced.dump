@@ -1,5 +1,5 @@
 sync 1
-instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
+instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
   parent none
   transform
     1 0 0 0
@@ -9,10 +9,10 @@ instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInst
   instance_transforms 2
     1 0 0 0 0 1 0 0 0 0 1 0 1 0 0 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1
-mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
   render_tag geometry
   visible true
-  instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer indices 0 1
+  instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer indices 0 1
   transform
     1 0 0 0
     0 1 0 0
@@ -28,7 +28,7 @@ mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
     0 1 0
   normals none
 sync 2
-instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer
+instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
   parent none
   transform
     1 0 0 0
@@ -38,10 +38,10 @@ instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInst
   instance_transforms 2
     1 0 0 0 0 1 0 0 0 0 1 0 1 0 0 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 3 0 1
-mesh /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
   render_tag geometry
   visible true
-  instancer /UsdNiPropagatedPrototypes/NoPrimvars_purpose#/__Prototype_1/UsdNiInstancer indices 0 1
+  instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer indices 0 1
   transform
     1 0 0 0
     0 1 0 0

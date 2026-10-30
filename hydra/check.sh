@@ -72,8 +72,10 @@ fixture() {
         fail "$name: husk exited $? (see $OUT/fixtures/$name.log)"
     clean "$name" "$OUT/fixtures/$name.log"
     # UsdImaging names native instance prototypes after hashes that change
-    # from run to run.
-    sed -i -E 's/(_purpose|_geomModel)[0-9a-f]+/\1#/g' "$OUT/fixtures/$name.dump"
+    # from run to run and after the primvars it propagated, which changed
+    # between USD 25 and 26.
+    sed -i -E -e 's|/UsdNiPropagatedPrototypes/[^/]+/|/UsdNiPropagatedPrototypes/#/|g' \
+        -e 's/ForInstancer[0-9a-f]+/ForInstancer#/g' "$OUT/fixtures/$name.dump"
     diff -u "$dir/$name.dump" <(awk '/^sync /{ on = ($2 <= 2) } on' "$OUT/fixtures/$name.dump") ||
         fail "$name: the store differs from $name.dump"
     # husk renders frame 2 again until Pika reports it delivered; those

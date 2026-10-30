@@ -273,6 +273,9 @@ public:
     }
     // Pika brings its own Vulkan device, so the host's GPU setting is irrelevant.
     bool IsSupported(bool) const override { return true; }
+#if PXR_VERSION >= 2605
+    bool IsSupported(HdRendererCreateArgs const &, std::string *) const override { return true; }
+#endif
 };
 
 TF_REGISTRY_FUNCTION(TfType) {
