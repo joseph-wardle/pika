@@ -7,6 +7,7 @@ pub mod commands;
 mod cull;
 mod geometry;
 pub mod gpu;
+pub mod material;
 mod raster;
 mod renderer;
 pub mod shader;
