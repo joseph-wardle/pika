@@ -15,6 +15,7 @@ Today Pika draws meshes. It syncs them from the host with their subdivision, ins
 | Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. Pika reads `shaders/` from the checkout, so run it from there. |
 | Validate | The Vulkan validation layer from a [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) 1.3.268 or newer | Optional. Tested with SDK 1.4.328.1. |
 | Delegate | Houdini 21.0 or 22.0 (its HDK headers and USD libraries), `g++` and `make` | Tested with Houdini 21.0.596 (USD 0.25.5) and 22.0.466 (USD 0.26.5), g++ 11.5. `HFS` selects the Houdini; the default is `/opt/hfs21.0`. |
+| Bake | Houdini 22.0 (its MaterialX 1.39.5 headers and libraries), `g++` and `make` | The tool that generates material shaders. Houdini 21 ships no MaterialX Slang generator, so `HFS` defaults to `/opt/hfs22.0` here; a delegate built for Houdini 21 runs it all the same. |
 
 ## Build and check
 
@@ -40,4 +41,4 @@ export PXR_PLUGINPATH_NAME=$PWD/target/hydra
 husk -R Pika -c /world/camera -o out.exr hydra/scenes/cube.usda
 ```
 
-`hydra/check.sh` is the delegate's check, `hydra/gate.sh` the timing run on ALab, and `PIKA_STATS` with `hydra/stats.py` measure any run. Each script's header says what it does and how to run it.
+`make -C bake` builds the bake tool into `target/bake`; `bake/check.sh` is its check. `hydra/check.sh` is the delegate's check, `hydra/gate.sh` the timing run on ALab, and `PIKA_STATS` with `hydra/stats.py` measure any run. Each script's header says what it does and how to run it.

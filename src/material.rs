@@ -261,25 +261,9 @@ mod tests {
         document(network).unwrap().unwrap().hash
     }
 
-    // Houdini 22's MaterialX 1.39.5 generates this document; the generator
-    // check proves it on every build.
-    const FIXTURE: &str = "<?xml version=\"1.0\"?>
-<materialx version=\"1.39\">
-  <node name=\"n0\" nodedef=\"ND_UsdPreviewSurface_surfaceshader\">
-    <input name=\"diffuseColor\" nodename=\"n1\" output=\"rgb\" />
-  </node>
-  <node name=\"n1\" nodedef=\"ND_UsdUVTexture_23\">
-    <input name=\"st\" nodename=\"n2\" />
-    <input name=\"wrapS\" type=\"string\" value=\"clamp\" />
-  </node>
-  <node name=\"n2\" nodedef=\"ND_geompropvalue_vector2\">
-    <input name=\"geomprop\" type=\"string\" value=\"st\" />
-  </node>
-  <surfacematerial name=\"material\" type=\"material\">
-    <input name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />
-  </surfacematerial>
-</materialx>
-";
+    // Houdini 22's MaterialX 1.39.5 generates this document; bake/check.sh
+    // proves it against the manifest beside it.
+    const FIXTURE: &str = include_str!("../bake/fixtures/network.mtlx");
 
     #[test]
     fn usd_nodes_become_nodedefs() {
