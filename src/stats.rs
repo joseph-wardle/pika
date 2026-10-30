@@ -230,6 +230,8 @@ impl Sync {
             ("mesh_redundant_bytes", p.mesh.redundant),
             ("instancer_bytes", p.instancer.pulled),
             ("instancer_redundant_bytes", p.instancer.redundant),
+            ("material_bytes", p.material.pulled),
+            ("material_redundant_bytes", p.material.redundant),
             ("curve_bytes", p.curve_bytes),
             ("meshes", c.meshes),
             ("mesh_instances", c.mesh_instances),

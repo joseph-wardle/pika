@@ -1,13 +1,17 @@
 #include "prims.h"
 #include "report.h"
 
+#include <pxr/base/gf/matrix4f.h>
 #include <pxr/base/gf/quath.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/enum.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
 #include <pxr/imaging/pxOsd/refinerFactory.h>
 #include <pxr/imaging/pxOsd/tokens.h>
+#include <pxr/usd/sdf/assetPath.h>
 
 #include <opensubdiv/far/stencilTableFactory.h>
 
@@ -331,6 +335,110 @@ void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *rend
                  "; Pika reads matrix4d transforms and float3 or quaternion parts");
     }
     _pika.report(pika_instancer_primvars(renderer, _id, &p), path + " primvars");
+}
+
+PikaMaterial::PikaMaterial(SdfPath const &id, Pika &pika) : HdMaterial(id), _pika(pika) {
+    if (id.IsEmpty())
+        return;
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_material_new(renderer, id.GetText(), &_id),
+                     "adding material " + id.GetString());
+}
+
+PikaMaterial::~PikaMaterial() {
+    pika_renderer *renderer = _id ? _pika.renderer() : nullptr;
+    if (renderer)
+        _pika.report(pika_material_free(renderer, _id), "removing material " + GetId().GetString());
+}
+
+// Flattens a parameter's value into `param`; false for a type Pika has no
+// use for.
+static bool flatten(VtValue const &value, pika_param &param) {
+    auto floats = [&](float const *data, size_t count) {
+        param.kind = "float";
+        param.float_count = count;
+        std::copy_n(data, count, param.floats);
+        return true;
+    };
+    if (value.IsHolding<float>())
+        return floats(&value.UncheckedGet<float>(), 1);
+    if (value.IsHolding<GfVec2f>())
+        return floats(value.UncheckedGet<GfVec2f>().data(), 2);
+    if (value.IsHolding<GfVec3f>())
+        return floats(value.UncheckedGet<GfVec3f>().data(), 3);
+    if (value.IsHolding<GfVec4f>())
+        return floats(value.UncheckedGet<GfVec4f>().data(), 4);
+    if (value.IsHolding<GfMatrix4d>())
+        return floats(GfMatrix4f(value.UncheckedGet<GfMatrix4d>()).data(), 16);
+    if (value.IsHolding<int>()) {
+        param.kind = "int";
+        param.integer = value.UncheckedGet<int>();
+        return true;
+    }
+    if (value.IsHolding<bool>()) {
+        param.kind = "bool";
+        param.integer = value.UncheckedGet<bool>();
+        return true;
+    }
+    if (value.IsHolding<TfToken>()) {
+        param.kind = "text";
+        param.text = value.UncheckedGet<TfToken>().GetText();
+        return true;
+    }
+    if (value.IsHolding<std::string>()) {
+        param.kind = "text";
+        param.text = value.UncheckedGet<std::string>().c_str();
+        return true;
+    }
+    if (value.IsHolding<SdfAssetPath>()) {
+        param.kind = "asset";
+        param.text = value.UncheckedGet<SdfAssetPath>().GetResolvedPath().c_str();
+        return true;
+    }
+    return false;
+}
+
+void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
+    HdDirtyBits bits = *dirtyBits;
+    *dirtyBits = HdChangeTracker::Clean;
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer || !_id || !(bits & (DirtyResource | DirtyParams)))
+        return;
+    std::string const &path = GetId().GetString();
+    VtValue resource = delegate->GetMaterialResource(GetId());
+    HdMaterialNetwork2 network;
+    if (resource.IsHolding<HdMaterialNetworkMap>())
+        network = HdConvertToHdMaterialNetwork2(resource.UncheckedGet<HdMaterialNetworkMap>());
+
+    // The flat arrays borrow every string from `network`, which outlives
+    // the call.
+    std::vector<pika_node> nodes;
+    std::vector<pika_connection> connections;
+    std::vector<std::vector<pika_param>> params(network.nodes.size());
+    for (auto const &[nodePath, node] : network.nodes) {
+        std::vector<pika_param> &ps = params[nodes.size()];
+        for (auto const &[name, value] : node.parameters) {
+            pika_param param = {};
+            param.name = name.GetText();
+            param.text = "";
+            if (flatten(value, param))
+                ps.push_back(param);
+            else
+                warn(path + ": parameter " + name.GetString() + " of " + nodePath.GetString() +
+                     " is a " + value.GetTypeName() + ", which Pika cannot use");
+        }
+        nodes.push_back({nodePath.GetText(), node.nodeTypeId.GetText(), ps.data(), ps.size()});
+        for (auto const &[input, upstream] : node.inputConnections)
+            for (HdMaterialConnection2 const &c : upstream)
+                connections.push_back({c.upstreamNode.GetText(), c.upstreamOutputName.GetText(),
+                                       nodePath.GetText(), input.GetText()});
+    }
+    auto surface = network.terminals.find(HdMaterialTerminalTokens->surface);
+    pika_network flat = {nodes.data(), nodes.size(), connections.data(), connections.size(),
+                         surface == network.terminals.end()
+                             ? ""
+                             : surface->second.upstreamNode.GetText()};
+    _pika.report(pika_material_network(renderer, _id, &flat), path + " network");
 }
 
 PikaCurves::PikaCurves(SdfPath const &id, Pika &pika) : HdBasisCurves(id), _pika(pika) {

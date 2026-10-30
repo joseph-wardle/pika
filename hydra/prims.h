@@ -6,6 +6,7 @@
 
 #include <pxr/imaging/hd/basisCurves.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/sprim.h>
 
@@ -50,6 +51,23 @@ public:
 private:
     void _SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer);
 
+    Pika &_pika;
+    uint64_t _id = 0;
+};
+
+// A material copies its whole network into the store whenever Hydra marks
+// it dirty; Pika finds what changed.
+class PikaMaterial final : public HdMaterial {
+public:
+    // Hydra's fallback material has no path and stands for nothing in the
+    // scene: it is accepted and never synced.
+    PikaMaterial(SdfPath const &id, Pika &pika);
+    ~PikaMaterial() override;
+
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
+    void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
+
+private:
     Pika &_pika;
     uint64_t _id = 0;
 };

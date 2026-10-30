@@ -223,6 +223,8 @@ public:
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera)
             return new HdCamera(id);
+        if (typeId == HdPrimTypeTokens->material)
+            return new PikaMaterial(id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {

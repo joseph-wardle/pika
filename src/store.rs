@@ -14,6 +14,7 @@ pub struct Store {
     next_id: u64,
     meshes: BTreeMap<u64, Mesh>,
     instancers: BTreeMap<u64, Instancer>,
+    materials: BTreeMap<u64, Material>,
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
     /// Each mesh's triangles, its cage's then as drawn, counted when its
@@ -75,6 +76,75 @@ pub struct InstancePrimvars {
     /// Quaternions in `GfQuatf`'s order: i, j, k, then the real part.
     pub rotations: Option<Vec<[f32; 4]>>,
     pub scales: Option<Vec<[f32; 3]>>,
+}
+
+/// A material sprim: its shading network as Hydra hands it over, node by
+/// node in USD's or MaterialX's vocabulary. Pika turns it into a MaterialX
+/// document itself, so the host's view of it is kept whole.
+pub struct Material {
+    pub path: String,
+    pub network: Option<Network>,
+}
+
+/// `HdMaterialNetwork2`: shader nodes by path, and the node whose output is
+/// the material's surface, when it has one.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Network {
+    pub nodes: BTreeMap<String, Node>,
+    pub surface: Option<String>,
+}
+
+/// One shader node: its identifier ("UsdPreviewSurface",
+/// "ND_open_pbr_surface_surfaceshader"), its authored values by input name,
+/// and the upstream outputs connected to its inputs. An input may have both.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Node {
+    pub node_type: String,
+    pub params: BTreeMap<String, Value>,
+    pub connections: BTreeMap<String, Connection>,
+}
+
+/// An upstream node's output.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Connection {
+    pub node: String,
+    pub output: String,
+}
+
+/// A parameter value as the `VtValue` held it. Numbers keep their width (a
+/// `GfVec3f` is three floats) but not whether they are a colour or a
+/// vector, which the node's definition says.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Value {
+    Float(Vec<f32>),
+    Int(i32),
+    Bool(bool),
+    /// A token or string.
+    Text(String),
+    /// An asset's resolved path.
+    Asset(String),
+}
+
+impl Network {
+    /// The bytes Hydra handed over for the network, as counted for a pull.
+    pub fn bytes(&self) -> usize {
+        let mut bytes = self.surface.as_ref().map_or(0, String::len);
+        for (path, node) in &self.nodes {
+            bytes += path.len() + node.node_type.len();
+            for (name, value) in &node.params {
+                bytes += name.len()
+                    + match value {
+                        Value::Float(v) => size_of_val(v.as_slice()),
+                        Value::Int(_) | Value::Bool(_) => 4,
+                        Value::Text(s) | Value::Asset(s) => s.len(),
+                    };
+            }
+            for (name, c) in &node.connections {
+                bytes += name.len() + c.node.len() + c.output.len();
+            }
+        }
+        bytes
+    }
 }
 
 /// Basis curves are fetched to measure what they cost, then dropped: Pika
@@ -244,6 +314,7 @@ pub struct Stats {
     pub removed: usize,
     pub mesh: Bytes,
     pub instancer: Bytes,
+    pub material: Bytes,
     /// Bytes of basis curves, which are not stored, so are never known to be
     /// redundant.
     pub curve_bytes: usize,
@@ -291,6 +362,7 @@ impl Store {
             next_id: 1,
             meshes: BTreeMap::new(),
             instancers: BTreeMap::new(),
+            materials: BTreeMap::new(),
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
             triangles: HashMap::new(),
@@ -537,6 +609,41 @@ impl Store {
         Ok(())
     }
 
+    pub fn insert_material(&mut self, path: String) -> u64 {
+        let id = self.new_id();
+        self.materials.insert(
+            id,
+            Material {
+                path,
+                network: None,
+            },
+        );
+        id
+    }
+
+    pub fn remove_material(&mut self, id: u64) -> Result<(), String> {
+        self.materials
+            .remove(&id)
+            .ok_or_else(|| stale("material", id))?;
+        self.stats.removed += 1;
+        Ok(())
+    }
+
+    pub fn set_network(&mut self, id: u64, network: Network) -> Result<(), String> {
+        let bytes = network.bytes();
+        let material = self
+            .materials
+            .get_mut(&id)
+            .ok_or_else(|| stale("material", id))?;
+        write(
+            &mut self.stats.material,
+            &mut material.network,
+            network,
+            bytes,
+        );
+        Ok(())
+    }
+
     pub fn insert_curves(&mut self, path: String) -> u64 {
         let id = self.new_id();
         self.curves.insert(id, Curves { path, bytes: 0 });
@@ -641,6 +748,11 @@ impl Store {
                 self.instancers
                     .values()
                     .map(|i| (i.path.as_str(), i.to_string())),
+            )
+            .chain(
+                self.materials
+                    .values()
+                    .map(|m| (m.path.as_str(), m.to_string())),
             )
             .chain(
                 self.curves
@@ -756,6 +868,35 @@ impl fmt::Display for Instancer {
         values(f, "instance_translations", p.translations.as_deref())?;
         values(f, "instance_rotations", p.rotations.as_deref())?;
         values(f, "instance_scales", p.scales.as_deref())
+    }
+}
+
+impl fmt::Display for Material {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "material {}", self.path)?;
+        let Some(network) = &self.network else {
+            return writeln!(f, "  network {UNSYNCED}");
+        };
+        match &network.surface {
+            Some(surface) => writeln!(f, "  surface {surface}")?,
+            None => writeln!(f, "  surface none")?,
+        }
+        for (path, node) in &network.nodes {
+            writeln!(f, "  node {path} {}", node.node_type)?;
+            for (name, value) in &node.params {
+                match value {
+                    Value::Float(v) => writeln!(f, "    {name} float{}", List(v))?,
+                    Value::Int(v) => writeln!(f, "    {name} int {v}")?,
+                    Value::Bool(v) => writeln!(f, "    {name} bool {v}")?,
+                    Value::Text(s) => writeln!(f, "    {name} text {s:?}")?,
+                    Value::Asset(s) => writeln!(f, "    {name} asset {s:?}")?,
+                }
+            }
+            for (name, c) in &node.connections {
+                writeln!(f, "    {name} from {} {}", c.node, c.output)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -885,6 +1026,52 @@ mod tests {
         let stats = store.end_sync();
         // Curves are not stored, so their bytes can never be found redundant.
         assert_eq!((stats.curve_bytes, stats.mesh), (136, Bytes::default()));
+    }
+
+    #[test]
+    fn network_edits_are_not_redundant() {
+        let mut store = Store::new();
+        let m = store.insert_material("/m".into());
+        store.end_sync();
+        let mut network = Network {
+            surface: Some("/m/s".into()),
+            ..Default::default()
+        };
+        let node = network.nodes.entry("/m/s".into()).or_default();
+        node.node_type = "UsdPreviewSurface".into();
+        node.params
+            .insert("roughness".into(), Value::Float(vec![0.5]));
+        node.params
+            .insert("file".into(), Value::Asset("/t.exr".into()));
+        node.connections.insert(
+            "diffuseColor".into(),
+            Connection {
+                node: "/m/t".into(),
+                output: "rgb".into(),
+            },
+        );
+        store.set_network(m, network.clone()).unwrap();
+        store.set_network(m, network.clone()).unwrap();
+        let stats = store.end_sync();
+        let bytes = network.bytes();
+        assert_eq!(
+            (stats.material.pulled, stats.material.redundant),
+            (2 * bytes, bytes)
+        );
+        // The control: a value edit is a pull the store had to keep.
+        let node = network.nodes.get_mut("/m/s").unwrap();
+        node.params
+            .insert("roughness".into(), Value::Float(vec![0.25]));
+        store.set_network(m, network).unwrap();
+        let stats = store.end_sync();
+        assert_eq!(
+            (stats.material.pulled, stats.material.redundant),
+            (bytes, 0)
+        );
+        assert_eq!(
+            store.dump(),
+            "material /m\n  surface /m/s\n  node /m/s UsdPreviewSurface\n    file asset \"/t.exr\"\n    roughness float 0.25\n    diffuseColor from /m/t rgb\n"
+        );
     }
 
     #[test]

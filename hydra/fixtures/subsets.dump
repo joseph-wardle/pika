@@ -1,6 +1,8 @@
 sync 1
-counted material /world/mtl/blue
-counted material /world/mtl/red
+material /world/mtl/blue
+  surface none
+material /world/mtl/red
+  surface none
 mesh /world/quad
   render_tag geometry
   visible true
@@ -23,8 +25,10 @@ mesh /world/quad
     0 1 0
   normals none
 sync 2
-counted material /world/mtl/blue
-counted material /world/mtl/red
+material /world/mtl/blue
+  surface none
+material /world/mtl/red
+  surface none
 mesh /world/quad
   render_tag geometry
   visible true

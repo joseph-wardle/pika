@@ -13,7 +13,8 @@ use std::sync::{Mutex, MutexGuard};
 
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, Normals, Refined, Scheme, Subset, Topology,
+    Connection, InstancePrimvars, Instancing, Interpolation, Network, Node, Normals, Refined,
+    Scheme, Subset, Topology, Value,
 };
 
 pub const OK: i32 = 0;
@@ -75,6 +76,45 @@ pub struct CInstancePrimvars {
     rotation_count: usize,
     scales: *const [f32; 3],
     scale_count: usize,
+}
+
+/// `pika_param`.
+#[repr(C)]
+pub struct CParam {
+    name: *const c_char,
+    kind: *const c_char,
+    floats: [f32; 16],
+    float_count: usize,
+    integer: i32,
+    text: *const c_char,
+}
+
+/// `pika_node`.
+#[repr(C)]
+pub struct CNode {
+    path: *const c_char,
+    node_type: *const c_char,
+    params: *const CParam,
+    param_count: usize,
+}
+
+/// `pika_connection`.
+#[repr(C)]
+pub struct CConnection {
+    from: *const c_char,
+    output: *const c_char,
+    to: *const c_char,
+    input: *const c_char,
+}
+
+/// `pika_network`.
+#[repr(C)]
+pub struct CNetwork {
+    nodes: *const CNode,
+    node_count: usize,
+    connections: *const CConnection,
+    connection_count: usize,
+    surface: *const c_char,
 }
 
 /// `pika_aov`.
@@ -178,6 +218,77 @@ unsafe fn string(ptr: *const c_char) -> Result<String, String> {
     s.to_str()
         .map(str::to_owned)
         .map_err(|_| format!("{s:?} is not UTF-8"))
+}
+
+/// # Safety
+/// `p`'s strings must be NUL-terminated and `float_count` at most 16.
+unsafe fn value(p: &CParam) -> Result<Value, String> {
+    // SAFETY: the caller guarantees the strings.
+    let (kind, text) = unsafe { (string(p.kind)?, string(p.text)?) };
+    Ok(match kind.as_str() {
+        "float" => Value::Float(p.floats[..p.float_count.min(16)].to_vec()),
+        "int" => Value::Int(p.integer),
+        "bool" => Value::Bool(p.integer != 0),
+        "text" => Value::Text(text),
+        "asset" => Value::Asset(text),
+        _ => return Err(format!("unknown parameter kind {kind:?}")),
+    })
+}
+
+/// # Safety
+/// `c`'s arrays must be valid for their counts and its strings NUL-terminated.
+unsafe fn network(c: &CNetwork) -> Result<Network, String> {
+    let mut network = Network {
+        // SAFETY: the caller guarantees the string.
+        surface: unsafe { path(c.surface)? },
+        ..Default::default()
+    };
+    // SAFETY: the caller guarantees the arrays.
+    let (nodes, connections) = unsafe {
+        (
+            slice(c.nodes, c.node_count),
+            slice(c.connections, c.connection_count),
+        )
+    };
+    for n in nodes {
+        // SAFETY: as above.
+        let (path, node_type, params) = unsafe {
+            (
+                string(n.path)?,
+                string(n.node_type)?,
+                slice(n.params, n.param_count),
+            )
+        };
+        let mut node = Node {
+            node_type,
+            ..Default::default()
+        };
+        for p in params {
+            // SAFETY: as above.
+            let (name, value) = unsafe { (string(p.name)?, value(p)?) };
+            node.params.insert(name, value);
+        }
+        network.nodes.insert(path, node);
+    }
+    for c in connections {
+        // SAFETY: as above.
+        let (from, output, to, input) = unsafe {
+            (
+                string(c.from)?,
+                string(c.output)?,
+                string(c.to)?,
+                string(c.input)?,
+            )
+        };
+        let node = (network.nodes.get_mut(&to))
+            .ok_or_else(|| format!("a connection to {to}, which is not a node of the network"))?;
+        if node.connections.contains_key(&input) {
+            return Err(format!("input {input} of {to} is connected twice"));
+        }
+        node.connections
+            .insert(input, Connection { node: from, output });
+    }
+    Ok(network)
 }
 
 fn lock(handle: &Handle) -> Result<MutexGuard<'_, Renderer>, String> {
@@ -575,6 +686,53 @@ pub unsafe extern "C" fn pika_instancer_primvars(
             }
         };
         lock(handle)?.store.set_instance_primvars(id, primvars)
+    })
+}
+
+/// Adds a material to the store and writes its id, never reused, to `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_material(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_material(id))
+}
+
+/// Replaces a material's network.
+///
+/// # Safety
+/// `renderer` must be live, and `network` and everything it points to valid
+/// for reads for the duration of the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_network(
+    renderer: *const Handle,
+    id: u64,
+    network: *const CNetwork,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the network.
+        let (handle, network) = unsafe { (&*renderer, self::network(&*network)?) };
+        lock(handle)?.store.set_network(id, network)
     })
 }
 
