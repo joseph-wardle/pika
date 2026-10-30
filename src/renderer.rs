@@ -1,6 +1,6 @@
 //! What one Hydra render delegate owns on the Rust side: its scene store,
-//! the GPU copy of its meshes, its Vulkan device, the target it reads
-//! frames back from and the stats it measures.
+//! the GPU copy of its meshes and materials, its Vulkan device, the target
+//! it reads frames back from and the stats it measures.
 
 use std::fs::File;
 use std::io::Write;
@@ -14,6 +14,7 @@ use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
+use crate::shade::Shade;
 use crate::shader;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
@@ -99,6 +100,7 @@ pub struct Renderer {
     /// The camera's view: its constants, records and visible instances.
     view: Option<View>,
     raster: Raster,
+    shade: Shade,
     cull: Cull,
     geometry: Geometry,
     device: gpu::Device<'static>,
@@ -162,6 +164,7 @@ struct Pending {
     moved: usize,
     transforms: usize,
     latent: bool,
+    compiled: usize,
 }
 
 impl Renderer {
@@ -193,6 +196,7 @@ impl Renderer {
             target: None,
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
+            shade: Shade::new(&device)?,
             cull: Cull::new(&device, &cull.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv)?,
             device,
@@ -315,6 +319,7 @@ impl Renderer {
         let update =
             self.geometry
                 .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
+        let shading = (self.shade).update(&self.device, &self.store, &moved, &camera, cb)?;
         self.commands.mark("update")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
@@ -362,6 +367,7 @@ impl Renderer {
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
             latent,
+            compiled: shading.compiled,
         };
         if latent {
             self.pending = Some(pending);
@@ -414,6 +420,7 @@ impl Renderer {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
             targets: target.memory(),
+            materials: self.shade.memory(),
             vram_used,
             vram_budget,
         };
@@ -431,6 +438,7 @@ impl Renderer {
             moved: pending.moved,
             transforms: pending.transforms,
             latent: pending.latent,
+            compiled: pending.compiled,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

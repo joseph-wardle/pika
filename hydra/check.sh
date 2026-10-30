@@ -17,16 +17,24 @@
 # the same display (hydra/engine.py), as usdview renders, and checks that the
 # host sees Pika's stats through Hydra's render stats.
 #
+# Materials need the bake tool, built against Houdini 22 whichever Houdini
+# hosts the delegate (BAKE_HFS), and the shaders it generates go to a cache
+# of this run's own.
+#
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
 set -euo pipefail
 
 HFS=${HFS:-/opt/hfs21.0}
+BAKE_HFS=${BAKE_HFS:-/opt/hfs22.0}
 SDK=${VULKAN_SDK:?set VULKAN_SDK to the SDK\'s x86_64 directory, for its validation layer}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$ROOT/target/hydra/check
 
 make -C "$ROOT/hydra" --no-print-directory
+make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
+rm -rf "$OUT/cache"
 mkdir -p "$OUT/images" "$OUT/fixtures"
+export PIKA_CACHE=$OUT/cache
 
 # houdini_setup_bash reads unset variables.
 set +u
@@ -119,7 +127,7 @@ done
 echo "fixtures: checked ${#fixtures[@]} scenes"
 # The stats reader's control: a first frame line cut short must fail it.
 first=${fixtures[0]}
-! python3 -I "$ROOT/hydra/stats.py" <(sed '0,/^frame /s/ latent [01]$//' "$OUT/fixtures/$(basename "$first" .usda).stats") \
+! python3 -I "$ROOT/hydra/stats.py" <(sed '0,/^frame /s/ [a-z_]* [0-9.]*$//' "$OUT/fixtures/$(basename "$first" .usda).stats") \
     >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
 
 DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" >"$OUT/engine.log" 2>&1 ||

@@ -47,8 +47,23 @@ impl Raster {
         // SAFETY: `d` is live and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
+        let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::GREATER);
         let built: Vec<_> = (COLOR_FORMATS.iter())
-            .map(|&format| pipeline(d, r.layout, module, format))
+            .map(|&format| {
+                let colors = [format, DEPTH_AOV.0, NORMAL_AOV.0];
+                gpu::graphics(
+                    d,
+                    r.layout,
+                    module,
+                    [c"vs", c"fs"],
+                    &colors,
+                    target::DEPTH_FORMAT,
+                    depth,
+                )
+            })
             .collect();
         // SAFETY: pipeline creation is complete, so the module is no longer used.
         unsafe { d.destroy_shader_module(module, None) };
@@ -116,70 +131,4 @@ impl Drop for Raster {
             self.device.destroy_pipeline_layout(self.layout, None);
         }
     }
-}
-
-/// The mesh pipeline for one color format: two-sided, reversed depth.
-fn pipeline(
-    d: &ash::Device,
-    layout: vk::PipelineLayout,
-    module: vk::ShaderModule,
-    color: vk::Format,
-) -> Result<vk::Pipeline, String> {
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(module)
-            .name(c"vs"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(module)
-            .name(c"fs"),
-    ];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    let viewport = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-    // Nothing is culled. USD's front faces wind counter-clockwise in a
-    // right-handed frame, and the camera's y is not flipped (rows go bottom
-    // up), so they wind clockwise in Vulkan's framebuffer coordinates.
-    // hydra/images/behind.usda fails if this is reversed.
-    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::CLOCKWISE)
-        .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(true)
-        .depth_compare_op(vk::CompareOp::GREATER);
-    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-        .color_write_mask(vk::ColorComponentFlags::RGBA); 3];
-    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
-        .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
-    let formats = [color, DEPTH_AOV.0, NORMAL_AOV.0];
-    let mut rendering = vk::PipelineRenderingCreateInfo::default()
-        .color_attachment_formats(&formats)
-        .depth_attachment_format(target::DEPTH_FORMAT);
-    let info = vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport)
-        .rasterization_state(&rasterization)
-        .multisample_state(&multisample)
-        .depth_stencil_state(&depth)
-        .color_blend_state(&blend)
-        .dynamic_state(&dynamic)
-        .layout(layout)
-        .push_next(&mut rendering);
-    // SAFETY: `d` is live, `module` and `layout` were created on it, and
-    // `info` and what it points to outlive the call.
-    unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
-        .map(|p| p[0])
-        .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({color:?}) failed: {e}"))
 }

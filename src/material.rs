@@ -11,14 +11,14 @@
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+use crate::cache;
 use crate::store::{Network, Node, Value};
 
 /// A network's MaterialX document and its key.
 #[derive(Debug)]
 pub struct Document {
     pub text: String,
-    /// FNV-1a of the text. It keys a disk cache, so it must not change with
-    /// the Rust version as `DefaultHasher` may.
+    /// FNV-1a of the text, which keys the cache.
     pub hash: u64,
     /// The store's node paths in document order: node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
@@ -129,7 +129,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
          </surfacematerial>\n</materialx>\n",
     );
     Ok(Some(Document {
-        hash: fnv1a(text.as_bytes()),
+        hash: cache::fnv1a(&[text.as_bytes()]),
         nodes: order.iter().map(|p| (*p).to_owned()).collect(),
         text,
     }))
@@ -166,6 +166,17 @@ fn resolve<'a>(path: &str, node: &'a Node) -> Result<(&'a str, &'static Rename),
     ))
 }
 
+/// The store's name for `node`'s MaterialX input: the USD name the rename
+/// table maps to it, else the same name.
+pub fn store_input<'a>(node: &Node, input: &'a str) -> &'a str {
+    let Some(rename) = RENAMES.iter().find(|r| r.usd == node.node_type) else {
+        return input;
+    };
+    (rename.inputs.iter())
+        .find(|(_, to)| *to == input)
+        .map_or(input, |(from, _)| from)
+}
+
 fn renamed<'a>(table: &[(&'static str, &'static str)], name: &'a str) -> &'a str {
     table
         .iter()
@@ -180,23 +191,14 @@ fn escape(text: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325;
-    for &byte in bytes {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    }
-    hash
-}
-
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::store::Connection;
 
     /// The `network` fixture as husk syncs it: a UsdPreviewSurface reading
     /// a UsdUVTexture through a UsdPrimvarReader_float2.
-    fn fixture() -> Network {
+    pub fn fixture() -> Network {
         let mut surface = Node {
             node_type: "UsdPreviewSurface".into(),
             ..Default::default()

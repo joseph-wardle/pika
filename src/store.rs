@@ -305,6 +305,8 @@ pub struct Moved {
     /// A visibility, render tag or instancing changed: the instances and
     /// draw records are rewritten.
     pub draws: bool,
+    /// Materials whose network changed.
+    pub materials: BTreeSet<u64>,
 }
 
 /// What one Hydra sync did to the store.
@@ -377,6 +379,10 @@ impl Store {
 
     pub fn instancers(&self) -> &BTreeMap<u64, Instancer> {
         &self.instancers
+    }
+
+    pub fn materials(&self) -> &BTreeMap<u64, Material> {
+        &self.materials
     }
 
     /// What changed since the last call.
@@ -635,12 +641,14 @@ impl Store {
             .materials
             .get_mut(&id)
             .ok_or_else(|| stale("material", id))?;
-        write(
+        if write(
             &mut self.stats.material,
             &mut material.network,
             network,
             bytes,
-        );
+        ) {
+            self.moved.materials.insert(id);
+        }
         Ok(())
     }
 

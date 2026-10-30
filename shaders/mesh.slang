@@ -1,15 +1,7 @@
-// The mesh pass: every mesh instance into the color, depth and normal AOVs.
-// Vertices are pulled from src/geometry.rs's buffers by address, and each
-// instance through the view's visible list (shaders/cull.slang); only the
-// index buffer and the view's draw records are bound.
+// The mesh pass: every mesh instance into the color, depth and normal AOVs,
+// pulled through vertex.slang.
 
-#include "view.slang"
-
-[[vk::push_constant]]
-View *view;
-
-// A vertex's normal index when its normal is its point's smooth normal.
-static const uint SMOOTH = 0xffffffff;
+#include "vertex.slang"
 
 struct Varyings
 {
@@ -19,27 +11,15 @@ struct Varyings
     nointerpolation uint flip : FLIP;
 };
 
-float3 load3(float *values, uint i)
-{
-    return float3(values[3 * i], values[3 * i + 1], values[3 * i + 2]);
-}
-
-// SV_VulkanVertexID and SV_VulkanInstanceID include the draw's vertex offset
-// and first instance, which select the mesh's vertices and its visible slot.
 [shader("vertex")]
 Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    uint2 v = view->vertices[vertex];
-    float4 *m = view->instances + 7 * view->visible[slot];
-    float4 p = float4(load3(view->points, v.x), 1);
-    float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
-    float3 n = v.y == SMOOTH ? load3(view->smooth, v.x) : load3(view->normals, v.y);
-
+    Vertex p = pull(vertex, slot);
     Varyings o;
-    o.position = project(view, world);
-    o.world = world.xyz;
-    o.normal = float3(dot(m[3].xyz, n), dot(m[4].xyz, n), dot(m[5].xyz, n));
-    o.flip = asuint(m[6].x) & 1;
+    o.position = p.position;
+    o.world = p.world;
+    o.normal = p.normal;
+    o.flip = p.flip;
     return o;
 }
 

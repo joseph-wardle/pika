@@ -12,10 +12,10 @@ Today Pika draws meshes. It syncs them from the host with their subdivision, ins
 | --- | --- | --- |
 | Build | [rustup](https://rustup.rs) and a C linker (`cc`) | Pika follows the latest stable Rust, with rustfmt and clippy (included in rustup's default install). Run `rustup update` after each release. No Vulkan SDK is needed: libvulkan is loaded at run time. |
 | Run | The Vulkan loader (`libvulkan.so.1`) and a Vulkan 1.3 GPU driver | Tested on Linux with NVIDIA driver 580.142 (RTX 4070 Ti SUPER). |
-| Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. Pika reads `shaders/` from the checkout, so run it from there. |
+| Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.9.2. Pika reads `shaders/` and the bake tool from the checkout, so run it from there. Generated material shaders and their SPIR-V are kept in `$XDG_CACHE_HOME/pika` (`PIKA_CACHE` overrides it). |
 | Validate | The Vulkan validation layer from a [Vulkan SDK](https://vulkan.lunarg.com/sdk/home) 1.3.268 or newer | Optional. Tested with SDK 1.4.328.1. |
 | Delegate | Houdini 21.0 or 22.0 (its HDK headers and USD libraries), `g++` and `make` | Tested with Houdini 21.0.596 (USD 0.25.5) and 22.0.466 (USD 0.26.5), g++ 11.5. `HFS` selects the Houdini; the default is `/opt/hfs21.0`. |
-| Bake | Houdini 22.0 (its MaterialX 1.39.5 headers and libraries), `g++` and `make` | The tool that generates material shaders. Houdini 21 ships no MaterialX Slang generator, so `HFS` defaults to `/opt/hfs22.0` here; a delegate built for Houdini 21 runs it all the same. |
+| Bake | Houdini 22.0 (its MaterialX 1.39.5 headers and libraries), `g++` and `make` | The tool that generates material shaders; the renderer runs it, so build it before rendering. Houdini 21 ships no MaterialX Slang generator, so `HFS` defaults to `/opt/hfs22.0` here; a delegate built for Houdini 21 runs it all the same. |
 
 ## Build and check
 

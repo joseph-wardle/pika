@@ -590,6 +590,75 @@ impl Drop for Buffer {
     }
 }
 
+/// A graphics pipeline of `module`'s vertex and fragment entry points,
+/// `entries`, rendering triangles into `colors` and a `depth_format`
+/// attachment with `depth`'s test, viewport and scissor dynamic.
+pub fn graphics(
+    d: &ash::Device,
+    layout: vk::PipelineLayout,
+    module: vk::ShaderModule,
+    entries: [&std::ffi::CStr; 2],
+    colors: &[vk::Format],
+    depth_format: vk::Format,
+    depth: vk::PipelineDepthStencilStateCreateInfo,
+) -> Result<vk::Pipeline, String> {
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(entries[0]),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(entries[1]),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    // Nothing is culled. USD's front faces wind counter-clockwise in a
+    // right-handed frame, and the camera's y is not flipped (rows go bottom
+    // up), so they wind clockwise in Vulkan's framebuffer coordinates.
+    // hydra/images/behind.usda fails if this is reversed.
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachments = vec![
+        vk::PipelineColorBlendAttachmentState::default()
+            .color_write_mask(vk::ColorComponentFlags::RGBA);
+        colors.len()
+    ];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(colors)
+        .depth_attachment_format(depth_format);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+    // SAFETY: `d` is live, `module` and `layout` were created on it, and
+    // `info` and what it points to outlive the call.
+    unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
+        .map(|p| p[0])
+        .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({colors:?}) failed: {e}"))
+}
+
 /// A compute pipeline whose only input is its push constants: buffer
 /// addresses and a range of items, which its shader walks in a grid-stride
 /// loop of `numthreads(64, 1, 1)` groups.

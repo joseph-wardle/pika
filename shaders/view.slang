@@ -11,6 +11,8 @@ struct View
     float4 view_projection[4];
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
+    // The unit direction the camera looks along.
+    float4 forward;
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).
