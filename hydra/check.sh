@@ -9,7 +9,13 @@
 #
 # Then it syncs each scene in hydra/fixtures/ for two frames, running the
 # scene's .py script (if any) on husk's stage between them, and compares
-# Pika's store dump with the scene's .dump, which was written by hand.
+# Pika's store dump with the scene's .dump, which was written by hand. Each
+# run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
+# pass timed and the driver's memory budget read.
+#
+# Last it renders hydra/scenes/cube.usda through UsdImagingGL in hython on
+# the same display (hydra/engine.py), as usdview renders, and checks that the
+# host sees Pika's stats through Hydra's render stats.
 #
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
 set -euo pipefail
@@ -60,7 +66,8 @@ fixture() {
     local name dir=$ROOT/hydra/fixtures script=()
     name=$(basename "$1" .usda)
     [ -f "$dir/$name.py" ] && script=(--postframe-script "$dir/$name.py")
-    PIKA_STORE_DUMP=$OUT/fixtures/$name.dump husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
+    PIKA_STORE_DUMP=$OUT/fixtures/$name.dump PIKA_STATS=$OUT/fixtures/$name.stats \
+        husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
         "${script[@]}" -o "$OUT/fixtures/$name.\$F4.exr" "$1" >"$OUT/fixtures/$name.log" 2>&1 ||
         fail "$name: husk exited $? (see $OUT/fixtures/$name.log)"
     clean "$name" "$OUT/fixtures/$name.log"
@@ -78,6 +85,12 @@ fixture() {
     done
     [ "$(store_after 2 "$OUT/fixtures/$name.dump")" != "$(store_after 1 "$dir/$name.dump")" ] ||
         fail "$name: frame 2's store matches frame 1's expectation"
+    python3 -I "$ROOT/hydra/stats.py" "$OUT/fixtures/$name.stats" >"$OUT/fixtures/$name.summary" ||
+        fail "$name: the stats do not summarise (see $OUT/fixtures/$name.summary)"
+    grep -q "^  gpu_readback " "$OUT/fixtures/$name.summary" ||
+        fail "$name: the summary has no GPU readback time, so a pass went untimed"
+    grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
+        fail "$name: the summary has no memory budget"
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
@@ -102,5 +115,13 @@ for f in "${fixtures[@]}"; do
     fixture "$f"
 done
 echo "fixtures: checked ${#fixtures[@]} scenes"
+# The stats reader's control: a first frame line cut short must fail it.
+first=${fixtures[0]}
+! python3 -I "$ROOT/hydra/stats.py" <(sed '0,/^frame /s/ latent [01]$//' "$OUT/fixtures/$(basename "$first" .usda).stats") \
+    >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
+
+DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" >"$OUT/engine.log" 2>&1 ||
+    fail "the host does not see Pika's stats (see $OUT/engine.log)"
+clean engine "$OUT/engine.log"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

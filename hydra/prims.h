@@ -2,7 +2,7 @@
 // keeps nothing but its store id.
 #pragma once
 
-#include "pika.h"
+#include "report.h"
 
 #include <pxr/imaging/hd/basisCurves.h>
 #include <pxr/imaging/hd/instancer.h>
@@ -13,8 +13,8 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 class PikaMesh final : public HdMesh {
 public:
-    // Without a renderer, the mesh is accepted and never synced.
-    PikaMesh(SdfPath const &id, pika_renderer *renderer);
+    // Without a renderer (report.h), the mesh is accepted and never synced.
+    PikaMesh(SdfPath const &id, Pika &pika);
     ~PikaMesh() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override;
@@ -29,35 +29,35 @@ protected:
     void _InitRepr(TfToken const &, HdDirtyBits *) override {}
 
 private:
-    void _SyncTopology(HdSceneDelegate *delegate);
-    void _SyncPoints(HdSceneDelegate *delegate);
-    void _SyncNormals(HdSceneDelegate *delegate);
-    void _SyncInstancing(HdSceneDelegate *delegate);
+    void _SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer);
+    void _SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer);
+    void _SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer);
+    void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
-    pika_renderer *_renderer = nullptr;
+    Pika &_pika;
     uint64_t _id = 0;
 };
 
 // Hydra syncs an instancer only when a prototype it draws asks it to.
 class PikaInstancer final : public HdInstancer {
 public:
-    PikaInstancer(HdSceneDelegate *delegate, SdfPath const &id, pika_renderer *renderer);
+    PikaInstancer(HdSceneDelegate *delegate, SdfPath const &id, Pika &pika);
     ~PikaInstancer() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override;
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
 
 private:
-    void _SyncPrimvars(HdSceneDelegate *delegate);
+    void _SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer);
 
-    pika_renderer *_renderer = nullptr;
+    Pika &_pika;
     uint64_t _id = 0;
 };
 
 // Basis curves are fetched and measured, then dropped.
 class PikaCurves final : public HdBasisCurves {
 public:
-    PikaCurves(SdfPath const &id, pika_renderer *renderer);
+    PikaCurves(SdfPath const &id, Pika &pika);
     ~PikaCurves() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override;
@@ -71,20 +71,20 @@ protected:
     void _InitRepr(TfToken const &, HdDirtyBits *) override {}
 
 private:
-    pika_renderer *_renderer = nullptr;
+    Pika &_pika;
     uint64_t _id = 0;
 };
 
 // An entry in the store's count of a prim type, for as long as it lives.
 class PikaCount {
 public:
-    PikaCount(TfToken const &type, SdfPath const &id, pika_renderer *renderer);
+    PikaCount(TfToken const &type, SdfPath const &id, Pika &pika);
     ~PikaCount();
     PikaCount(PikaCount const &) = delete;
     PikaCount &operator=(PikaCount const &) = delete;
 
 private:
-    pika_renderer *_renderer = nullptr;
+    Pika &_pika;
     uint64_t _id = 0;
     SdfPath _path;
 };
@@ -92,8 +92,8 @@ private:
 // An rprim of a type Pika only counts. It asks Hydra for nothing.
 class PikaCountedRprim final : public HdRprim {
 public:
-    PikaCountedRprim(TfToken const &type, SdfPath const &id, pika_renderer *renderer)
-        : HdRprim(id), _count(type, id, renderer) {}
+    PikaCountedRprim(TfToken const &type, SdfPath const &id, Pika &pika)
+        : HdRprim(id), _count(type, id, pika) {}
 
     HdDirtyBits GetInitialDirtyBitsMask() const override { return HdChangeTracker::Clean; }
     void Sync(HdSceneDelegate *, HdRenderParam *, HdDirtyBits *dirtyBits,
@@ -118,8 +118,8 @@ private:
 // An sprim of a type Pika only counts, such as a light or a material.
 class PikaCountedSprim final : public HdSprim {
 public:
-    PikaCountedSprim(TfToken const &type, SdfPath const &id, pika_renderer *renderer)
-        : HdSprim(id), _count(type, id, renderer) {}
+    PikaCountedSprim(TfToken const &type, SdfPath const &id, Pika &pika)
+        : HdSprim(id), _count(type, id, pika) {}
 
     HdDirtyBits GetInitialDirtyBitsMask() const override { return HdChangeTracker::Clean; }
     void Sync(HdSceneDelegate *, HdRenderParam *, HdDirtyBits *dirtyBits) override {

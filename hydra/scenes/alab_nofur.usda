@@ -1,0 +1,236 @@
+#usda 1.0
+(
+    doc = "Turns ALab's fur and weave procedurals off for the gate run (hydra/gate.sh): baked fur is outside the gate."
+)
+
+over "root"
+{
+    over "remi"
+    {
+        over "body_M_hrc"
+        {
+            over "GEO"
+            {
+                over "body_M_hrc"
+                {
+                    over "flag_M_hrc"
+                    {
+                        over "weave_flag_M_geo"
+                        {
+                            over "output"
+                            {
+                                over "noname0"
+                                {
+                                    over "noname1"
+                                    {
+                                        over "noname2"
+                                        {
+                                            over "WeaveOrKnit" (
+                                                active = false
+                                            )
+                                            {
+                                            }
+                                        }
+
+                                        over "noname3"
+                                        {
+                                            over "Fuzz" (
+                                                active = false
+                                            )
+                                            {
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        over "head_M_hrc"
+        {
+            over "GEO"
+            {
+                over "head_M_hrc"
+                {
+                    over "hair_M_hrc"
+                    {
+                        over "alfro_wing_L_main"
+                        {
+                            over "procedural"
+                            {
+                                over "output"
+                                {
+                                    over "curves" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+                                }
+                            }
+                        }
+
+                        over "alfro_wing_R_main"
+                        {
+                            over "procedural"
+                            {
+                                over "output"
+                                {
+                                    over "curves" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    over "stoat"
+    {
+        over "body_M_hrc"
+        {
+            over "GEO"
+            {
+                over "alfro_body_main"
+                {
+                    over "procedural"
+                    {
+                        over "output"
+                        {
+                            over "curves" (
+                                active = false
+                            )
+                            {
+                            }
+                        }
+                    }
+                }
+
+                over "alfro_body_short"
+                {
+                    over "procedural"
+                    {
+                        over "output"
+                        {
+                            over "curves" (
+                                active = false
+                            )
+                            {
+                            }
+                        }
+                    }
+                }
+
+                over "alfro_head_A"
+                {
+                    over "procedural"
+                    {
+                        over "output"
+                        {
+                            over "curves" (
+                                active = false
+                            )
+                            {
+                            }
+                        }
+                    }
+                }
+
+                over "alfro_head_B"
+                {
+                    over "procedural"
+                    {
+                        over "output"
+                        {
+                            over "curves" (
+                                active = false
+                            )
+                            {
+                            }
+                        }
+                    }
+                }
+
+                over "alfro_tail_main"
+                {
+                    over "procedural"
+                    {
+                        over "output"
+                        {
+                            over "curves" (
+                                active = false
+                            )
+                            {
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        over "outfit_M_hrc"
+        {
+            over "GEO"
+            {
+                over "cloth_M_hrc"
+                {
+                    over "weave_Sweater_M_geo"
+                    {
+                        over "output"
+                        {
+                            over "noname0"
+                            {
+                                over "noname1"
+                                {
+                                    over "noname2"
+                                    {
+                                        over "WeaveOrKnit" (
+                                            active = false
+                                        )
+                                        {
+                                        }
+                                    }
+
+                                    over "noname3"
+                                    {
+                                        over "Fuzz" (
+                                            active = false
+                                        )
+                                        {
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    over "weave_tailWrap_M_geo"
+                    {
+                        over "output"
+                        {
+                            over "noname0"
+                            {
+                                over "noname1"
+                                {
+                                    over "WeaveOrKnit" (
+                                        active = false
+                                    )
+                                    {
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+

@@ -196,19 +196,19 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
-    /// The value `pika.h` passes for this interpolation.
-    pub fn from_abi(value: u32) -> Result<Self, String> {
-        match value {
-            1 => Ok(Self::Constant),
-            2 => Ok(Self::Uniform),
-            3 => Ok(Self::Varying),
-            4 => Ok(Self::Vertex),
-            5 => Ok(Self::FaceVarying),
-            _ => Err(format!("unknown pika_interpolation {value}")),
+    /// The interpolation USD names `token`.
+    pub fn from_token(token: &str) -> Result<Self, String> {
+        match token {
+            "constant" => Ok(Self::Constant),
+            "uniform" => Ok(Self::Uniform),
+            "varying" => Ok(Self::Varying),
+            "vertex" => Ok(Self::Vertex),
+            "faceVarying" => Ok(Self::FaceVarying),
+            _ => Err(format!("unknown primvar interpolation {token:?}")),
         }
     }
 
-    fn name(self) -> &'static str {
+    fn token(self) -> &'static str {
         match self {
             Self::Constant => "constant",
             Self::Uniform => "uniform",
@@ -723,7 +723,12 @@ impl fmt::Display for Mesh {
         }
         match &self.normals {
             Some(Some(n)) => {
-                writeln!(f, "  normals {} {}", n.interpolation.name(), n.values.len())?;
+                writeln!(
+                    f,
+                    "  normals {} {}",
+                    n.interpolation.token(),
+                    n.values.len()
+                )?;
                 for v in &n.values {
                     writeln!(f, "   {}", List(v))?;
                 }

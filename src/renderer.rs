@@ -1,6 +1,6 @@
 //! What one Hydra render delegate owns on the Rust side: its scene store,
-//! the GPU copy of its meshes, its Vulkan device and the target it reads
-//! frames back from.
+//! the GPU copy of its meshes, its Vulkan device, the target it reads
+//! frames back from and the stats it measures.
 
 use std::fs::File;
 use std::io::Write;
@@ -9,16 +9,17 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use crate::cull::{self, Cull};
+use crate::commands::Commands;
+use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
 use crate::shader;
-use crate::smooth::Smooth;
-use crate::store::{self, Moved, Store};
-use crate::subdiv::Subdiv;
-use crate::target::{self, Target};
+use crate::stats::{self, Stats};
+use crate::store::{Moved, Store};
+use crate::target::Target;
 use crate::transform::Camera;
+use crate::view::View;
 
 /// The render buffer formats Pika writes, as Hydra names them. Color is
 /// half or full float, as the host asks: husk asks for `HdFormatFloat32Vec4`,
@@ -34,14 +35,14 @@ pub enum Format {
 }
 
 impl Format {
-    /// The value `pika.h` passes for this format.
-    pub fn from_abi(value: u32) -> Result<Self, String> {
-        match value {
-            1 => Ok(Self::Float16Vec4),
-            2 => Ok(Self::Float32Vec4),
-            3 => Ok(Self::Float32),
-            4 => Ok(Self::Float32Vec3),
-            _ => Err(format!("unknown pika_format {value}")),
+    /// The format Hydra names `name`.
+    pub fn from_name(name: &str) -> Result<Self, String> {
+        match name {
+            "HdFormatFloat16Vec4" => Ok(Self::Float16Vec4),
+            "HdFormatFloat32Vec4" => Ok(Self::Float32Vec4),
+            "HdFormatFloat32" => Ok(Self::Float32),
+            "HdFormatFloat32Vec3" => Ok(Self::Float32Vec3),
+            _ => Err(format!("{name} is not a render buffer format Pika writes")),
         }
     }
 
@@ -90,32 +91,22 @@ static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
 
 pub struct Renderer {
     pub store: Store,
-    // Field order is drop order: the target waits for idle, then the
-    // pipelines and buffers are destroyed before their device.
+    pub stats: Stats,
+    // Field order is drop order: the commands and target wait for idle, then
+    // the pipelines and buffers are destroyed before their device.
+    commands: Commands,
     target: Option<Target>,
-    /// The camera's records and visible instances.
-    view: Option<cull::View>,
+    /// The camera's view: its constants, records and visible instances.
+    view: Option<View>,
     raster: Raster,
     cull: Cull,
-    subdiv: Subdiv,
-    smooth: Smooth,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
     /// `PIKA_STORE_DUMP`: the file each sync's store is appended to, for the
     /// fixture checks. Writing it changes nothing about rendering.
     dump: Option<(String, File)>,
-    /// `PIKA_STATS`: the file each sync's stats and census, and each frame's
-    /// stats, are appended to, one line each, for hydra/census.py.
-    stats: Option<(String, File)>,
-    sync_start: Option<Instant>,
-    /// When the last sync began, so each sync's line can say how long the
-    /// host took from one sync to the next.
-    last_start: Option<Instant>,
-    syncs: Vec<Sync>,
-    frames: Vec<FrameStats>,
-    /// The size and color format of the last frame, for the report.
-    last: Option<(u32, u32, Format)>,
+    syncs: usize,
     /// The frame on the GPU, waiting to be placed.
     pending: Option<Pending>,
     /// The buffers the last frame was placed into, and what it was drawn from.
@@ -160,46 +151,16 @@ impl Buffers {
 struct Pending {
     buffers: Buffers,
     inputs: Inputs,
-    color: Format,
     /// Each attachment's format and bytes per pixel, and whether it was read.
     formats: [(vk::Format, usize); 3],
     read: [bool; 3],
+    period: Option<Duration>,
     record: Duration,
     update: geometry::Update,
     /// Whether the camera's view was culled, so its counts are this frame's.
     culled: bool,
     moved: usize,
     transforms: usize,
-    latent: bool,
-}
-
-/// One Hydra sync, from the render delegate's `Update` to its
-/// `CommitResources`: the prim syncs, including Hydra's own pulls.
-struct Sync {
-    time: Duration,
-    stats: store::Stats,
-}
-
-/// Where one frame's time went, and what it rewrote and read back.
-struct FrameStats {
-    width: u32,
-    height: u32,
-    /// The CPU's work before the submit: updating the geometry and recording.
-    record: Duration,
-    target: target::Times,
-    /// The CPU copy into the host's render buffers.
-    place: Duration,
-    update: geometry::Update,
-    /// The instances and triangles the camera's view drew.
-    drawn: [u32; 2],
-    /// The device-local bytes of the geometry's buffers.
-    geometry_bytes: u64,
-    /// Meshes whose points moved.
-    moved: usize,
-    /// Meshes whose transform moved.
-    transforms: usize,
-    read_bytes: u64,
-    /// The frame was placed a call later than it was drawn.
     latent: bool,
 }
 
@@ -217,8 +178,9 @@ impl Renderer {
             Some(_) => "on (sync)",
             None => "not found",
         };
+        let device_name = format!("{}, validation {validation}", instance.devices[index].name);
         let dump = output("PIKA_STORE_DUMP")?;
-        let stats = output("PIKA_STATS")?;
+        let stats = Stats::new(&device_name)?;
         let device = instance.open(index)?;
         let mesh = shader::compile("mesh")?;
         let cull = shader::compile("cull")?;
@@ -226,51 +188,34 @@ impl Renderer {
         let smooth = shader::compile("smooth")?;
         Ok(Self {
             store: Store::new(),
+            stats,
+            commands: Commands::new(&device)?,
             target: None,
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            subdiv: Subdiv::new(&device, &subdiv.spirv)?,
-            smooth: Smooth::new(&device, &smooth.spirv)?,
-            geometry: Geometry::new(),
+            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv)?,
             device,
-            device_name: format!("{}, validation {validation}", instance.devices[index].name),
+            device_name,
             dump,
-            stats,
-            sync_start: None,
-            last_start: None,
-            syncs: Vec::new(),
-            frames: Vec::new(),
-            last: None,
+            syncs: 0,
             pending: None,
             placed: None,
         })
     }
 
     pub fn begin_sync(&mut self) {
-        self.sync_start = Some(Instant::now());
+        self.stats.begin_sync();
     }
 
-    /// Records the sync's time and stats, and appends them and the store to
-    /// their files.
+    /// Records the sync's time and stats, and appends the store to its file.
     pub fn end_sync(&mut self) -> Result<(), String> {
-        let start = self
-            .sync_start
-            .take()
-            .ok_or("a sync ended that never began: the delegate must call pika_sync_begin")?;
-        let sync = Sync {
-            time: start.elapsed(),
-            stats: self.store.end_sync(),
-        };
-        let period = self.last_start.replace(start).map(|last| start - last);
-        if let Some((path, file)) = &mut self.stats {
-            let line = stats_line(self.syncs.len() + 1, &sync, period, &self.store.census()?);
-            file.write_all(line.as_bytes())
-                .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))?;
-        }
-        self.syncs.push(sync);
+        let pulled = self.store.end_sync();
+        let census = self.store.census()?;
+        self.stats.end_sync(pulled, census)?;
+        self.syncs += 1;
         if let Some((path, file)) = &mut self.dump {
-            let text = format!("sync {}\n{}", self.syncs.len(), self.store.dump());
+            let text = format!("sync {}\n{}", self.syncs, self.store.dump());
             file.write_all(text.as_bytes())
                 .map_err(|e| format!("cannot write PIKA_STORE_DUMP file {path}: {e}"))?;
         }
@@ -289,6 +234,7 @@ impl Renderer {
     /// buffers that do not hold the last frame is drawn and waited for at
     /// once.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
+        let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
         if w == 0 || h == 0 || x + w > frame.width || y + h > frame.height {
             return Err(format!(
@@ -365,48 +311,51 @@ impl Renderer {
                 slot.insert(Target::new(&self.device, &formats, w, h)?)
             }
         };
-        let cb = target.begin()?;
-        let update = self.geometry.update(
-            &self.device,
-            &self.store,
-            &moved,
-            &inputs.render_tags,
-            &self.subdiv,
-            &self.smooth,
-            cb,
-        )?;
-        target.begin_cull();
+        let cb = self.commands.begin()?;
+        let update =
+            self.geometry
+                .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
+        self.commands.mark("update")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
             (Some(g), Some(v)) if v.fits(g) => Some(v),
             (Some(g), slot) => {
                 *slot = None;
-                Some(slot.insert(cull::View::new(&self.device, g)?))
+                Some(slot.insert(View::new(&self.device, g)?))
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            self.cull.record(cb, &camera, geometry, view);
+            view.begin(cb, &camera, geometry);
+            self.cull.record(cb, geometry, view);
         }
+        self.commands.mark("cull")?;
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
-        target.begin_rendering(&[
-            vk::ClearColorValue {
-                float32: inputs.clear_color,
-            },
-            clears[0],
-            clears[1],
-        ]);
+        target.begin_rendering(
+            cb,
+            &[
+                vk::ClearColorValue {
+                    float32: inputs.clear_color,
+                },
+                clears[0],
+                clears[1],
+            ],
+        );
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
-            (self.raster).draw(cb, formats[0].0, target.area(), camera, geometry, view);
+            (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
+        target.end_rendering(cb);
+        self.commands.mark("draw")?;
         let read = aovs.each_ref().map(Option::is_some);
-        target.submit(&read)?;
+        target.readback(cb, &read);
+        self.commands.mark("readback")?;
+        self.commands.submit()?;
         let pending = Pending {
             buffers,
             inputs,
-            color,
             formats,
             read,
+            period,
             record: start.elapsed(),
             update,
             culled: view.is_some(),
@@ -431,7 +380,7 @@ impl Renderer {
         aovs: &mut [Option<Aov>; 3],
     ) -> Result<(), String> {
         let target = (self.target.as_mut()).ok_or("a frame is pending without its target")?;
-        let times = target.wait()?;
+        let times = self.commands.wait()?;
         let drawn = match (&mut self.view, pending.culled) {
             (Some(view), true) => view.drawn(),
             _ => [0; 2],
@@ -460,69 +409,31 @@ impl Renderer {
             .filter(|(_, r)| *r)
             .map(|(f, _)| (f.1 * w as usize * h as usize) as u64)
             .sum();
-        let stats = FrameStats {
+        let (vram_used, vram_budget) = self.device.budget();
+        let memory = stats::Memory {
+            geometry: self.geometry.memory(),
+            views: self.view.as_ref().map(View::memory).unwrap_or_default(),
+            targets: target.memory(),
+            vram_used,
+            vram_budget,
+        };
+        self.stats.frame(stats::Frame {
             width: w,
             height: h,
+            period: pending.period,
             record: pending.record,
-            target: times,
+            times,
             place,
             update: pending.update,
+            read_bytes,
             drawn,
-            geometry_bytes: self.geometry.bytes(),
+            memory,
             moved: pending.moved,
             transforms: pending.transforms,
-            read_bytes,
             latent: pending.latent,
-        };
-        if let Some((path, file)) = &mut self.stats {
-            file.write_all(frame_line(self.frames.len() + 1, &stats).as_bytes())
-                .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))?;
-        }
-        self.frames.push(stats);
-        self.last = Some((w, h, pending.color));
+        })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())
-    }
-
-    /// Sync and frame timings so far, as median and maximum per stage, with
-    /// the bytes Hydra handed over.
-    pub fn report(&self) -> String {
-        let syncs = if self.syncs.is_empty() {
-            "no syncs".into()
-        } else {
-            let stored = |s: &Sync| [s.stats.mesh, s.stats.instancer];
-            let bytes: usize = self.syncs.iter().flat_map(stored).map(|b| b.pulled).sum();
-            let redundant: usize = self
-                .syncs
-                .iter()
-                .flat_map(stored)
-                .map(|b| b.redundant)
-                .sum();
-            let curves: usize = self.syncs.iter().map(|s| s.stats.curve_bytes).sum();
-            format!(
-                "{} syncs: {}; {bytes} bytes pulled, {redundant} redundant; \
-                 {curves} bytes of basis curves pulled and dropped",
-                self.syncs.len(),
-                percentiles(self.syncs.iter().map(|s| s.time)),
-            )
-        };
-        let Some((width, height, color)) = self.last else {
-            return format!("{syncs}; no frames rendered");
-        };
-        let frames = |time: fn(&FrameStats) -> Duration| percentiles(self.frames.iter().map(time));
-        format!(
-            "{syncs}; {} frames, last at {width}×{height} with {color:?} color: \
-             on the GPU, update {}, cull {}, draw {}, readback {}; on the CPU, record {}, \
-             wait {}, copy into the render buffers {}",
-            self.frames.len(),
-            frames(|f| f.target.update),
-            frames(|f| f.target.cull),
-            frames(|f| f.target.draw),
-            frames(|f| f.target.readback),
-            frames(|f| f.record),
-            frames(|f| f.target.wait),
-            frames(|f| f.place),
-        )
     }
 }
 
@@ -558,133 +469,4 @@ fn output(variable: &str) -> Result<Option<(String, File)>, String> {
     let file =
         File::create(&path).map_err(|e| format!("cannot create {variable} file {path}: {e}"))?;
     Ok(Some((path, file)))
-}
-
-/// One sync as `key value` pairs. The period, from the last sync's start to
-/// this one's, is left out of the first sync.
-fn stats_line(
-    index: usize,
-    sync: &Sync,
-    period: Option<Duration>,
-    census: &store::Census,
-) -> String {
-    let ms = |t: Duration| t.as_secs_f64() * 1e3;
-    let s = &sync.stats;
-    let mut line = format!("sync {index} time_ms {:.3}", ms(sync.time));
-    if let Some(period) = period {
-        line += &format!(" period_ms {:.3}", ms(period));
-    }
-    line += &format!(
-        " inserted {} removed {} mesh_bytes {} mesh_redundant_bytes {} instancer_bytes {} \
-         instancer_redundant_bytes {} curve_bytes {} meshes {} mesh_instances {} triangles {} \
-         prototype_triangles {} refined_triangles {} refined_prototype_triangles {} \
-         geometry_bytes {} refined_bytes {} materials {} instancers {} curves {}",
-        s.inserted,
-        s.removed,
-        s.mesh.pulled,
-        s.mesh.redundant,
-        s.instancer.pulled,
-        s.instancer.redundant,
-        s.curve_bytes,
-        census.meshes,
-        census.mesh_instances,
-        census.triangles,
-        census.prototype_triangles,
-        census.refined_triangles,
-        census.refined_prototype_triangles,
-        census.geometry_bytes,
-        census.refined_bytes,
-        census.materials,
-        census.instancers,
-        census.curves,
-    );
-    for (prim_type, count) in &census.counted {
-        line += &format!(" counted_{prim_type} {count}");
-    }
-    line + "\n"
-}
-
-/// One frame as `key value` pairs. The GPU's update is the uploads and the
-/// stencil and smooth normal passes; `layout` and `draws` are 1 when they
-/// were rewritten, and `latent` when the frame was placed a call late.
-fn frame_line(index: usize, f: &FrameStats) -> String {
-    let ms = |t: Duration| t.as_secs_f64() * 1e3;
-    format!(
-        "frame {index} width {} height {} record_ms {:.3} wait_ms {:.3} place_ms {:.3} \
-         gpu_update_ms {:.3} gpu_cull_ms {:.3} gpu_draw_ms {:.3} gpu_readback_ms {:.3} \
-         uploaded_bytes {} read_bytes {} drawn_instances {} drawn_triangles {} \
-         geometry_bytes {} moved_meshes {} moved_transforms {} layout {} draws {} latent {}\n",
-        f.width,
-        f.height,
-        ms(f.record),
-        ms(f.target.wait),
-        ms(f.place),
-        ms(f.target.update),
-        ms(f.target.cull),
-        ms(f.target.draw),
-        ms(f.target.readback),
-        f.update.bytes,
-        f.read_bytes,
-        f.drawn[0],
-        f.drawn[1],
-        f.geometry_bytes,
-        f.moved,
-        f.transforms,
-        u8::from(f.update.layout),
-        u8::from(f.update.draws),
-        u8::from(f.latent),
-    )
-}
-
-/// The median and maximum of a non-empty set of times.
-fn percentiles(times: impl Iterator<Item = Duration>) -> String {
-    let mut ms: Vec<f64> = times.map(|t| t.as_secs_f64() * 1e3).collect();
-    ms.sort_by(f64::total_cmp);
-    format!(
-        "p50 {:.2} ms, max {:.2} ms",
-        ms[ms.len() / 2],
-        ms[ms.len() - 1]
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_line_is_key_value_pairs() {
-        let ms = |t: f64| Duration::from_secs_f64(t / 1e3);
-        let stats = FrameStats {
-            width: 1620,
-            height: 1080,
-            record: ms(1.5),
-            target: target::Times {
-                wait: ms(5.25),
-                update: ms(0.875),
-                cull: ms(0.125),
-                draw: ms(2.0),
-                readback: ms(1.375),
-            },
-            place: ms(4.5),
-            update: geometry::Update {
-                bytes: 4096,
-                layout: false,
-                draws: true,
-            },
-            drawn: [1274, 11_550_000],
-            geometry_bytes: 1 << 30,
-            moved: 338,
-            transforms: 12,
-            read_bytes: 20_995_200,
-            latent: true,
-        };
-        assert_eq!(
-            frame_line(7, &stats),
-            "frame 7 width 1620 height 1080 record_ms 1.500 wait_ms 5.250 place_ms 4.500 \
-             gpu_update_ms 0.875 gpu_cull_ms 0.125 gpu_draw_ms 2.000 gpu_readback_ms 1.375 \
-             uploaded_bytes 4096 read_bytes 20995200 drawn_instances 1274 \
-             drawn_triangles 11550000 geometry_bytes 1073741824 moved_meshes 338 \
-             moved_transforms 12 layout 0 draws 1 latent 1\n"
-        );
-    }
 }

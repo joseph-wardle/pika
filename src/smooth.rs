@@ -11,10 +11,10 @@ pub struct Smooth {
     compute: gpu::Compute,
 }
 
-/// The buffers `shaders/smooth.slang` reads and writes.
+/// The addresses of the buffers `shaders/smooth.slang` reads and writes.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct Buffers {
+pub struct Addresses {
     pub points: vk::DeviceAddress,
     pub offsets: vk::DeviceAddress,
     pub corners: vk::DeviceAddress,
@@ -25,7 +25,7 @@ pub struct Buffers {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
-    buffers: Buffers,
+    addresses: Addresses,
     first: u32,
     count: u32,
     stride: u32,
@@ -40,9 +40,9 @@ impl Smooth {
 
     /// Records into `cb`, outside rendering, the normals of the points in
     /// `ranges`. The buffers must be live and as large as their table says.
-    pub fn record(&self, cb: vk::CommandBuffer, buffers: Buffers, ranges: &[Range<u32>]) {
+    pub fn record(&self, cb: vk::CommandBuffer, addresses: Addresses, ranges: &[Range<u32>]) {
         (self.compute).record(cb, ranges, |first, count, stride| Push {
-            buffers,
+            addresses,
             first,
             count,
             stride,

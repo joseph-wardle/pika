@@ -4,11 +4,10 @@
 
 use ash::vk;
 
-use crate::cull::View;
 use crate::geometry::Bound;
 use crate::gpu;
 use crate::target;
-use crate::transform::Camera;
+use crate::view::View;
 
 /// The AOV attachments after color, in `shaders/mesh.slang`'s target order.
 /// Vulkan devices need not render to three-channel formats, so normals are
@@ -29,24 +28,12 @@ pub struct Raster {
     pipelines: Vec<vk::Pipeline>,
 }
 
-/// `shaders/mesh.slang`'s push constants.
-#[repr(C)]
-struct Push {
-    camera: Camera,
-    points: vk::DeviceAddress,
-    normals: vk::DeviceAddress,
-    smooth: vk::DeviceAddress,
-    vertices: vk::DeviceAddress,
-    instances: vk::DeviceAddress,
-    visible: vk::DeviceAddress,
-}
-
 impl Raster {
     pub fn new(device: &gpu::Device, spirv: &[u32]) -> Result<Self, String> {
         let d = &device.raw;
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .size(size_of::<Push>() as u32)];
+            .size(size_of::<vk::DeviceAddress>() as u32)];
         let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
         // SAFETY: `d` is live and `layout_info` outlives the call.
         let layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
@@ -71,7 +58,7 @@ impl Raster {
         Ok(r)
     }
 
-    /// Records the draws of `view`, culled from `camera`, into `cb`, inside
+    /// Records the draws of `view`, after the cull pass, into `cb`, inside
     /// rendering into a target of `color` (one of `COLOR_FORMATS`),
     /// `DEPTH_AOV` and `NORMAL_AOV`.
     pub fn draw(
@@ -79,7 +66,6 @@ impl Raster {
         cb: vk::CommandBuffer,
         color: vk::Format,
         area: vk::Rect2D,
-        camera: Camera,
         geometry: &Bound,
         view: &View,
     ) {
@@ -88,19 +74,7 @@ impl Raster {
         }
         let index = COLOR_FORMATS.iter().position(|&f| f == color);
         let pipeline = self.pipelines[index.expect("the renderer chooses a color format")];
-        let push = Push {
-            camera,
-            points: geometry.points,
-            normals: geometry.normals,
-            smooth: geometry.smooth,
-            vertices: geometry.vertices,
-            instances: geometry.instances,
-            visible: view.visible(),
-        };
-        // SAFETY: `Push` is plain `repr(C)` data without padding.
-        let push = unsafe {
-            std::slice::from_raw_parts((&raw const push).cast::<u8>(), size_of::<Push>())
-        };
+        let push = view.constants().to_ne_bytes();
         let viewport = vk::Viewport {
             x: 0.0,
             y: 0.0,
@@ -112,13 +86,13 @@ impl Raster {
         let d = &self.device;
         // SAFETY: `cb` is recording inside rendering of the formats this
         // pipeline was built for, and every handle was created on `d`. The
-        // addresses are of live buffers, as large as the draws read.
+        // view's constants address live buffers, as large as the draws read.
         unsafe {
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
             d.cmd_set_viewport(cb, 0, &[viewport]);
             d.cmd_set_scissor(cb, 0, &[area]);
             let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-            d.cmd_push_constants(cb, self.layout, stages, 0, push);
+            d.cmd_push_constants(cb, self.layout, stages, 0, &push);
             d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
             d.cmd_draw_indexed_indirect(
                 cb,

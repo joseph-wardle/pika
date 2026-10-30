@@ -3,8 +3,8 @@
 //! Calls go one way: C++ calls Rust and Rust never calls back. Every entry
 //! returns a status and catches panics, so a Rust bug cannot take down the
 //! host. A panic while the renderer is locked poisons it, and every later
-//! call on it fails, so the delegate renders nothing rather than a frame from
-//! half-updated state.
+//! call on it fails, so the delegate stops calling and renders nothing rather
+//! than a frame from half-updated state.
 
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
@@ -80,9 +80,16 @@ pub struct CInstancePrimvars {
 /// `pika_aov`.
 #[repr(C)]
 pub struct CAov {
-    format: u32,
+    format: *const c_char,
     pixels: *mut u8,
     len: usize,
+}
+
+/// `pika_stat`.
+#[repr(C)]
+pub struct CStat {
+    key: [c_char; 48],
+    value: f64,
 }
 
 /// `pika_frame`.
@@ -212,7 +219,7 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
         // SAFETY: the caller passes ownership of a pointer from `Box::into_raw`.
         let handle = unsafe { Box::from_raw(renderer) };
         let renderer = handle.into_inner().unwrap_or_else(|e| e.into_inner());
-        eprintln!("pika: {}", renderer.report());
+        eprintln!("pika: {}", renderer.stats.summary());
         Ok(())
     })
 }
@@ -233,12 +240,14 @@ pub unsafe extern "C" fn pika_render(
     call(|| {
         // SAFETY: the caller guarantees the renderer and the frame.
         let (handle, f) = unsafe { (&*renderer, &*frame) };
-        let aov = |a: &CAov| -> Result<Option<Aov>, String> {
+        let aov = |a: &CAov, name: &str| -> Result<Option<Aov>, String> {
             if a.pixels.is_null() {
                 return Ok(None);
             }
+            // SAFETY: the caller guarantees the format string.
+            let format = unsafe { string(a.format)? };
             Ok(Some(Aov {
-                format: Format::from_abi(a.format)?,
+                format: Format::from_name(&format).map_err(|e| format!("the {name} AOV: {e}"))?,
                 // SAFETY: the caller guarantees `len` writable bytes.
                 pixels: unsafe { std::slice::from_raw_parts_mut(a.pixels, a.len) },
             }))
@@ -257,9 +266,9 @@ pub unsafe extern "C" fn pika_render(
             height: f.height,
             window,
             clear_color: f.clear_color,
-            color: aov(&f.color)?,
-            depth: aov(&f.depth)?,
-            normal: aov(&f.normal)?,
+            color: aov(&f.color, "color")?,
+            depth: aov(&f.depth, "depth")?,
+            normal: aov(&f.normal, "normal")?,
             render_tags,
         };
         let done = lock(handle)?.render(frame)?;
@@ -362,20 +371,23 @@ pub unsafe extern "C" fn pika_mesh_points(
 }
 
 /// # Safety
-/// `renderer` must be live, and `normals` valid for `count` reads.
+/// `renderer` must be live, `interpolation` a NUL-terminated string and
+/// `normals` valid for `count` reads.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_normals(
     renderer: *const Handle,
     id: u64,
-    interpolation: u32,
+    interpolation: *const c_char,
     normals: *const [f32; 3],
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the array.
-        let (handle, values) = unsafe { (&*renderer, slice(normals, count).to_vec()) };
+        // SAFETY: the caller guarantees the renderer, the string and the array.
+        let (handle, token) = unsafe { (&*renderer, string(interpolation)?) };
+        // SAFETY: as above.
+        let values = unsafe { slice(normals, count) }.to_vec();
         let normals = Normals {
-            interpolation: Interpolation::from_abi(interpolation)?,
+            interpolation: Interpolation::from_token(&token)?,
             values,
         };
         lock(handle)?.store.set_normals(id, Some(normals))
@@ -655,6 +667,45 @@ pub unsafe extern "C" fn pika_sync_begin(renderer: *const Handle) -> i32 {
 pub unsafe extern "C" fn pika_sync_end(renderer: *const Handle) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.end_sync())
+}
+
+/// Writes the stats the host shows, up to `capacity` of them, to `out`, and
+/// how many to `*count`.
+///
+/// # Safety
+/// `renderer` must be live, `out` valid for `capacity` writes and `count`
+/// for one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_stats(
+    renderer: *const Handle,
+    out: *mut CStat,
+    capacity: usize,
+    count: *mut usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer.
+        let pairs = lock(unsafe { &*renderer })?.stats.host();
+        if pairs.len() > capacity {
+            return Err(format!("{} stats do not fit in {capacity}", pairs.len()));
+        }
+        for (i, (key, value)) in pairs.iter().enumerate() {
+            let mut stat = CStat {
+                key: [0; 48],
+                value: *value,
+            };
+            if key.len() >= stat.key.len() {
+                return Err(format!("the stat key {key} is too long for pika_stat"));
+            }
+            for (c, b) in stat.key.iter_mut().zip(key.bytes()) {
+                *c = b as c_char;
+            }
+            // SAFETY: `i` is below `capacity`, which the caller guarantees.
+            unsafe { out.add(i).write(stat) };
+        }
+        // SAFETY: the caller guarantees one write.
+        unsafe { count.write(pairs.len()) };
+        Ok(())
+    })
 }
 
 #[cfg(test)]

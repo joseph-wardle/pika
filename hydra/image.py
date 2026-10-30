@@ -311,7 +311,7 @@ def reference(stage, time, width, height, purposes, control=None):
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
-    eye = f.position
+    eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)
     tris = triangles(stage, time, purposes, control)
@@ -329,44 +329,92 @@ def reference(stage, time, width, height, purposes, control=None):
         "normal": np.zeros((height, width, 3)),
         "face": np.full((height, width), -1),
     }
+    if not tris:
+        return image
+    world = np.array([[list(v) for v in t["points"]] for t in tris])
+    nearest, p, bary = cast(to_clip, width, height, shift, world)
+    hit = nearest >= 0
+    i = nearest[hit]
+    p, bary = p[hit], bary[hit]
+
+    # Row vectors, as Gf multiplies them: v @ m.
+    m = np.array([[list(r) for r in t["normal_matrix"]] for t in tris])[i]
+    o = np.array([[list(v) for v in t["object"]] for t in tris])[i]
+    front = np.einsum("ni,nij->nj", np.cross(o[:, 1] - o[:, 0], o[:, 2] - o[:, 0]), m)
+    front[np.array([t["left"] for t in tris])[i]] *= -1
+    toward = normalize(eye - p)
+    if control == "flat normals":
+        n = normalize(front)
+    else:
+        normals = np.array([[list(n) for n in t["normals"]] for t in tris])[i]
+        n = normalize(np.einsum("ni,nij->nj", np.einsum("nc,ncj->nj", bary, normals), m))
+    behind = dot(front, toward) < 0
+    if control != "unflipped normals":
+        n[behind] *= -1
+    if control == "flat normals":
+        n[dot(n, toward) < 0] *= -1
+    grey = np.clip(dot(n, toward), 0.0, 1.0)
+    clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
+    depth = (clip[:, 2] / clip[:, 3] + 1) / 2
+    if control == "unconverted depth":
+        depth = 1 - depth
     faces = {}
-    for y in range(height):
-        for x in range(width):
-            ndc = Gf.Vec2d(2 * (x + 0.5 + shift) / width - 1, 1 - 2 * (y + 0.5) / height)
-            ray = f.ComputePickRay(ndc)
-            best = None
-            for t in tris:
-                hit, distance, bary, _ = ray.Intersect(*t["points"])
-                if hit and (best is None or distance < best[0]):
-                    best = (distance, bary, t)
-            if best is None:
-                continue
-            distance, bary, t = best
-            p = ray.GetPoint(distance)
-            m = t["normal_matrix"]
-            o = t["object"]
-            front = Gf.Cross(o[1] - o[0], o[2] - o[0]) * m
-            if t["left"]:
-                front = -front
-            toward = (eye - p).GetNormalized()
-            if control == "flat normals":
-                n = front.GetNormalized()
-            else:
-                n = sum((b * c for b, c in zip(bary, t["normals"])), Gf.Vec3d(0)) * m
-                n = n.GetNormalized()
-            if Gf.Dot(front, toward) < 0 and control != "unflipped normals":
-                n = -n
-            if control == "flat normals" and Gf.Dot(n, toward) < 0:
-                n = -n
-            grey = min(max(Gf.Dot(n, toward), 0.0), 1.0)
-            depth = (to_clip.Transform(p)[2] + 1) / 2
-            if control == "unconverted depth":
-                depth = 1 - depth
-            image["color"][y, x] = (grey, grey, grey, 1)
-            image["depth"][y, x] = depth
-            image["normal"][y, x] = tuple(n)
-            image["face"][y, x] = faces.setdefault(t["face"], len(faces))
+    face = np.array([faces.setdefault(t["face"], len(faces)) for t in tris])
+    image["color"][hit] = np.c_[grey, grey, grey, np.ones(len(grey))]
+    image["depth"][hit] = depth
+    image["normal"][hit] = n
+    image["face"][hit] = face[i]
     return image
+
+
+def cast(to_clip, width, height, shift, tris):
+    """Casts a ray through each pixel centre at the triangles (world points,
+    (count, 3, 3)): the nearest triangle's index or -1, the hit point and
+    its barycentric coordinates, each per pixel. As Gf.Ray.Intersect from
+    Gf.Frustum.ComputePickRay, a ray starts on the near plane, hits either
+    side of a triangle, counts an edge as in, and sees nothing behind it."""
+    # Barycentric slack: a ray exactly along an edge (the image's centre
+    # line over a box's edge) otherwise misses both triangles by rounding.
+    EDGE = 1e-9
+    nearest = np.full((height, width), -1)
+    point = np.zeros((height, width, 3))
+    bary = np.zeros((height, width, 3))
+    v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
+    unproject = np.linalg.inv(np.array(to_clip))
+    columns = np.arange(width)
+    ndc_x = 2 * (columns + 0.5 + shift) / width - 1
+    # A row at a time: Moller-Trumbore over every (pixel, triangle) pair.
+    for y in range(height):
+        ndc_y = np.full(width, 1 - 2 * (y + 0.5) / height)
+        near = np.c_[ndc_x, ndc_y, -np.ones(width), np.ones(width)] @ unproject
+        far = np.c_[ndc_x, ndc_y, np.ones(width), np.ones(width)] @ unproject
+        o = (near[:, :3] / near[:, 3:])[:, None]
+        d = (far[:, :3] / far[:, 3:])[:, None] - o
+        with np.errstate(divide="ignore", invalid="ignore"):
+            pv = np.cross(d, e2)
+            det = dot(e1, pv)
+            s = o - v0
+            u = dot(s, pv) / det
+            qv = np.cross(s, e1)
+            v = dot(d, qv) / det
+            t = dot(e2, qv) / det
+            hit = (det != 0) & (u >= -EDGE) & (v >= -EDGE) & (u + v <= 1 + EDGE) & (t >= 0)
+        i = np.where(hit, t, np.inf).argmin(axis=1)
+        seen = hit[columns, i]
+        x, i = columns[seen], i[seen]
+        nearest[y, x] = i
+        point[y, x] = o[x, 0] + t[x, i, None] * d[x, 0]
+        bary[y, x] = np.c_[1 - u[x, i] - v[x, i], u[x, i], v[x, i]]
+    return nearest, point, bary
+
+
+def dot(a, b):
+    return (a * b).sum(axis=-1)
+
+
+def normalize(v):
+    length = np.linalg.norm(v, axis=-1, keepdims=True)
+    return np.divide(v, length, out=np.zeros_like(v), where=length > 0)
 
 
 def read(path):
