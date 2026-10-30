@@ -1,6 +1,6 @@
 """Summarises a PIKA_STATS file: every time as p50/p95/max over the warm
-syncs and frames, the frames over the gate's period, and the last frame's
-memory.
+syncs and frames, the frames over the gate's period, each budget line's p95
+against its budget, and the last frame's memory.
 
     python3 hydra/stats.py <file.stats> [<warm>]
 
@@ -15,6 +15,16 @@ import sys
 
 # Over 1080p at 24 fps: the gate's frame period.
 BUDGET_MS = 41.67
+# Mesh drawing's budget lines, each the sum of the frame keys named: the
+# warm p95 on ALab in usdview at 1080p. They are measured lines, not limits;
+# a line over its budget moves work up the order (design.md).
+LINES = (
+    ("draw", ("gpu_draw_ms",), 4.0),
+    ("update", ("gpu_update_ms",), 1.0),
+    ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
+    ("cpu", ("record_ms", "wait_ms"), 2.0),
+    ("period", ("period_ms",), BUDGET_MS),
+)
 
 
 def read(path):
@@ -93,6 +103,11 @@ def main(path, warm=None):
     over, run = misses(r["period_ms"] for r in f if "period_ms" in r)
     last = f[-1]
     print(f"  frames over {BUDGET_MS} ms: {over}, longest run {run}")
+    for name, keys_of_line, budget in LINES:
+        values = [sum(r[k] for k in keys_of_line) for r in f if all(k in r for k in keys_of_line)]
+        if values:
+            p95 = percentiles(values)[1]
+            print(f"  {name:<10s} p95 {p95:8.2f} of {budget:g} ms: {'met' if p95 <= budget else 'OVER'}")
     print(f"  last frame: {last['width']:.0f}x{last['height']:.0f}, "
           f"{last['drawn_instances']:.0f} instances, {last['drawn_triangles'] / 1e6:.2f} M triangles")
     print(f"  memory: geometry {size(last['geometry_bytes'])}, views {size(last['view_bytes'])}, "
