@@ -19,7 +19,8 @@ BAKE=$ROOT/target/bake/bake
 
 make -C "$ROOT/bake" --no-print-directory HFS="$HFS"
 rm -rf "$OUT"
-mkdir -p "$OUT/network" "$OUT/missing"
+mkdir -p "$OUT/network" "$OUT/missing" "$OUT/textures"
+FIXTURES=$ROOT/bake/fixtures
 
 failed=0
 fail() {
@@ -46,6 +47,22 @@ if "$BAKE" generate "$OUT/missing.mtlx" "$OUT/missing" 2> "$OUT/missing.err"; th
     fail "missing: a document with an unknown nodedef generated"
 fi
 grep -q "ND_missing" "$OUT/missing.err" || fail "missing: the error does not name the nodedef"
+
+texture() {
+    "$BAKE" texture "$FIXTURES/$1" "$2" "$3" "$4" "" "$OUT/textures/$5.texture" || fail "$5: texture failed"
+}
+texture ramp.exr raw float 4096 ramp
+cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp.texture" || fail "ramp: the bake differs from the reference"
+texture swatch.png srgb_texture color 4096 swatch
+texture swatch.png raw color 4096 swatch_raw
+texture swatch.png raw single 4096 single
+texture mips.exr raw data 4 mips
+texture mips.exr raw data 8 mips8
+"$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
+if "$BAKE" texture "$FIXTURES/swatch.png" bogus color 4096 "" "$OUT/textures/bogus.texture" 2> "$OUT/textures/bogus.err"; then
+    fail "bogus: a texture in an unknown colour space baked"
+fi
+grep -q "bogus" "$OUT/textures/bogus.err" || fail "bogus: the error does not name the colour space"
 
 [ $failed = 0 ] && echo "PASS: bake"
 exit $failed

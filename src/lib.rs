@@ -3,7 +3,7 @@
 //! and `target` directly.
 
 mod abi;
-mod bake;
+pub mod bake;
 mod cache;
 pub mod commands;
 mod cull;
@@ -21,5 +21,6 @@ mod store;
 mod subdiv;
 mod surface;
 pub mod target;
+pub mod texture;
 mod transform;
 mod view;
