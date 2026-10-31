@@ -150,17 +150,18 @@ impl Bake {
 
     /// Bakes the image `source`, declared in the colour space `space`, with
     /// the levels above `cap` texels dropped, in one of the tool's
-    /// encodings, unless the cache holds it; returns the baked file.
+    /// encodings, unless the cache holds it; returns the baked file and
+    /// whether it was baked now.
     pub fn texture(
         &self,
         source: &Path,
         space: &str,
         encoding: &str,
         cap: u32,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<(PathBuf, bool), String> {
         let path = self.texture_path(source, space, encoding, cap)?;
         if path.is_file() {
-            return Ok(path);
+            return Ok((path, false));
         }
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir)
@@ -183,7 +184,7 @@ impl Bake {
         }
         std::fs::rename(&tmp, &path)
             .map_err(|e| format!("cannot move {} into place: {e}", tmp.display()))?;
-        Ok(path)
+        Ok((path, true))
     }
 
     /// Where `source`'s bake lives: under `textures`, mirroring the source's

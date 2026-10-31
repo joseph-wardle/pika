@@ -165,6 +165,7 @@ struct Pending {
     transforms: usize,
     latent: bool,
     compiled: usize,
+    baked: usize,
 }
 
 impl Renderer {
@@ -374,6 +375,7 @@ impl Renderer {
             transforms: moved.transforms.len(),
             latent,
             compiled: shading.compiled,
+            baked: shading.baked,
         };
         if latent {
             self.pending = Some(pending);
@@ -445,6 +447,7 @@ impl Renderer {
             transforms: pending.transforms,
             latent: pending.latent,
             compiled: pending.compiled,
+            baked: pending.baked,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

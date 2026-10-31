@@ -11,7 +11,8 @@
 # scene's .py script (if any) on husk's stage between them, and compares
 # Pika's store dump with the scene's .dump, which was written by hand. Each
 # run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
-# pass timed and the driver's memory budget read.
+# pass timed and the driver's memory budget read, and frame 2 must have
+# compiled a surface and baked a texture only where the edit calls for one.
 #
 # Last it renders hydra/scenes/cube.usda through UsdImagingGL in hython on
 # the same display (hydra/engine.py), as usdview renders, and checks that the
@@ -67,6 +68,16 @@ store_after() {
     awk -v header="sync $1" '/^sync /{ on = ($0 == header); next } on' "$2"
 }
 
+# counts <stats>: the surfaces compiled and textures baked for frame 1, then
+# for frame 2: the frames after the second sync.
+counts() {
+    awk '/^sync /{ f = ($2 == 1) ? 1 : 2; next }
+        /^frame /{ for (i = 3; i < NF; i += 2) {
+            if ($i == "compiled_surfaces") c[f] += $(i + 1)
+            if ($i == "baked_textures") b[f] += $(i + 1) } }
+        END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
+}
+
 # fixture <scene.usda>: frame 1 and frame 2 must each match their expected
 # store. Frame 2 must also differ from frame 1's expectation, so a store left
 # stale by the edit would fail.
@@ -101,6 +112,20 @@ fixture() {
         fail "$name: the summary has no GPU readback time, so a pass went untimed"
     grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
         fail "$name: the summary has no memory budget"
+    # An edit to a value or an asset path compiles nothing; one to the
+    # network's structure compiles its surface; a texture is baked once per
+    # file. The two scenes that edit a material are each other's control, and
+    # each must compile in frame 1, so a counter that never moves fails.
+    local edit="0 0" compiled _ second
+    case $name in
+        network) edit="0 1" ;;
+        rewired) edit="1 0" ;;
+    esac
+    read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats")"
+    [ "$second" = "$edit" ] ||
+        fail "$name: frame 2 compiled and baked $second, not $edit"
+    [ "$edit" = "0 0" ] || [ "$compiled" = 1 ] ||
+        fail "$name: frame 1 compiled $compiled surfaces, not 1"
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader

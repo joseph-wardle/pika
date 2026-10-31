@@ -55,7 +55,7 @@ material /world/mtl/paint
     diffuseColor from tex rgb
   node tex UsdUVTexture
     colorSpace:file text "raw"
-    file asset "bake/fixtures/swatch.png"
+    file asset "bake/fixtures/mips.exr"
     scale float 2 2 2 1
     typeName:file text "asset"
     typeName:scale text "float4"

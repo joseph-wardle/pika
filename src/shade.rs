@@ -67,6 +67,8 @@ struct Uniforms {
 pub struct Update {
     /// Surfaces slangc compiled now; the cache answered for the rest.
     pub compiled: usize,
+    /// Textures the bake tool baked now, likewise.
+    pub baked: usize,
 }
 
 impl Shade {
@@ -110,7 +112,7 @@ impl Shade {
         self.textures.begin();
         self.materials
             .retain(|id, _| store.materials().contains_key(id));
-        let mut compiled = 0;
+        let (mut compiled, mut baked) = (0, 0);
         for id in &moved.materials {
             let Some(material) = store.materials().get(id) else {
                 continue;
@@ -156,14 +158,15 @@ impl Shade {
                 let source = material::source(node, material::store_input(node, input))
                     .map_err(|e| at(format!("{path}'s {input} {e}")))?;
                 let file = Path::new(&source.file);
-                let baked = (self.bake)
+                let (texture, fresh) = (self.bake)
                     .texture(file, &source.space, source.encoding, CAP)
                     .map_err(at)?;
-                let view = self.textures.load(device, cb, &baked).map_err(at)?;
+                baked += usize::from(fresh);
+                let view = self.textures.load(device, cb, &texture).map_err(at)?;
                 let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
                 let sampler = self.textures.sampler(modes).map_err(at)?;
                 bindings.push((view, sampler));
-                uniforms.textures.push(baked);
+                uniforms.textures.push(texture);
             }
             uniforms.bind(layout, &bindings);
         }
@@ -183,7 +186,7 @@ impl Shade {
             let layout = &self.surfaces[&u.hash].layout;
             surface::frame(layout, u.buffer.bytes(), eye, [a, b, c]);
         }
-        Ok(Update { compiled })
+        Ok(Update { compiled, baked })
     }
 
     /// Records the draws of `view`'s `groups`, after the prepass, into `cb`,
