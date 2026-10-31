@@ -1,7 +1,7 @@
-//! The material pass's GPU side: each surface's pipelines, built from the
-//! bake tool's pixel stage and the vertex stage written for it, and each
-//! material's uniform block and descriptor set, bound to its surface.
-//! Nothing draws with them yet.
+//! The material pass: each surface's pipelines, built from the bake tool's
+//! pixel stage and the vertex stage written for it, each material's
+//! uniform block and descriptor set, bound to its surface, and the draw of
+//! each material's meshes after the prepass, lit by a headlight.
 
 use std::collections::BTreeMap;
 
@@ -9,14 +9,16 @@ use ash::vk;
 
 use crate::bake::{Bake, Manifest};
 use crate::cache;
+use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document};
-use crate::raster::COLOR_FORMATS;
+use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::shader;
 use crate::store::{Moved, Store};
 use crate::surface::{self, Layout};
 use crate::target;
 use crate::transform::Camera;
+use crate::view::View;
 
 pub struct Shade {
     // A copy of the owner's device table, which outlives this (field order).
@@ -31,6 +33,8 @@ pub struct Shade {
     surfaces: BTreeMap<u64, Surface>,
     /// By the store's material id.
     materials: BTreeMap<u64, Uniforms>,
+    /// `material::clay`, drawn where `materials` has no entry.
+    clay: Uniforms,
 }
 
 /// One shader structure: the pipelines of every material sharing a document.
@@ -91,14 +95,27 @@ impl Shade {
         // SAFETY: `d` is live and `sampler_info` outlives the call.
         let sampler = unsafe { d.create_sampler(&sampler_info, None) }
             .map_err(|e| format!("vkCreateSampler failed: {e}"))?;
+        let clay = material::clay();
+        let document = material::document(&clay)
+            .map_err(|e| format!("the clay material: {e}"))?
+            .expect("clay has a surface");
+        let (surface, _) = Shade::build(&bake, device, &document)
+            .map_err(|e| format!("the clay material: {e}"))?;
+        let mut uniforms = Uniforms::new(device, &surface, document.hash, &white, sampler);
+        if let Ok(u) = &mut uniforms {
+            let (manifest, layout) = (&surface.manifest, &surface.layout);
+            surface::pack(manifest, layout, &document, &clay, u.buffer.bytes())
+                .map_err(|e| format!("the clay material: {e}"))?;
+        }
         Ok(Self {
             device: d.clone(),
             bake,
             sampler,
             white,
             ready: false,
-            surfaces: BTreeMap::new(),
+            surfaces: BTreeMap::from([(document.hash, surface)]),
             materials: BTreeMap::new(),
+            clay: uniforms?,
         })
     }
 
@@ -134,7 +151,7 @@ impl Shade {
                 continue;
             };
             if !self.surfaces.contains_key(&document.hash) {
-                let (surface, fresh) = self.build(device, &document).map_err(at)?;
+                let (surface, fresh) = Shade::build(&self.bake, device, &document).map_err(at)?;
                 compiled += usize::from(fresh);
                 self.surfaces.insert(document.hash, surface);
             }
@@ -158,19 +175,77 @@ impl Shade {
             )
             .map_err(at)?;
         }
-        let [x, y, z, _] = camera.eye;
+        let [x, y, z, w] = camera.eye;
+        // An orthographic camera's eye is the direction toward the viewer:
+        // the generated code takes a position, so it is put far along it,
+        // where the view vector is that direction from everywhere drawn.
+        let far = if w == 0.0 { 1e7 } else { 1.0 };
+        let eye = [x * far, y * far, z * far];
         let [a, b, c, _] = camera.forward;
-        for u in self.materials.values_mut() {
+        for u in self.materials.values_mut().chain([&mut self.clay]) {
             let layout = &self.surfaces[&u.hash].layout;
-            surface::frame(layout, u.buffer.bytes(), [x, y, z], [a, b, c]);
+            surface::frame(layout, u.buffer.bytes(), eye, [a, b, c]);
         }
         Ok(Update { compiled })
     }
 
+    /// Records the draws of `view`'s `groups`, after the prepass, into `cb`,
+    /// inside the same rendering: each group with its material's surface,
+    /// and with clay where the material has none.
+    pub fn draw(
+        &self,
+        cb: vk::CommandBuffer,
+        color: vk::Format,
+        area: vk::Rect2D,
+        geometry: &Bound,
+        groups: &[Group],
+        view: &View,
+    ) {
+        let index = COLOR_FORMATS.iter().position(|&f| f == color);
+        let index = index.expect("the renderer chooses a color format");
+        let push = view.constants().to_ne_bytes();
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: area.extent.width as f32,
+            height: area.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
+        let d = &self.device;
+        // SAFETY: `cb` is recording inside rendering of the formats the
+        // pipelines were built for, and every handle was created on `d`.
+        // The view's constants address live buffers, as large as the draws
+        // read, and each group's records lie within the view's.
+        unsafe {
+            d.cmd_set_viewport(cb, 0, &[viewport]);
+            d.cmd_set_scissor(cb, 0, &[area]);
+            d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
+            for group in groups {
+                let bound = group.material.and_then(|id| self.materials.get(&id));
+                let uniforms = bound.unwrap_or(&self.clay);
+                let surface = &self.surfaces[&uniforms.hash];
+                let point = vk::PipelineBindPoint::GRAPHICS;
+                let layout = surface.pipeline_layout;
+                d.cmd_bind_pipeline(cb, point, surface.pipelines[index]);
+                let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+                d.cmd_push_constants(cb, layout, stages, 0, &push);
+                d.cmd_bind_descriptor_sets(cb, point, layout, 0, &[uniforms.set], &[]);
+                let offset = u64::from(group.first * stride);
+                d.cmd_draw_indexed_indirect(cb, view.records(), offset, group.count, stride);
+            }
+        }
+    }
+
     /// Generates, compiles and builds `document`'s surface, and whether
     /// slangc ran for it.
-    fn build(&self, device: &gpu::Device, document: &Document) -> Result<(Surface, bool), String> {
-        let generated = self.bake.generate(document)?;
+    fn build(
+        bake: &Bake,
+        device: &gpu::Device,
+        document: &Document,
+    ) -> Result<(Surface, bool), String> {
+        let generated = bake.generate(document)?;
         let stage = surface::vertex_stage(&generated.manifest)?;
         let path = generated.dir.join("surface.slang");
         if std::fs::read_to_string(&path).ok().as_deref() != Some(&stage) {
@@ -187,7 +262,7 @@ impl Shade {
             device: self.white.bytes(),
             host: 0,
         };
-        for u in self.materials.values() {
+        for u in self.materials.values().chain([&self.clay]) {
             memory += u.buffer.memory();
         }
         memory
@@ -262,7 +337,8 @@ impl Surface {
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
         // The prepass writes depth; the material pass shades the surface
-        // it left at each pixel.
+        // it left at each pixel, into the color AOV only, inside the same
+        // rendering, so it declares the prepass's attachments.
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(false)
@@ -271,12 +347,17 @@ impl Surface {
             .map(|&color| {
                 let entries = [c"vs", c"fragmentMain"];
                 let layout = s.pipeline_layout;
+                let colors = [
+                    (color, vk::ColorComponentFlags::RGBA),
+                    (DEPTH_AOV.0, vk::ColorComponentFlags::empty()),
+                    (NORMAL_AOV.0, vk::ColorComponentFlags::empty()),
+                ];
                 gpu::graphics(
                     d,
                     layout,
                     module,
                     entries,
-                    &[color],
+                    &colors,
                     target::DEPTH_FORMAT,
                     depth,
                 )

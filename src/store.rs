@@ -516,11 +516,12 @@ impl Store {
         Ok(())
     }
 
-    /// `material` is empty when none is bound.
+    /// `material` is empty when none is bound. The draw records are grouped
+    /// by material, so a binding rewrites them.
     pub fn set_material(&mut self, id: u64, material: String) -> Result<(), String> {
         let bytes = material.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        write(&mut self.stats.mesh, &mut mesh.material, material, bytes);
+        self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.material, material, bytes);
         Ok(())
     }
 
@@ -615,6 +616,8 @@ impl Store {
         Ok(())
     }
 
+    /// A material's meshes may be in the store before it: both rewrite the
+    /// draw records.
     pub fn insert_material(&mut self, path: String) -> u64 {
         let id = self.new_id();
         self.materials.insert(
@@ -624,6 +627,7 @@ impl Store {
                 network: None,
             },
         );
+        self.moved.draws = true;
         id
     }
 
@@ -632,6 +636,7 @@ impl Store {
             .remove(&id)
             .ok_or_else(|| stale("material", id))?;
         self.stats.removed += 1;
+        self.moved.draws = true;
         Ok(())
     }
 

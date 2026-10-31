@@ -110,7 +110,18 @@ struct DrawTables {
     boxes: Vec<[f32; 6]>,
     /// No record has instances until the cull pass counts a view's.
     records: Vec<vk::DrawIndexedIndirectCommand>,
+    groups: Vec<Group>,
     rows: Rows,
+}
+
+/// The consecutive draw records of the meshes bound to one material, which
+/// the material pass draws with one multi-draw.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Group {
+    /// The store's material id; none for meshes with no material bound.
+    pub material: Option<u64>,
+    pub first: u32,
+    pub count: u32,
 }
 
 /// The instances and their draw records, sized to fit.
@@ -121,6 +132,7 @@ struct Draws {
     records: Buffer,
     count: u32,
     instance_count: u32,
+    groups: Vec<Group>,
     rows: Rows,
     /// The render tags they were written for.
     tags: Vec<String>,
@@ -309,6 +321,11 @@ impl Geometry {
             count: draws.count,
             instance_count: draws.instance_count,
         })
+    }
+
+    /// The draw records by material, once `update` has run.
+    pub fn groups(&self) -> &[Group] {
+        self.draws.as_ref().map_or(&[], |d| &d.groups)
     }
 
     /// The bytes of every buffer, the staging buffer on the host side.
@@ -860,17 +877,33 @@ fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mu
 }
 
 /// One draw record per visible mesh of render `tags` (or of any, when there
-/// are none), with its box and its rows of the instances it is drawn at.
+/// are none), with its box and its rows of the instances it is drawn at,
+/// grouped by material: the unbound meshes first, then each material's.
 fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawTables {
     let instancers = by_path(store);
+    let materials: HashMap<&str, u64> = (store.materials().iter())
+        .map(|(&id, m)| (m.path.as_str(), id))
+        .collect();
+    let mut ordered: Vec<(Option<u64>, u64, &Range)> = (ranges.iter())
+        .map(|(&id, range)| {
+            let bound = store.meshes()[&id].material.as_deref();
+            (
+                bound.and_then(|path| materials.get(path).copied()),
+                id,
+                range,
+            )
+        })
+        .collect();
+    ordered.sort_by_key(|&(material, id, _)| (material, id));
     let mut t = DrawTables {
         instances: Vec::new(),
         owners: Vec::new(),
         boxes: Vec::new(),
         records: Vec::new(),
+        groups: Vec::new(),
         rows: Rows::new(),
     };
-    for (&id, range) in ranges {
+    for (material, id, range) in ordered {
         let mesh = &store.meshes()[&id];
         let first = t.instances.len();
         t.instances
@@ -879,6 +912,14 @@ fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawT
             continue;
         }
         let record = t.records.len() as u32;
+        match t.groups.last_mut() {
+            Some(g) if g.material == material => g.count += 1,
+            _ => t.groups.push(Group {
+                material,
+                first: record,
+                count: 1,
+            }),
+        }
         t.owners.resize(t.instances.len(), record);
         t.rows.insert(
             id,
@@ -929,6 +970,7 @@ fn rewrite(
                 records: Buffer::device_local(device, size(&t.records), copied)?,
                 count: 0,
                 instance_count: 0,
+                groups: Vec::new(),
                 rows: Rows::new(),
                 tags: Vec::new(),
             }
@@ -937,6 +979,7 @@ fn rewrite(
     *slot = Some(Draws {
         count: t.records.len() as u32,
         instance_count: t.instances.len() as u32,
+        groups: t.groups.clone(),
         rows: t.rows.clone(),
         tags: tags.to_vec(),
         ..draws
@@ -1342,6 +1385,29 @@ mod tests {
         assert_eq!(drawn(&["guide"]), 0);
         // No tags draws every tag, as Hydra's own filter does.
         assert_eq!(drawn(&[]), 2);
+    }
+
+    #[test]
+    fn records_are_grouped_by_material() {
+        let (mut store, ranges) = drawn(&[("/a", "render"), ("/b", "render"), ("/c", "render")]);
+        let red = store.insert_material("/mtl/red".into());
+        let ids: Vec<u64> = ranges.keys().copied().collect();
+        store.set_material(ids[0], "/mtl/red".into()).unwrap();
+        store.set_material(ids[2], "/mtl/red".into()).unwrap();
+        // An unbound mesh, and one bound to a material Hydra has not made.
+        store.set_material(ids[1], "/mtl/missing".into()).unwrap();
+        let t = draws(&store, &ranges, &[]);
+        let group = |material, first, count| Group {
+            material,
+            first,
+            count,
+        };
+        assert_eq!(t.groups, [group(None, 0, 1), group(Some(red), 1, 2)]);
+        // The records follow the groups, not the meshes' ids.
+        let record = |id| t.rows[&id].record;
+        assert_eq!([record(ids[1]), record(ids[0]), record(ids[2])], [0, 1, 2]);
+        assert_ne!(record(ids[0]), 0);
+        assert_eq!(t.owners, [0, 1, 2]);
     }
 
     #[test]

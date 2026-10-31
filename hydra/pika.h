@@ -235,9 +235,9 @@ int pika_counted_new(const pika_renderer *renderer, const char *type, const char
 int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
 // Draws the store's meshes of the frame's render tags into its data window:
-// color is grey, shaded by the normal against the view direction; depth is
-// OpenGL's window depth, cleared to 1; normals are in world space, turned
-// toward the viewer.
+// color is each mesh's material under a headlight, 18 % grey clay where
+// none is bound; depth is OpenGL's window depth, cleared to 1; normals are
+// in world space, turned toward the viewer.
 // Pixels outside the data window are left as they are.
 // While frames change, the buffers get the frame before this one, which
 // leaves this one's GPU work running while the host works; `*converged` is

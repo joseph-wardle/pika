@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::cache;
-use crate::store::{Network, Node, Value};
+use crate::store::{Connection, Network, Node, Value};
 
 /// A network's MaterialX document and its key.
 #[derive(Debug)]
@@ -74,6 +74,35 @@ const NONE: &Rename = &Rename {
     outputs: &[],
     dropped: &[],
 };
+
+/// The network of meshes with no material bound, or one Pika cannot show:
+/// a clay surface, Lambert at 18 % grey, through the same path as any
+/// other material.
+pub fn clay() -> Network {
+    let mut surface = Node {
+        node_type: "ND_surface".into(),
+        ..Node::default()
+    };
+    let bsdf = Connection {
+        node: "/clay/bsdf".into(),
+        output: "out".into(),
+    };
+    surface.connections.insert("bsdf".into(), bsdf);
+    let mut diffuse = Node {
+        node_type: "ND_oren_nayar_diffuse_bsdf".into(),
+        ..Node::default()
+    };
+    diffuse
+        .params
+        .insert("color".into(), Value::Float(vec![0.18; 3]));
+    Network {
+        nodes: BTreeMap::from([
+            ("/clay/surface".to_owned(), surface),
+            ("/clay/bsdf".to_owned(), diffuse),
+        ]),
+        surface: Some("/clay/surface".into()),
+    }
+}
 
 /// The document for a network, or none when the network has no surface.
 pub fn document(network: &Network) -> Result<Option<Document>, String> {
@@ -194,7 +223,6 @@ fn escape(text: &str) -> String {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::store::Connection;
 
     /// The `network` fixture as husk syncs it: a UsdPreviewSurface reading
     /// a UsdUVTexture through a UsdPrimvarReader_float2.
@@ -362,6 +390,33 @@ pub mod tests {
             document(&spare).unwrap().unwrap().nodes,
             ["surface", "tex", "st", "spare"]
         );
+    }
+
+    #[test]
+    fn clay_is_a_lambert_surface() {
+        let doc = document(&clay()).unwrap().unwrap();
+        assert_eq!(
+            doc.text,
+            "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n  <node name=\"n0\" \
+             nodedef=\"ND_surface\">\n    <input name=\"bsdf\" nodename=\"n1\" />\n  </node>\n  \
+             <node name=\"n1\" nodedef=\"ND_oren_nayar_diffuse_bsdf\">\n  </node>\n  \
+             <surfacematerial name=\"material\" type=\"material\">\n    <input \
+             name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
+             </surfacematerial>\n</materialx>\n"
+        );
+        assert_eq!(doc.nodes, ["/clay/surface", "/clay/bsdf"]);
+        // The grey is a value, packed as a uniform, not structure.
+        let mut white = clay();
+        let bsdf = white.nodes.get_mut("/clay/bsdf").unwrap();
+        bsdf.params
+            .insert("color".into(), Value::Float(vec![1.0; 3]));
+        assert_eq!(document(&white).unwrap().unwrap().hash, doc.hash);
+        let mut rough = clay();
+        let bsdf = rough.nodes.get_mut("/clay/bsdf").unwrap();
+        bsdf.params
+            .insert("roughness".into(), Value::Float(vec![0.5]));
+        assert_eq!(document(&rough).unwrap().unwrap().hash, doc.hash);
+        assert_ne!(document(&fixture()).unwrap().unwrap().hash, doc.hash);
     }
 
     #[test]

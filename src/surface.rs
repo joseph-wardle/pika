@@ -232,7 +232,12 @@ pub fn frame(layout: &Layout, bytes: &mut [u8], eye: [f32; 3], forward: [f32; 3]
     put("u_lightData[0].type", &[1]);
     put("u_lightData[0].direction", &forward.map(f32::to_bits));
     put("u_lightData[0].color", &[1.0f32; 3].map(f32::to_bits));
-    put("u_lightData[0].intensity", &[1.0f32.to_bits()]);
+    // A Lambert surface reflects albedo / π of a light's intensity, so a
+    // headlight of π shows a facing surface's albedo.
+    put(
+        "u_lightData[0].intensity",
+        &[std::f32::consts::PI.to_bits()],
+    );
 }
 
 /// A packable MaterialX type: how many 4-byte words, of what.
@@ -374,6 +379,10 @@ mod tests {
             -1.0
         );
         assert_eq!(bytes[l.offsets["u_numActiveLightSources"]], 1);
+        assert_eq!(
+            f32_at(&bytes, l.offsets["u_lightData[0].intensity"]),
+            std::f32::consts::PI
+        );
 
         let mut wide = fixture();
         let roughness = |network: &mut Network, value| {

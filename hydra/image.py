@@ -74,7 +74,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
             "cage drawn on subdivided meshes", "boundary rules of the interior",
-            "purposes ignored", "culled by box centre", "frame 1's reference"]
+            "purposes ignored", "culled by box centre", "headlight from the eye",
+            "frame 1's reference"]
 HUSK_PURPOSES = ("default", "render")
 USDRECORD_PURPOSES = ("default", "proxy")
 
@@ -353,7 +354,14 @@ def reference(stage, time, width, height, purposes, control=None):
         n[behind] *= -1
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
-    grey = np.clip(dot(n, toward), 0.0, 1.0)
+    # Every mesh is clay until textures: Lambert at 18 % grey under a
+    # headlight of π along the camera's axis, as src/surface.rs sets it, so
+    # a facing surface shows its albedo. MaterialX's BSDFs turn a normal
+    # facing away from the eye toward it before lighting.
+    lit = n.copy()
+    lit[dot(lit, toward) < 0] *= -1
+    light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
+    grey = 0.18 * np.clip(dot(lit, light), 0.0, 1.0)
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":

@@ -265,7 +265,8 @@ impl Instance {
             .queue_priorities(&priorities)];
         // Dynamic rendering, synchronization2 and buffer device addresses are
         // mandatory in Vulkan 1.3. The rest are optional, but every desktop
-        // GPU has them.
+        // GPU has them. Independent blend lets the prepass and the material
+        // pass each write some of the same attachments.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -273,7 +274,8 @@ impl Instance {
             vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
-            .draw_indirect_first_instance(true);
+            .draw_indirect_first_instance(true)
+            .independent_blend(true);
         let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
         let extensions = &extensions[..usize::from(info.memory_budget)];
         let create_info = vk::DeviceCreateInfo::default()
@@ -287,8 +289,8 @@ impl Instance {
         let raw =
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
-                    "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect and \
-                 drawIndirectFirstInstance.",
+                    "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
+                 drawIndirectFirstInstance and independentBlend.",
                     info.name
                 )
             })?;
@@ -591,14 +593,15 @@ impl Drop for Buffer {
 }
 
 /// A graphics pipeline of `module`'s vertex and fragment entry points,
-/// `entries`, rendering triangles into `colors` and a `depth_format`
-/// attachment with `depth`'s test, viewport and scissor dynamic.
+/// `entries`, rendering triangles into `colors` (each attachment's format
+/// and the channels it writes) and a `depth_format` attachment with
+/// `depth`'s test, viewport and scissor dynamic.
 pub fn graphics(
     d: &ash::Device,
     layout: vk::PipelineLayout,
     module: vk::ShaderModule,
     entries: [&std::ffi::CStr; 2],
-    colors: &[vk::Format],
+    colors: &[(vk::Format, vk::ColorComponentFlags)],
     depth_format: vk::Format,
     depth: vk::PipelineDepthStencilStateCreateInfo,
 ) -> Result<vk::Pipeline, String> {
@@ -629,16 +632,15 @@ pub fn graphics(
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let blend_attachments = vec![
-        vk::PipelineColorBlendAttachmentState::default()
-            .color_write_mask(vk::ColorComponentFlags::RGBA);
-        colors.len()
-    ];
+    let blend_attachments: Vec<_> = (colors.iter())
+        .map(|&(_, mask)| vk::PipelineColorBlendAttachmentState::default().color_write_mask(mask))
+        .collect();
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let formats: Vec<_> = colors.iter().map(|&(format, _)| format).collect();
     let dynamic = vk::PipelineDynamicStateCreateInfo::default()
         .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
     let mut rendering = vk::PipelineRenderingCreateInfo::default()
-        .color_attachment_formats(colors)
+        .color_attachment_formats(&formats)
         .depth_attachment_format(depth_format);
     let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)

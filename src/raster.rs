@@ -1,6 +1,7 @@
-//! The mesh pass: one pipeline per color format, drawing the mesh instances
-//! the cull pass kept with a single multi-draw into the color, depth and
-//! normal AOVs.
+//! The prepass: one pipeline per color format, drawing the mesh instances
+//! the cull pass kept with a single multi-draw into the depth buffer and
+//! the depth and normal AOVs. The material pass (`shade`) then colors the
+//! surface it left at each pixel.
 
 use ash::vk;
 
@@ -10,6 +11,7 @@ use crate::target;
 use crate::view::View;
 
 /// The AOV attachments after color, in `shaders/mesh.slang`'s target order.
+/// Color is the material pass's; the prepass leaves it clear.
 /// Vulkan devices need not render to three-channel formats, so normals are
 /// drawn with a fourth.
 pub const DEPTH_AOV: (vk::Format, usize) = (vk::Format::R32_SFLOAT, 4);
@@ -53,7 +55,11 @@ impl Raster {
             .depth_compare_op(vk::CompareOp::GREATER);
         let built: Vec<_> = (COLOR_FORMATS.iter())
             .map(|&format| {
-                let colors = [format, DEPTH_AOV.0, NORMAL_AOV.0];
+                let colors = [
+                    (format, vk::ColorComponentFlags::empty()),
+                    (DEPTH_AOV.0, vk::ColorComponentFlags::RGBA),
+                    (NORMAL_AOV.0, vk::ColorComponentFlags::RGBA),
+                ];
                 gpu::graphics(
                     d,
                     r.layout,
@@ -75,7 +81,8 @@ impl Raster {
 
     /// Records the draws of `view`, after the cull pass, into `cb`, inside
     /// rendering into a target of `color` (one of `COLOR_FORMATS`),
-    /// `DEPTH_AOV` and `NORMAL_AOV`.
+    /// `DEPTH_AOV` and `NORMAL_AOV`. The material pass draws after it,
+    /// inside the same rendering.
     pub fn draw(
         &self,
         cb: vk::CommandBuffer,

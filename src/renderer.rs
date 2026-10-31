@@ -346,11 +346,17 @@ impl Renderer {
                 clears[1],
             ],
         );
-        if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
+        let drawn = bound.as_ref().zip(view.as_deref());
+        if let Some((geometry, view)) = drawn {
             (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
-        target.end_rendering(cb);
         self.commands.mark("draw")?;
+        if let Some((geometry, view)) = drawn {
+            let groups = self.geometry.groups();
+            (self.shade).draw(cb, formats[0].0, target.area(), geometry, groups, view);
+        }
+        target.end_rendering(cb);
+        self.commands.mark("shade")?;
         let read = aovs.each_ref().map(Option::is_some);
         target.readback(cb, &read);
         self.commands.mark("readback")?;

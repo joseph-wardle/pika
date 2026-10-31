@@ -103,7 +103,7 @@ impl Commands {
     }
 
     /// Names the work recorded since the last mark (or `begin`) `label`,
-    /// timing it on the GPU. Call it outside rendering.
+    /// timing it on the GPU, inside or outside rendering.
     pub fn mark(&mut self, label: &'static str) -> Result<(), String> {
         if self.marks.len() + 1 >= QUERIES as usize {
             return Err(format!("a frame has more than {} marks", QUERIES - 1));
