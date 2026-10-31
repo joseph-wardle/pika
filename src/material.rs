@@ -74,12 +74,14 @@ pub struct Document {
 }
 
 /// A USD shader id and the MaterialX nodedef that implements it, with the
-/// inputs and outputs whose names differ and the inputs the nodedef lacks.
+/// inputs, outputs and tokens whose names differ and the inputs the nodedef
+/// lacks.
 struct Rename {
     usd: &'static str,
     nodedef: &'static str,
     inputs: &'static [(&'static str, &'static str)],
     outputs: &'static [(&'static str, &'static str)],
+    tokens: &'static [(&'static str, &'static str)],
     dropped: &'static [&'static str],
 }
 
@@ -89,6 +91,7 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdPreviewSurface_surfaceshader",
         inputs: &[],
         outputs: &[("surface", "out")],
+        tokens: &[],
         dropped: &[],
     },
     Rename {
@@ -96,6 +99,10 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdUVTexture_23",
         inputs: &[],
         outputs: &[],
+        // The nodedef's wrap enum is black, clamp, periodic, mirror.
+        // useMetadata asks for the file's wrap mode; Storm, like Pika, reads
+        // none and repeats.
+        tokens: &[("repeat", "periodic"), ("useMetadata", "periodic")],
         // The texture's colour space is applied when it is loaded.
         dropped: &["sourceColorSpace"],
     },
@@ -104,6 +111,7 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_geompropvalue_vector2",
         inputs: &[("varname", "geomprop"), ("fallback", "default")],
         outputs: &[("result", "out")],
+        tokens: &[],
         dropped: &[],
     },
     Rename {
@@ -111,6 +119,7 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdTransform2d",
         inputs: &[],
         outputs: &[("result", "out")],
+        tokens: &[],
         dropped: &[],
     },
 ];
@@ -121,6 +130,7 @@ const NONE: &Rename = &Rename {
     nodedef: "",
     inputs: &[],
     outputs: &[],
+    tokens: &[],
     dropped: &[],
 };
 
@@ -182,6 +192,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
             if name.contains(':') || rename.dropped.contains(&name.as_str()) {
                 continue;
             }
+            let value = renamed(rename.tokens, value);
             let attributes = format!("type=\"string\" value=\"{}\"", escape(value));
             inputs.insert(renamed(rename.inputs, name), attributes);
         }
@@ -386,6 +397,28 @@ pub mod tests {
             .insert("varname".into(), Value::Text("uv".into()));
         assert_ne!(hash(&edited), hash(&fixture()));
         assert!(text(&edited).contains("value=\"uv\""));
+    }
+
+    #[test]
+    fn usd_wrap_tokens_become_the_nodedefs() {
+        let wrapped = |token: &str| {
+            let mut network = fixture();
+            let tex = network.nodes.get_mut("tex").unwrap();
+            tex.params.insert("wrapS".into(), Value::Text(token.into()));
+            network
+        };
+        let repeat = text(&wrapped("repeat"));
+        assert!(repeat.contains("name=\"wrapS\" type=\"string\" value=\"periodic\""));
+        assert!(!repeat.contains("repeat"));
+        assert_eq!(text(&wrapped("useMetadata")), repeat);
+        // The control: a token both vocabularies share passes through, and
+        // the token is a value, so only UsdUVTexture's are translated.
+        assert!(text(&wrapped("mirror")).contains("value=\"mirror\""));
+        let mut reader = fixture();
+        let st = reader.nodes.get_mut("st").unwrap();
+        st.params
+            .insert("varname".into(), Value::Text("repeat".into()));
+        assert!(text(&reader).contains("name=\"geomprop\" type=\"string\" value=\"repeat\""));
     }
 
     #[test]
