@@ -48,9 +48,16 @@ What the reference encodes:
   (hydra/images/textured.usda) shows the image's bilinear sample, level 0,
   at the hit's primvar, under the image node's address modes, with st
   (0, 0) at the image's bottom-left corner as USD and MaterialX read it, the
-  channels padded with 0 to three. Any other mesh is clay: grey, the normal
-  against the direction toward the eye, clamped. Other materials are
-  refused, not approximated.
+  channels padded with 0 to three. A mesh bound to a material whose surface
+  shader names a MaterialX nodedef (ND_...) the host's libraries do not
+  define is pink, (1, 0, 1), as Pika draws a material it cannot build,
+  when the host hands the network over: husk and UsdImaging's scene-index
+  path do, UsdImaging's legacy path drops a network whose surface shader
+  the shader registry does not know, so Pika sees no surface and draws
+  clay. usdrecord takes the path USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX
+  names, off by default in Houdini 21 and on in 22. Any other mesh is
+  clay: grey, the normal against the direction toward the eye, clamped.
+  Other materials are refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
@@ -61,14 +68,16 @@ Each control perturbs the reference. A control must fail on every scene
 and host whose reference it changes, and must change at least one scene's.
 """
 
+import collections
 import math
 import os
 import subprocess
 import sys
 
+import MaterialX as mx
 import numpy as np
 import OpenImageIO as oiio
-from pxr import CameraUtil, Gf, Usd, UsdGeom, UsdRender, UsdShade
+from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdRender, UsdShade
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
@@ -83,9 +92,18 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
-            "frame 1's reference"]
-HUSK_PURPOSES = ("default", "render")
-USDRECORD_PURPOSES = ("default", "proxy")
+            "failed materials drawn clay", "frame 1's reference"]
+PINK = "pink"
+# What a host hands Pika: the purposes it draws, and whether a material
+# whose surface shader the shader registry does not know arrives with its
+# network (see the module's doc).
+Host = collections.namedtuple("Host", "purposes delivers_unknown")
+HUSK = Host(("default", "render"), True)
+
+
+def usdrecord_host():
+    scene_index = Tf.GetEnvSetting("USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX")
+    return Host(("default", "proxy"), scene_index)
 
 
 def meshes(stage, time, purposes, control=None):
@@ -256,17 +274,38 @@ def upstream(shader, name):
     return UsdShade.Shader(source[0].GetPrim()) if source else None
 
 
-def emission(prim):
-    """The closed form of the mesh's material, or None for clay: the image
-    file, its address modes (u, v) and the primvar it is sampled at, for a
-    MaterialX surface whose emission is a uniform EDF of an image node's
-    vector2 sample, through converts (hydra/images/textured.usda)."""
+def nodedefs():
+    """The host's MaterialX libraries, as the bake tool loads them."""
+    libraries = mx.createDocument()
+    search = mx.FileSearchPath(os.path.join(os.environ["HFS"], "houdini", "materialx"))
+    mx.loadLibraries(["libraries"], search, libraries)
+    return libraries
+
+
+NODEDEFS = nodedefs()
+
+
+def unknown(shader):
+    """Whether the shader names a nodedef the libraries do not define."""
+    return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
+
+
+def emission(prim, host, control=None):
+    """The closed form of the mesh's material, or None for clay: PINK for a
+    surface shader naming a nodedef the libraries do not define, when
+    `host` delivers it; else the image file, its address modes (u, v) and
+    the primvar it is sampled at, for a MaterialX surface whose emission is
+    a uniform EDF of an image node's vector2 sample, through converts
+    (hydra/images/textured.usda)."""
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
     if not material:
         return None
     source = material.GetSurfaceOutput().GetConnectedSource()
     surface = UsdShade.Shader(source[0].GetPrim()) if source else None
-    refuse = ValueError(f"{prim.GetPath()}: the reference knows only clay and the emissive ramp")
+    refuse = ValueError(f"{prim.GetPath()}: the reference knows only clay, pink and the emissive ramp")
+    if surface and unknown(surface):
+        clay = control == "failed materials drawn clay" or not host.delivers_unknown
+        return None if clay else PINK
     if not surface or surface.GetShaderId() != "ND_surface":
         raise refuse
     edf = upstream(surface, "edf")
@@ -316,16 +355,16 @@ def sample(path, st, modes, control=None):
             (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
 
 
-def triangles(stage, time, purposes, control=None):
+def triangles(stage, time, host, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix,
     whether it is left-handed, a face id, and its material's emission with
     the sampled primvar at its corners (None for clay)."""
     out = []
-    for instance, (prim, world) in enumerate(meshes(stage, time, purposes, control)):
+    for instance, (prim, world) in enumerate(meshes(stage, time, host.purposes, control)):
         mesh = UsdGeom.Mesh(prim)
-        emitted = emission(prim)
-        if emitted:
+        emitted = emission(prim, host, control)
+        if emitted and emitted != PINK:
             primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(emitted[2])
             if not primvar or mesh.GetSubdivisionSchemeAttr().Get(time) != UsdGeom.Tokens.none:
                 raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar "
@@ -377,7 +416,8 @@ def triangles(stage, time, purposes, control=None):
                     "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
                     "emission": emitted,
-                    "st": [list(value(st_values, st_interpolation, c)) for c in cs] if emitted else None,
+                    "st": ([list(value(st_values, st_interpolation, c)) for c in cs]
+                           if emitted and emitted != PINK else None),
                 })
             corner += count
     return out
@@ -393,7 +433,7 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, purposes, control=None):
+def reference(stage, time, width, height, host, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
@@ -401,7 +441,7 @@ def reference(stage, time, width, height, purposes, control=None):
     eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)
-    tris = triangles(stage, time, purposes, control)
+    tris = triangles(stage, time, host, control)
     stage.GetSessionLayer().Clear()
     if control == "culled by box centre":
         def seen(p):
@@ -449,8 +489,10 @@ def reference(stage, time, width, height, purposes, control=None):
     light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
     grey = 0.18 * np.clip(dot(lit, light), 0.0, 1.0)
     color = np.c_[grey, grey, grey, np.ones(len(grey))]
-    kinds = sorted({t["emission"] for t in tris if t["emission"]})
-    which = np.array([kinds.index(t["emission"]) if t["emission"] else -1 for t in tris])[i]
+    pink = np.array([t["emission"] == PINK for t in tris])[i]
+    color[pink, :3] = [1, 0, 1]
+    kinds = sorted({t["emission"] for t in tris if t["emission"] and t["emission"] != PINK})
+    which = np.array([kinds.index(t["emission"]) if t["emission"] in kinds else -1 for t in tris])[i]
     for k, emitted in enumerate(kinds):
         on = which == k
         st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
@@ -582,10 +624,19 @@ def usdrecord(scene, out, width):
     return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
 
 
-def references(stage, width, height, purposes):
+def references(stage, width, height, host):
     """The reference and each control's, for each frame."""
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, purposes, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, c) for c in controls} for t in FRAMES}
+
+
+def differs(stage, host):
+    """Whether `host`'s reference can differ from husk's at the same size:
+    by a purpose authored, or a material it does not deliver."""
+    prims = list(stage.Traverse())
+    purposed = any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue() for p in prims)
+    dropped = any(p.IsA(UsdShade.Shader) and unknown(UsdShade.Shader(p)) for p in prims)
+    return purposed or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
 
 
 def check(name, renders, references, aovs):
@@ -622,7 +673,7 @@ def main():
         name = os.path.splitext(os.path.basename(scene))[0]
         stage = Usd.Stage.Open(scene)
         width, height = UsdRender.Settings(stage.GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get()
-        refs = references(stage, width, height, HUSK_PURPOSES)
+        refs = references(stage, width, height, HUSK)
         renders, log = husk(scene, out)
         print(f"{name} in husk ({log}):")
         f, c = check(name, renders, refs, ["color", "depth", "normal"])
@@ -633,9 +684,9 @@ def main():
         # usdrecord takes the image's height from the camera's aspect.
         renders, log = usdrecord(scene, out, width)
         shape = renders[FRAMES[0]]["color"].shape
-        purposed = any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue() for p in stage.Traverse())
-        if shape[:2] != (height, width) or purposed:
-            refs = references(stage, shape[1], shape[0], USDRECORD_PURPOSES)
+        host = usdrecord_host()
+        if shape[:2] != (height, width) or differs(stage, host):
+            refs = references(stage, shape[1], shape[0], host)
         print(f"{name} in usdrecord ({log}):")
         failures += check(f"{name} (usdrecord)", renders, refs, ["color"])[0]
     for control in CONTROLS:

@@ -1,0 +1,62 @@
+sync 1
+material /world/mtl/glow
+  surface surface
+  node bsdf ND_oren_nayar_diffuse_bsdf
+    color float 0.5 0.25 0.125
+    typeName:color text "color3f"
+  node edf ND_uniform_edf
+    color float 0 0.5 0
+    typeName:color text "color3f"
+  node surface ND_surfac
+    bsdf from bsdf out
+    edf from edf out
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/glow"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  st none
+sync 2
+material /world/mtl/glow
+  surface surface
+  node bsdf ND_oren_nayar_diffuse_bsdf
+    color float 0.5 0.25 0.125
+    typeName:color text "color3f"
+  node edf ND_uniform_edf
+    color float 0 0.5 0
+    typeName:color text "color3f"
+  node surface ND_surface
+    bsdf from bsdf out
+    edf from edf out
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/glow"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  st none

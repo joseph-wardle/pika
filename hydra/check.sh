@@ -12,7 +12,8 @@
 # Pika's store dump with the scene's .dump, which was written by hand. Each
 # run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
 # pass timed and the driver's memory budget read, and frame 2 must have
-# compiled a surface and baked a texture only where the edit calls for one.
+# compiled a surface and baked a texture only where the edit calls for one,
+# and a material that cannot be built must be warned of once.
 #
 # Last it renders hydra/scenes/cube.usda through UsdImagingGL in hython on
 # the same display (hydra/engine.py), as usdview renders, and checks that the
@@ -114,18 +115,24 @@ fixture() {
         fail "$name: the summary has no memory budget"
     # An edit to a value or an asset path compiles nothing; one to the
     # network's structure compiles its surface; a texture is baked once per
-    # file. The two scenes that edit a material are each other's control, and
-    # each must compile in frame 1, so a counter that never moves fails.
-    local edit="0 0" compiled _ second
+    # file. The scenes that edit a material are each other's control, and
+    # each must compile in one frame, so a counter that never moves fails.
+    # A material that cannot be built is warned of when it is tried, which
+    # is once, though husk renders a frame more than once; the repair
+    # compiles it, with no second warning.
+    local first=0 edit="0 0" warnings=0 compiled _ second
     case $name in
-        network) edit="0 1" ;;
-        rewired) edit="1 0" ;;
+        network) first=1 edit="0 1" ;;
+        rewired) first=1 edit="1 0" ;;
+        broken) edit="1 0" warnings=1 ;;
     esac
     read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats")"
     [ "$second" = "$edit" ] ||
         fail "$name: frame 2 compiled and baked $second, not $edit"
-    [ "$edit" = "0 0" ] || [ "$compiled" = 1 ] ||
-        fail "$name: frame 1 compiled $compiled surfaces, not 1"
+    [ "$compiled" = "$first" ] ||
+        fail "$name: frame 1 compiled $compiled surfaces, not $first"
+    [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
+        fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader

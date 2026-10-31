@@ -134,9 +134,8 @@ const NONE: &Rename = &Rename {
     dropped: &[],
 };
 
-/// The network of meshes with no material bound, or one Pika cannot show:
-/// a clay surface, Lambert at 18 % grey, through the same path as any
-/// other material.
+/// The network of meshes with no material bound: a clay surface, Lambert
+/// at 18 % grey, through the same path as any other material.
 pub fn clay() -> Network {
     let mut surface = Node {
         node_type: "ND_surface".into(),
@@ -160,6 +159,34 @@ pub fn clay() -> Network {
             ("/clay/bsdf".to_owned(), diffuse),
         ]),
         surface: Some("/clay/surface".into()),
+    }
+}
+
+/// The network of a material Pika could not build: an unlit magenta
+/// emission, an error under any lighting.
+pub fn pink() -> Network {
+    let mut surface = Node {
+        node_type: "ND_surface".into(),
+        ..Node::default()
+    };
+    let edf = Connection {
+        node: "/pink/edf".into(),
+        output: "out".into(),
+    };
+    surface.connections.insert("edf".into(), edf);
+    let mut emission = Node {
+        node_type: "ND_uniform_edf".into(),
+        ..Node::default()
+    };
+    emission
+        .params
+        .insert("color".into(), Value::Float(vec![1.0, 0.0, 1.0]));
+    Network {
+        nodes: BTreeMap::from([
+            ("/pink/surface".to_owned(), surface),
+            ("/pink/edf".to_owned(), emission),
+        ]),
+        surface: Some("/pink/surface".into()),
     }
 }
 
@@ -499,6 +526,22 @@ pub mod tests {
             .insert("roughness".into(), Value::Float(vec![0.5]));
         assert_eq!(document(&rough).unwrap().unwrap().hash, doc.hash);
         assert_ne!(document(&fixture()).unwrap().unwrap().hash, doc.hash);
+    }
+
+    #[test]
+    fn pink_is_an_unlit_emission() {
+        let doc = document(&pink()).unwrap().unwrap();
+        assert_eq!(
+            doc.text,
+            "<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n  <node name=\"n0\" \
+             nodedef=\"ND_surface\">\n    <input name=\"edf\" nodename=\"n1\" />\n  </node>\n  \
+             <node name=\"n1\" nodedef=\"ND_uniform_edf\">\n  </node>\n  \
+             <surfacematerial name=\"material\" type=\"material\">\n    <input \
+             name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
+             </surfacematerial>\n</materialx>\n"
+        );
+        assert_eq!(doc.nodes, ["/pink/surface", "/pink/edf"]);
+        assert_ne!(document(&clay()).unwrap().unwrap().hash, doc.hash);
     }
 
     #[test]

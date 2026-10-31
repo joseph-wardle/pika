@@ -177,10 +177,7 @@ impl Bake {
             .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
         if !output.status.success() {
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "the bake tool failed:\n{}",
-                String::from_utf8_lossy(&output.stderr).trim_end()
-            ));
+            return Err(failed(&output));
         }
         std::fs::rename(&tmp, &path)
             .map_err(|e| format!("cannot move {} into place: {e}", tmp.display()))?;
@@ -243,12 +240,18 @@ fn run(document: &Document, dir: &Path) -> Result<(), String> {
         .output()
         .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "the bake tool failed:\n{}",
-            String::from_utf8_lossy(&output.stderr).trim_end()
-        ));
+        return Err(failed(&output));
     }
     Ok(())
+}
+
+/// The tool's complaint, on one line so a warning quoting it stays one.
+fn failed(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!(
+        "the bake tool failed: {}",
+        stderr.trim().replace('\n', "; ")
+    )
 }
 
 #[cfg(test)]
