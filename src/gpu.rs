@@ -266,7 +266,8 @@ impl Instance {
         // Dynamic rendering, synchronization2 and buffer device addresses are
         // mandatory in Vulkan 1.3. The rest are optional, but every desktop
         // GPU has them. Independent blend lets the prepass and the material
-        // pass each write some of the same attachments.
+        // pass each write some of the same attachments; the textures are
+        // block compressed.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -275,7 +276,8 @@ impl Instance {
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
-            .independent_blend(true);
+            .independent_blend(true)
+            .texture_compression_bc(true);
         let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
         let extensions = &extensions[..usize::from(info.memory_budget)];
         let create_info = vk::DeviceCreateInfo::default()
@@ -290,7 +292,7 @@ impl Instance {
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
                     "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
-                 drawIndirectFirstInstance and independentBlend.",
+                 drawIndirectFirstInstance, independentBlend and textureCompressionBC.",
                     info.name
                 )
             })?;

@@ -28,11 +28,11 @@ pub fn vertex_stage(manifest: &Manifest) -> Result<String, String> {
             "normalWorld" => "p.normal".to_owned(),
             "tangentWorld" => "tangent(p.normal)".to_owned(),
             "bitangentWorld" => "cross(p.normal, tangent(p.normal))".to_owned(),
-            // Primvars reach the vertex table with textures.
-            name if name.starts_with("i_geomprop_") => format!("{}(0)", slang_type(&v.kind)?),
+            "i_geomprop_st" => "p.st".to_owned(),
             name => {
                 return Err(format!(
-                    "the surface reads {name}, which Pika's vertex stage does not provide"
+                    "the surface reads {name}, which Pika's vertex stage does not provide \
+                     (of the primvars, it provides st)"
                 ));
             }
         };
@@ -40,21 +40,6 @@ pub fn vertex_stage(manifest: &Manifest) -> Result<String, String> {
     }
     text.push_str("    return o;\n}\n");
     Ok(text)
-}
-
-fn slang_type(kind: &str) -> Result<&'static str, String> {
-    Ok(match kind {
-        "float" => "float",
-        "vector2" => "float2",
-        "vector3" | "color3" => "float3",
-        "vector4" | "color4" => "float4",
-        "integer" => "int",
-        _ => {
-            return Err(format!(
-                "a varying of type {kind} has no Slang type in Pika"
-            ));
-        }
-    })
 }
 
 /// The uniform block's byte layout and its textures' bindings, in
@@ -195,10 +180,7 @@ pub fn pack(
         };
         let offset = *(layout.offsets.get(&uniform.name))
             .ok_or_else(|| format!("the reflection has no uniform {}", uniform.name))?;
-        let (index, input) = (uniform.name.strip_prefix('n'))
-            .and_then(|rest| rest.split_once('_'))
-            .and_then(|(i, input)| Some((i.parse::<usize>().ok()?, input)))
-            .ok_or_else(|| format!("uniform {} is not a node's input", uniform.name))?;
+        let (index, input) = node_input(&uniform.name)?;
         let path = (document.nodes.get(index))
             .ok_or_else(|| format!("uniform {} names a node the document lacks", uniform.name))?;
         let node = &network.nodes[path];
@@ -215,6 +197,35 @@ pub fn pack(
         }
     }
     Ok(())
+}
+
+/// The node and input a generated variable stands for: `n1_file` is node
+/// 1's `file`.
+pub fn node_input(name: &str) -> Result<(usize, &str), String> {
+    (name.strip_prefix('n'))
+        .and_then(|rest| rest.split_once('_'))
+        .and_then(|(i, input)| Some((i.parse::<usize>().ok()?, input)))
+        .ok_or_else(|| format!("uniform {name} is not a node's input"))
+}
+
+/// The address modes of node `index`'s texture, u then v, as packed in
+/// `bytes`: the UsdUVTexture `wrapS`/`wrapT` or the image
+/// `uaddressmode`/`vaddressmode` integers, whose nodedefs share one
+/// enumeration (black or constant, clamp, periodic, mirror); periodic
+/// when the node has neither.
+pub fn address_modes(layout: &Layout, bytes: &[u8], index: usize) -> [u32; 2] {
+    let read = |names: [&str; 2]| {
+        names.iter().find_map(|name| {
+            let offset = *layout.offsets.get(&format!("n{index}_{name}"))?;
+            Some(u32::from_ne_bytes(
+                bytes[offset..offset + 4].try_into().unwrap(),
+            ))
+        })
+    };
+    [
+        read(["wrapS", "uaddressmode"]).unwrap_or(2),
+        read(["wrapT", "vaddressmode"]).unwrap_or(2),
+    ]
 }
 
 /// Writes what the generated light loop reads: the eye, and the headlight,
@@ -372,6 +383,10 @@ mod tests {
         );
         // The wrap token was compiled in as the nodedef's integer.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 1);
+        assert_eq!(address_modes(&l, &bytes, 1), [1, 2]);
+        assert_eq!(address_modes(&l, &bytes, 0), [2, 2], "no texture: periodic");
+        assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
+        assert!(node_input("u_viewPosition").is_err());
 
         frame(&l, &mut bytes, [1.0, 2.0, 3.0], [0.0, 0.0, -1.0]);
         assert_eq!(

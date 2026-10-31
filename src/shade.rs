@@ -1,9 +1,11 @@
 //! The material pass: each surface's pipelines, built from the bake tool's
 //! pixel stage and the vertex stage written for it, each material's
-//! uniform block and descriptor set, bound to its surface, and the draw of
-//! each material's meshes after the prepass, lit by a headlight.
+//! uniform block, textures and descriptor set, bound to its surface, and
+//! the draw of each material's meshes after the prepass, lit by a
+//! headlight.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use ash::vk;
 
@@ -17,18 +19,19 @@ use crate::shader;
 use crate::store::{Moved, Store};
 use crate::surface::{self, Layout};
 use crate::target;
+use crate::texture::Textures;
 use crate::transform::Camera;
 use crate::view::View;
+
+/// The texels a texture's longest side is capped at, until the cap is a
+/// render setting.
+const CAP: u32 = 4096;
 
 pub struct Shade {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
     bake: Bake,
-    sampler: vk::Sampler,
-    /// A 1×1 white array texture, bound where no texture is loaded.
-    white: White,
-    /// Whether `white` has been cleared and laid out for sampling.
-    ready: bool,
+    textures: Textures,
     /// By document hash.
     surfaces: BTreeMap<u64, Surface>,
     /// By the store's material id.
@@ -56,13 +59,8 @@ struct Uniforms {
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-}
-
-struct White {
-    device: ash::Device,
-    image: vk::Image,
-    memory: vk::DeviceMemory,
-    view: vk::ImageView,
+    /// The baked textures bound, in the surface's order.
+    textures: Vec<PathBuf>,
 }
 
 /// What one frame's `update` did.
@@ -71,58 +69,36 @@ pub struct Update {
     pub compiled: usize,
 }
 
-const WHITE_RANGE: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
-    aspect_mask: vk::ImageAspectFlags::COLOR,
-    base_mip_level: 0,
-    level_count: 1,
-    base_array_layer: 0,
-    layer_count: 1,
-};
-
 impl Shade {
     pub fn new(device: &gpu::Device) -> Result<Self, String> {
-        let d = &device.raw;
         let bake = Bake::new()?;
-        let white = White::new(device)?;
-        let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .max_lod(vk::LOD_CLAMP_NONE);
-        // SAFETY: `d` is live and `sampler_info` outlives the call.
-        let sampler = unsafe { d.create_sampler(&sampler_info, None) }
-            .map_err(|e| format!("vkCreateSampler failed: {e}"))?;
+        let textures = Textures::new(device);
         let clay = material::clay();
         let document = material::document(&clay)
             .map_err(|e| format!("the clay material: {e}"))?
             .expect("clay has a surface");
         let (surface, _) = Shade::build(&bake, device, &document)
             .map_err(|e| format!("the clay material: {e}"))?;
-        let mut uniforms = Uniforms::new(device, &surface, document.hash, &white, sampler);
-        if let Ok(u) = &mut uniforms {
-            let (manifest, layout) = (&surface.manifest, &surface.layout);
-            surface::pack(manifest, layout, &document, &clay, u.buffer.bytes())
-                .map_err(|e| format!("the clay material: {e}"))?;
-        }
+        let mut uniforms = Uniforms::new(device, &surface, document.hash)
+            .map_err(|e| format!("the clay material: {e}"))?;
+        let (manifest, layout) = (&surface.manifest, &surface.layout);
+        surface::pack(manifest, layout, &document, &clay, uniforms.buffer.bytes())
+            .map_err(|e| format!("the clay material: {e}"))?;
+        uniforms.bind(layout, &[]);
         Ok(Self {
-            device: d.clone(),
+            device: device.raw.clone(),
             bake,
-            sampler,
-            white,
-            ready: false,
+            textures,
             surfaces: BTreeMap::from([(document.hash, surface)]),
             materials: BTreeMap::new(),
-            clay: uniforms?,
+            clay: uniforms,
         })
     }
 
-    /// Builds the surface of each material whose network changed, and
-    /// writes its uniforms, then every material's eye and headlight from
-    /// `camera`. Records into `cb`, outside rendering, what the first call
-    /// needs on the GPU. No GPU work may be pending.
+    /// Builds the surface of each material whose network changed, bakes
+    /// and loads its textures and writes its uniforms, then every
+    /// material's eye and headlight from `camera`. Records into `cb`,
+    /// outside rendering, the uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -131,10 +107,7 @@ impl Shade {
         camera: &Camera,
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
-        if !self.ready {
-            self.white.clear(cb);
-            self.ready = true;
-        }
+        self.textures.begin();
         self.materials
             .retain(|id, _| store.materials().contains_key(id));
         let mut compiled = 0;
@@ -159,22 +132,46 @@ impl Shade {
             let uniforms = match self.materials.get_mut(id) {
                 Some(u) if u.hash == document.hash => u,
                 _ => {
-                    let u =
-                        Uniforms::new(device, surface, document.hash, &self.white, self.sampler)?;
+                    let u = Uniforms::new(device, surface, document.hash)?;
                     self.materials.insert(*id, u);
                     self.materials.get_mut(id).unwrap()
                 }
             };
-            let bytes = uniforms.buffer.bytes();
+            let (manifest, layout) = (&surface.manifest, &surface.layout);
             surface::pack(
-                &surface.manifest,
-                &surface.layout,
+                manifest,
+                layout,
                 &document,
                 network,
-                bytes,
+                uniforms.buffer.bytes(),
             )
             .map_err(at)?;
+            let mut bindings = Vec::new();
+            uniforms.textures.clear();
+            for name in &manifest.textures {
+                let (index, input) = surface::node_input(name).map_err(at)?;
+                let path = (document.nodes.get(index))
+                    .ok_or_else(|| at(format!("{name} names a node the document lacks")))?;
+                let node = &network.nodes[path];
+                let source = material::source(node, material::store_input(node, input))
+                    .map_err(|e| at(format!("{path}'s {input} {e}")))?;
+                let file = Path::new(&source.file);
+                let baked = (self.bake)
+                    .texture(file, &source.space, source.encoding, CAP)
+                    .map_err(at)?;
+                let view = self.textures.load(device, cb, &baked).map_err(at)?;
+                let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
+                let sampler = self.textures.sampler(modes).map_err(at)?;
+                bindings.push((view, sampler));
+                uniforms.textures.push(baked);
+            }
+            uniforms.bind(layout, &bindings);
         }
+        let used: BTreeSet<PathBuf> = (self.materials.values())
+            .flat_map(|u| u.textures.iter().cloned())
+            .collect();
+        self.textures.retain(&used);
+
         let [x, y, z, w] = camera.eye;
         // An orthographic camera's eye is the direction toward the viewer:
         // the generated code takes a position, so it is put far along it,
@@ -258,23 +255,11 @@ impl Shade {
     }
 
     pub fn memory(&self) -> gpu::Memory {
-        let mut memory = gpu::Memory {
-            device: self.white.bytes(),
-            host: 0,
-        };
+        let mut memory = self.textures.memory();
         for u in self.materials.values().chain([&self.clay]) {
             memory += u.buffer.memory();
         }
         memory
-    }
-}
-
-impl Drop for Shade {
-    fn drop(&mut self) {
-        // The surfaces and materials drop after this, before the device.
-        // SAFETY: the sampler was created on `device`, and the owner's
-        // target waited for idle before this drops (field order).
-        unsafe { self.device.destroy_sampler(self.sampler, None) };
     }
 }
 
@@ -388,13 +373,8 @@ impl Drop for Surface {
 }
 
 impl Uniforms {
-    fn new(
-        device: &gpu::Device,
-        surface: &Surface,
-        hash: u64,
-        white: &White,
-        sampler: vk::Sampler,
-    ) -> Result<Self, String> {
+    /// A block and a set for `surface`, with nothing bound yet.
+    fn new(device: &gpu::Device, surface: &Surface, hash: u64) -> Result<Self, String> {
         let d = &device.raw;
         let layout = &surface.layout;
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -432,6 +412,7 @@ impl Uniforms {
             buffer,
             pool,
             set: vk::DescriptorSet::null(),
+            textures: Vec::new(),
         };
         let set_layouts = [surface.set_layout];
         let set_info = vk::DescriptorSetAllocateInfo::default()
@@ -439,39 +420,52 @@ impl Uniforms {
             .set_layouts(&set_layouts);
         u.set = unsafe { d.allocate_descriptor_sets(&set_info) }
             .map_err(|e| format!("vkAllocateDescriptorSets failed: {e}"))?[0];
+        Ok(u)
+    }
 
+    /// Writes the set: the block, and each of `layout`'s textures from
+    /// `bindings` in order. The GPU must not be reading the set.
+    fn bind(&self, layout: &Layout, bindings: &[(vk::ImageView, vk::Sampler)]) {
+        assert_eq!(bindings.len(), layout.textures.len());
         let buffer_info = [vk::DescriptorBufferInfo::default()
-            .buffer(u.buffer.raw)
+            .buffer(self.buffer.raw)
             .range(vk::WHOLE_SIZE)];
-        let image_info = [vk::DescriptorImageInfo::default()
-            .image_view(white.view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        let sampler_info = [vk::DescriptorImageInfo::default().sampler(sampler)];
+        let images: Vec<_> = (bindings.iter())
+            .map(|&(view, sampler)| {
+                [
+                    vk::DescriptorImageInfo::default()
+                        .image_view(view)
+                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+                    vk::DescriptorImageInfo::default().sampler(sampler),
+                ]
+            })
+            .collect();
         let mut writes = vec![
             vk::WriteDescriptorSet::default()
-                .dst_set(u.set)
+                .dst_set(self.set)
                 .dst_binding(layout.block)
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(&buffer_info),
         ];
-        for texture in &layout.textures {
+        for (texture, info) in layout.textures.iter().zip(&images) {
             writes.push(
                 vk::WriteDescriptorSet::default()
-                    .dst_set(u.set)
+                    .dst_set(self.set)
                     .dst_binding(texture.image)
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(&image_info),
+                    .image_info(&info[..1]),
             );
             writes.push(
                 vk::WriteDescriptorSet::default()
-                    .dst_set(u.set)
+                    .dst_set(self.set)
                     .dst_binding(texture.sampler)
                     .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .image_info(&sampler_info),
+                    .image_info(&info[1..]),
             );
         }
-        unsafe { d.update_descriptor_sets(&writes, &[]) };
-        Ok(u)
+        // SAFETY: the set, buffer, views and samplers were created on
+        // `device`, which is live, and the infos outlive the call.
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }
 }
 
@@ -481,102 +475,5 @@ impl Drop for Uniforms {
         // SAFETY: the pool was created on `device`, and the owner's target
         // waited for idle before this drops (field order).
         unsafe { self.device.destroy_descriptor_pool(self.pool, None) };
-    }
-}
-
-impl White {
-    fn new(device: &gpu::Device) -> Result<Self, String> {
-        let d = &device.raw;
-        let format = vk::Format::R8G8B8A8_UNORM;
-        let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width: 1,
-                height: 1,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
-        let mut w = Self {
-            device: d.clone(),
-            image: vk::Image::null(),
-            memory: vk::DeviceMemory::null(),
-            view: vk::ImageView::null(),
-        };
-        // SAFETY (this and every call below): `d` is live, each info struct
-        // outlives its call, and each handle passed in was created on `d`
-        // just above. `drop` destroys what was made before an error.
-        w.image = unsafe { d.create_image(&info, None) }
-            .map_err(|e| format!("vkCreateImage (1×1 {format:?}) failed: {e}"))?;
-        let needs = unsafe { d.get_image_memory_requirements(w.image) };
-        let flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        w.memory = gpu::allocate(device, needs, flags, vk::MemoryAllocateFlags::empty())?;
-        unsafe { d.bind_image_memory(w.image, w.memory, 0) }
-            .map_err(|e| format!("vkBindImageMemory failed: {e}"))?;
-        // Every texture is an array: a UDIM set is one, with a layer per tile.
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(w.image)
-            .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
-            .format(format)
-            .subresource_range(WHITE_RANGE);
-        w.view = unsafe { d.create_image_view(&view_info, None) }
-            .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
-        Ok(w)
-    }
-
-    /// Records into `cb`, outside rendering, the clear to white and the
-    /// move into the layout the material pass samples.
-    fn clear(&self, cb: vk::CommandBuffer) {
-        let to_clear = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::NONE)
-            .dst_stage_mask(vk::PipelineStageFlags2::CLEAR)
-            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
-            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .image(self.image)
-            .subresource_range(WHITE_RANGE);
-        let to_sample = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::CLEAR)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-            .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-            .image(self.image)
-            .subresource_range(WHITE_RANGE);
-        let white = vk::ClearColorValue { float32: [1.0; 4] };
-        let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, and the image was
-        // created on `d` with TRANSFER_DST usage.
-        unsafe {
-            let barriers = [to_clear];
-            let barrier = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            d.cmd_pipeline_barrier2(cb, &barrier);
-            let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-            d.cmd_clear_color_image(cb, self.image, layout, &white, &[WHITE_RANGE]);
-            let barriers = [to_sample];
-            let barrier = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            d.cmd_pipeline_barrier2(cb, &barrier);
-        }
-    }
-
-    fn bytes(&self) -> u64 {
-        // SAFETY: the image was created on `device`, which is live.
-        unsafe { self.device.get_image_memory_requirements(self.image) }.size
-    }
-}
-
-impl Drop for White {
-    fn drop(&mut self) {
-        // SAFETY: every handle was created on `device` or is null, and the
-        // owner's target waited for idle before this drops (field order).
-        unsafe {
-            self.device.destroy_image_view(self.view, None);
-            self.device.destroy_image(self.image, None);
-            self.device.free_memory(self.memory, None);
-        }
     }
 }

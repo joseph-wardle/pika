@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
     Connection, InstancePrimvars, Instancing, Interpolation, Network, Node, Normals, Refined,
-    Scheme, Subset, Topology, Value,
+    Scheme, St, Subset, Topology, Value,
 };
 
 pub const OK: i32 = 0;
@@ -511,6 +511,38 @@ pub unsafe extern "C" fn pika_mesh_normals(
 pub unsafe extern "C" fn pika_mesh_no_normals(renderer: *const Handle, id: u64) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.store.set_normals(id, None))
+}
+
+/// # Safety
+/// `renderer` must be live, `interpolation` a NUL-terminated string and
+/// `st` valid for `count` reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_st(
+    renderer: *const Handle,
+    id: u64,
+    interpolation: *const c_char,
+    st: *const [f32; 2],
+    count: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer, the string and the array.
+        let (handle, token) = unsafe { (&*renderer, string(interpolation)?) };
+        // SAFETY: as above.
+        let values = unsafe { slice(st, count) }.to_vec();
+        let st = St {
+            interpolation: Interpolation::from_token(&token)?,
+            values,
+        };
+        lock(handle)?.store.set_st(id, Some(st))
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_no_st(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.set_st(id, None))
 }
 
 /// # Safety

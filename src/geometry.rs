@@ -25,12 +25,14 @@ use ash::vk;
 
 use crate::gpu::{self, Buffer};
 use crate::smooth::{self, Smooth};
-use crate::store::{Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store};
+use crate::store::{Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, St, Store};
 use crate::subdiv::{self, Subdiv};
 use crate::transform::{Instance, instance_transforms, multiply};
 
 /// A vertex's normal index when its normal is its point's smooth normal.
 const SMOOTH: u32 = u32::MAX;
+/// A vertex's st index when its mesh has no st.
+const NONE: u32 = u32::MAX;
 
 /// Where one mesh's data lives in the shared buffers.
 struct Range {
@@ -42,6 +44,8 @@ struct Range {
     first_cage: Option<u64>,
     first_normal: u64,
     normal_count: usize,
+    first_st: u64,
+    st_count: usize,
     first_vertex: i32,
     first_index: u32,
     index_count: u32,
@@ -68,9 +72,13 @@ struct Layout {
     /// authored.
     smooth: Buffer,
     adjacency: Adjacency,
-    /// Point and normal index (or `SMOOTH`) per unique pair of them, every
-    /// mesh's in turn.
+    /// xy per st value, as authored: per point or corner.
+    st: Buffer,
+    /// Point and normal index (or `SMOOTH`) per unique triple of them and
+    /// the st index, every mesh's in turn.
     vertices: Buffer,
+    /// The st index (or `NONE`) per vertex.
+    vertex_st: Buffer,
     /// Three vertex indices per triangle, counted from the mesh's first vertex.
     indices: Buffer,
 }
@@ -154,6 +162,8 @@ pub struct Bound {
     pub normals: vk::DeviceAddress,
     pub smooth: vk::DeviceAddress,
     pub vertices: vk::DeviceAddress,
+    pub st: vk::DeviceAddress,
+    pub vertex_st: vk::DeviceAddress,
     pub instances: vk::DeviceAddress,
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
@@ -242,6 +252,9 @@ impl Geometry {
             if rebuilt || moved.normals.contains(&id) {
                 copies.extend(normal_upload(mesh, range, layout));
             }
+            if rebuilt || moved.st.contains(&id) {
+                copies.extend(st_upload(mesh, range, layout));
+            }
         }
         if let Some(p) = &patched {
             copies.extend(patch_uploads(p, draws));
@@ -313,6 +326,8 @@ impl Geometry {
             normals: layout.normals.address,
             smooth: layout.smooth.address,
             vertices: layout.vertices.address,
+            st: layout.st.address,
+            vertex_st: layout.vertex_st.address,
             instances: draws.instances.address,
             owners: draws.owners.address,
             boxes: draws.boxes.address,
@@ -341,7 +356,9 @@ impl Geometry {
                 &l.smooth,
                 &l.adjacency.offsets,
                 &l.adjacency.corners,
+                &l.st,
                 &l.vertices,
+                &l.vertex_st,
                 &l.indices,
             ]
         });
@@ -356,9 +373,10 @@ impl Geometry {
 }
 
 /// The uploads of a rebuilt layout's tables.
-fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 7] {
+fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 8] {
     [
         Upload::table(bytes(&t.vertices), &l.vertices),
+        Upload::table(bytes(&t.vertex_st), &l.vertex_st),
         Upload::table(bytes(&t.indices), &l.indices),
         Upload::table(bytes(&t.corner_offsets), &l.adjacency.offsets),
         Upload::table(bytes(&t.corners), &l.adjacency.corners),
@@ -392,6 +410,18 @@ fn normal_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<U
         bytes: bytes(&normals.values),
         buffer: layout.normals.raw,
         offset: range.first_normal * 12,
+    })
+}
+
+/// The upload of a mesh's st, when it is drawn with it.
+fn st_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<Upload<'a>> {
+    if range.st_count == 0 {
+        return None;
+    }
+    Some(Upload {
+        bytes: bytes(&authored_st(mesh)?.values),
+        buffer: layout.st.raw,
+        offset: range.first_st * 8,
     })
 }
 
@@ -464,6 +494,7 @@ fn upload(
 /// every mesh, before upload.
 struct Tables {
     vertices: Vec<[u32; 2]>,
+    vertex_st: Vec<u32>,
     indices: Vec<u32>,
     /// One per point, then the end of the last point's corners.
     corner_offsets: Vec<u32>,
@@ -480,6 +511,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
     let mut ranges = BTreeMap::new();
     let mut tables = Tables {
         vertices: Vec::new(),
+        vertex_st: Vec::new(),
         indices: Vec::new(),
         corner_offsets: Vec::new(),
         corners: Vec::new(),
@@ -487,7 +519,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
         stencil_indices: Vec::new(),
         stencil_weights: Vec::new(),
     };
-    let (mut points, mut cage, mut normals) = (0u64, 0u64, 0u64);
+    let (mut points, mut cage, mut normals, mut sts) = (0u64, 0u64, 0u64, 0u64);
     let mut refined_count = 0;
     for refined_pass in [true, false] {
         for (&id, mesh) in store.meshes() {
@@ -502,17 +534,20 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             let first_corner = tables.corners.len();
             let first_entry = tables.stencil_indices.len();
             let normal_count = authored(mesh).map_or(0, |n| n.values.len());
+            let st_count = authored_st(mesh).map_or(0, |s| s.values.len());
             let first_cage = refined_pass.then_some(cage);
             let first = Firsts {
                 point: points as u32,
                 cage: cage as u32,
                 normal: normals as u32,
+                st: sts as u32,
             };
             let drawn = match triangulate(mesh, first, &mut tables) {
                 Ok(n) => n,
                 Err(e) => {
                     eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
                     tables.vertices.truncate(first_vertex);
+                    tables.vertex_st.truncate(first_vertex);
                     tables.indices.truncate(first_index);
                     tables.corner_offsets.truncate(points as usize);
                     tables.corners.truncate(first_corner);
@@ -532,6 +567,8 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     first_cage,
                     first_normal: normals,
                     normal_count,
+                    first_st: sts,
+                    st_count,
                     first_vertex: first_vertex as i32,
                     first_index: first_index as u32,
                     index_count: (tables.indices.len() - first_index) as u32,
@@ -540,6 +577,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             );
             points += drawn as u64;
             normals += normal_count as u64;
+            sts += st_count as u64;
             if refined_pass {
                 cage += p.len() as u64;
             }
@@ -572,7 +610,9 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             offsets: Buffer::device_local(device, size(&tables.corner_offsets), storage)?,
             corners: Buffer::device_local(device, size(&tables.corners), storage)?,
         },
+        st: Buffer::device_local(device, sts * 8, storage)?,
         vertices: Buffer::device_local(device, size(&tables.vertices), storage)?,
+        vertex_st: Buffer::device_local(device, size(&tables.vertex_st), storage)?,
         indices: Buffer::device_local(device, size(&tables.indices), index)?,
         ranges,
     };
@@ -628,12 +668,23 @@ fn authored(mesh: &Mesh) -> Option<&Normals> {
     }
 }
 
+/// The st a mesh is drawn with, when it has one and is not subdivided:
+/// refining st with the points needs face-varying stencils, which the
+/// delegate does not build yet.
+fn authored_st(mesh: &Mesh) -> Option<&St> {
+    match (&mesh.topology, &mesh.st) {
+        (Some(t), Some(Some(s))) if t.scheme == Scheme::None => Some(s),
+        _ => None,
+    }
+}
+
 /// Where a mesh's data starts in each buffer.
 #[derive(Clone, Copy)]
 struct Firsts {
     point: u32,
     cage: u32,
     normal: u32,
+    st: u32,
 }
 
 /// The faces a mesh is drawn as: its refined ones, or its cage's.
@@ -646,9 +697,9 @@ struct Faces<'a> {
 
 /// Appends a mesh's vertex table and its faces but the holes, split into
 /// triangles by a fan from each face's first corner, its points' corners
-/// and, when refined, its stencils. A vertex is a unique pair of point and
-/// normal; both indices count from the start of their buffers. Returns the
-/// points drawn.
+/// and, when refined, its stencils. A vertex is a unique triple of point,
+/// normal and st; each index counts from the start of its buffer. Returns
+/// the points drawn.
 fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize, String> {
     let (Some(topology), Some(points)) = (&mesh.topology, &mesh.points) else {
         return Ok(0);
@@ -693,21 +744,33 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
             counts.len()
         ));
     }
+    let expected = |interpolation: Interpolation| match interpolation {
+        Interpolation::Vertex | Interpolation::Varying => points.len(),
+        Interpolation::FaceVarying => corners.len(),
+        Interpolation::Uniform => counts.len(),
+        Interpolation::Constant => 1,
+    };
     let normals = authored(mesh);
-    if let Some(n) = normals {
-        let expected = match n.interpolation {
-            Interpolation::Vertex | Interpolation::Varying => points.len(),
-            Interpolation::FaceVarying => corners.len(),
-            Interpolation::Uniform => counts.len(),
-            Interpolation::Constant => 1,
-        };
-        if n.values.len() != expected {
-            return Err(format!(
-                "{} normals for {:?} interpolation, which needs {expected}",
-                n.values.len(),
-                n.interpolation
-            ));
-        }
+    if let Some(n) = normals
+        && n.values.len() != expected(n.interpolation)
+    {
+        return Err(format!(
+            "{} normals for {:?} interpolation, which needs {}",
+            n.values.len(),
+            n.interpolation,
+            expected(n.interpolation)
+        ));
+    }
+    let st = authored_st(mesh);
+    if let Some(s) = st
+        && s.values.len() != expected(s.interpolation)
+    {
+        return Err(format!(
+            "{} st values for {:?} interpolation, which needs {}",
+            s.values.len(),
+            s.interpolation,
+            expected(s.interpolation)
+        ));
     }
     match normals {
         Some(_) => (tables.corner_offsets).extend(std::iter::repeat_n(
@@ -718,17 +781,27 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
     }
 
     let first_vertex = tables.vertices.len();
-    let mut welded: HashMap<[u32; 2], u32> = HashMap::new();
-    let mut vertex = |point: i32, normal: Option<usize>| {
-        let pair = [
+    let mut welded: HashMap<[u32; 3], u32> = HashMap::new();
+    let mut vertex = |point: i32, normal: Option<usize>, st: Option<usize>| {
+        let triple = [
             first.point + point as u32,
             normal.map_or(SMOOTH, |n| first.normal + n as u32),
+            st.map_or(NONE, |s| first.st + s as u32),
         ];
-        *welded.entry(pair).or_insert_with(|| {
-            tables.vertices.push(pair);
+        *welded.entry(triple).or_insert_with(|| {
+            tables.vertices.push([triple[0], triple[1]]);
+            tables.vertex_st.push(triple[2]);
             (tables.vertices.len() - 1 - first_vertex) as u32
         })
     };
+    // Which value a corner reads, by the primvar's interpolation.
+    let index =
+        |interpolation: Interpolation, point: i32, c: usize, face: usize| match interpolation {
+            Interpolation::Vertex | Interpolation::Varying => point as usize,
+            Interpolation::FaceVarying => c,
+            Interpolation::Uniform => face,
+            Interpolation::Constant => 0,
+        };
     let mut holes = vec![false; counts.len()];
     for &f in faces.holes {
         holes[f as usize] = true;
@@ -743,13 +816,9 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
         }
         face_vertices.clear();
         for (c, &point) in corners.iter().enumerate().take(corner).skip(start) {
-            let normal = normals.map(|n| match n.interpolation {
-                Interpolation::Vertex | Interpolation::Varying => point as usize,
-                Interpolation::FaceVarying => c,
-                Interpolation::Uniform => face,
-                Interpolation::Constant => 0,
-            });
-            face_vertices.push(vertex(point, normal));
+            let normal = normals.map(|n| index(n.interpolation, point, c, face));
+            let st = st.map(|s| index(s.interpolation, point, c, face));
+            face_vertices.push(vertex(point, normal, st));
         }
         for i in 1..face_vertices.len().saturating_sub(1) {
             tables
@@ -1128,6 +1197,7 @@ mod tests {
             }),
             points: Some(vec![[0.0; 3]; 5]),
             normals: Some(normals),
+            st: None,
             transform: None,
             visible: None,
             instancing: None,
@@ -1146,6 +1216,7 @@ mod tests {
     fn tables(mesh: &Mesh) -> Result<Tables, String> {
         let mut t = Tables {
             vertices: vec![[7, 7]],
+            vertex_st: vec![7],
             indices: vec![],
             corner_offsets: vec![],
             corners: vec![],
@@ -1157,6 +1228,7 @@ mod tests {
             point: 10,
             cage: 30,
             normal: 20,
+            st: 40,
         };
         triangulate(mesh, first, &mut t)?;
         Ok(t)
@@ -1186,6 +1258,42 @@ mod tests {
         let t = tables(&mesh(Scheme::None, None)).unwrap();
         assert_eq!(t.vertices[1], [10, SMOOTH]);
         assert_eq!(t.vertices.len() - 1, 5);
+        assert_eq!(t.vertex_st[1..], [NONE; 5]);
+    }
+
+    #[test]
+    fn vertices_weld_over_st_too() {
+        let st = |interpolation, count| {
+            Some(St {
+                interpolation,
+                values: vec![[0.5, 0.5]; count],
+            })
+        };
+        let mut m = mesh(Scheme::None, None);
+        m.st = Some(st(Interpolation::Vertex, 5));
+        let t = tables(&m).unwrap();
+        assert_eq!(t.vertices.len() - 1, 5);
+        assert_eq!(t.vertex_st[1..], [40, 41, 42, 43, 44]);
+        // Face-varying st splits the shared points, as face-varying
+        // normals do, even under welded vertex normals.
+        let mut m = mesh(Scheme::None, normals(Interpolation::Vertex, 5));
+        m.st = Some(st(Interpolation::FaceVarying, 7));
+        let t = tables(&m).unwrap();
+        assert_eq!(t.vertices.len() - 1, 7);
+        assert_eq!(t.vertices[5..], [[11, 21], [14, 24], [12, 22]]);
+        assert_eq!(t.vertex_st[5..], [44, 45, 46]);
+        // A subdivided mesh's st is not refined yet, so it is not drawn.
+        let mut m = mesh(Scheme::CatmullClark, None);
+        m.st = Some(st(Interpolation::Vertex, 5));
+        assert_eq!(tables(&m).unwrap().vertex_st[1..], [NONE; 5]);
+        // The controls: the wrong count is refused, as for normals.
+        let mut m = mesh(Scheme::None, None);
+        m.st = Some(st(Interpolation::FaceVarying, 5));
+        let error = tables(&m).err().unwrap();
+        assert!(
+            error.contains("5 st values") && error.contains("needs 7"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1362,6 +1470,8 @@ mod tests {
                 first_cage: None,
                 first_normal: 0,
                 normal_count: 0,
+                first_st: 0,
+                st_count: 0,
                 first_vertex: 0,
                 first_index: 0,
                 index_count: 9,

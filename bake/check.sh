@@ -58,6 +58,12 @@ texture swatch.png raw color 4096 swatch_raw
 texture swatch.png raw single 4096 single
 texture mips.exr raw data 4 mips
 texture mips.exr raw data 8 mips8
+# "auto" is sRGB for an 8-bit image and raw for a float one.
+texture swatch.png auto color 4096 swatch_auto
+cmp "$OUT/textures/swatch.texture" "$OUT/textures/swatch_auto.texture" || fail "swatch_auto: auto is not sRGB for a PNG"
+texture ramp.exr auto float 4096 ramp_auto
+cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_auto: auto is not raw for an EXR"
+! cmp -s "$OUT/textures/swatch.texture" "$OUT/textures/swatch_raw.texture" || fail "swatch_raw: raw and sRGB bake alike, so the auto checks prove nothing"
 "$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
 if "$BAKE" texture "$FIXTURES/swatch.png" bogus color 4096 "" "$OUT/textures/bogus.texture" 2> "$OUT/textures/bogus.err"; then
     fail "bogus: a texture in an unknown colour space baked"

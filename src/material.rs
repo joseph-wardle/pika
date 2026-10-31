@@ -14,6 +14,55 @@ use std::fmt::Write;
 use crate::cache;
 use crate::store::{Connection, Network, Node, Value};
 
+/// A texture as a node's input declares it: the file, the colour space the
+/// file is in, and the encoding the bake tool stores it with.
+#[derive(Debug, PartialEq)]
+pub struct Source {
+    pub file: String,
+    pub space: String,
+    pub encoding: &'static str,
+}
+
+/// The texture `node`'s input `input` reads. The encoding follows the
+/// node's output type: colour compresses as BC7 sRGB, or as plain BC7 when
+/// its space is raw; a float as BC4; a vector3 or vector4 as BC7; a
+/// vector2 stays float, so a coordinate map stays exact (the oracles' uv
+/// ramp). The space is the asset's `colorSpace` metadata, else
+/// UsdUVTexture's `sourceColorSpace`, else `auto`, in OpenColorIO's names.
+pub fn source(node: &Node, input: &str) -> Result<Source, String> {
+    let file = match node.params.get(input) {
+        Some(Value::Asset(path)) => path.clone(),
+        Some(_) => return Err(format!("{input} is not an asset")),
+        None => return Err(format!("{input} has no asset")),
+    };
+    let declared = (node.params.get(&format!("colorSpace:{input}")))
+        .or_else(|| node.params.get("sourceColorSpace"));
+    let space = match declared {
+        Some(Value::Text(space)) if space == "sRGB" => "srgb_texture".to_owned(),
+        Some(Value::Text(space)) => space.clone(),
+        _ => "auto".to_owned(),
+    };
+    let kind = match node.node_type.as_str() {
+        "UsdUVTexture" => "color4",
+        name => (name.strip_prefix("ND_image_"))
+            .or_else(|| name.strip_prefix("ND_tiledimage_"))
+            .ok_or_else(|| format!("{name} reads a texture Pika does not know how to bake"))?,
+    };
+    let encoding = match kind {
+        "color3" | "color4" if space == "raw" => "data",
+        "color3" | "color4" => "color",
+        "float" => "single",
+        "vector2" => "float",
+        "vector3" | "vector4" => "data",
+        _ => return Err(format!("{} reads a texture of type {kind}", node.node_type)),
+    };
+    Ok(Source {
+        file,
+        space,
+        encoding,
+    })
+}
+
 /// A network's MaterialX document and its key.
 #[derive(Debug)]
 pub struct Document {
@@ -249,7 +298,7 @@ pub mod tests {
         };
         tex.params.insert(
             "file".into(),
-            Value::Asset("hydra/fixtures/network.usda".into()),
+            Value::Asset("bake/fixtures/swatch.png".into()),
         );
         tex.params
             .insert("colorSpace:file".into(), Value::Text("raw".into()));
@@ -431,6 +480,43 @@ pub mod tests {
                 .unwrap_err()
                 .starts_with("node missing is connected")
         );
+    }
+
+    #[test]
+    fn sources_follow_the_node_and_its_colour_space() {
+        let tex = &fixture().nodes["tex"];
+        assert_eq!(
+            source(tex, "file").unwrap(),
+            Source {
+                file: "bake/fixtures/swatch.png".into(),
+                space: "raw".into(),
+                encoding: "data",
+            }
+        );
+        let mut srgb = tex.clone();
+        srgb.params.remove("colorSpace:file");
+        srgb.params
+            .insert("sourceColorSpace".into(), Value::Text("sRGB".into()));
+        let s = source(&srgb, "file").unwrap();
+        assert_eq!((s.space.as_str(), s.encoding), ("srgb_texture", "color"));
+        srgb.params.remove("sourceColorSpace");
+        assert_eq!(source(&srgb, "file").unwrap().space, "auto");
+
+        let image = |kind: &str| {
+            let mut node = tex.clone();
+            node.node_type = format!("ND_image_{kind}");
+            node.params.remove("colorSpace:file");
+            source(&node, "file").map(|s| s.encoding)
+        };
+        assert_eq!(image("vector2"), Ok("float"));
+        assert_eq!(image("float"), Ok("single"));
+        assert_eq!(image("vector3"), Ok("data"));
+        assert_eq!(image("color3"), Ok("color"));
+        assert!(image("matrix33").is_err());
+        let mut other = tex.clone();
+        other.node_type = "ND_triplanarprojection_color3".into();
+        assert!(source(&other, "file").is_err());
+        assert!(source(tex, "st").is_err());
     }
 
     #[test]

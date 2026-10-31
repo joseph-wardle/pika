@@ -27,6 +27,7 @@ mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tr
     1 0 0
     0 1 0
   normals none
+  st none
 sync 2
 instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
   parent none
@@ -56,3 +57,4 @@ mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tr
     1 0 0
     0 1 0
   normals none
+  st none

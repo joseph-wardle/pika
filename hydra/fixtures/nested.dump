@@ -36,6 +36,7 @@ mesh /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes/#/__
     1 0 0
     0 1 0
   normals none
+  st none
 sync 2
 instancer /world/scatter
   parent none
@@ -74,3 +75,4 @@ mesh /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes/#/__
     1 0 0
     0 1 0
   normals none
+  st none

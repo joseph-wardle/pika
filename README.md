@@ -4,7 +4,7 @@ Pika is a real-time raster renderer for animation production, in the style of Bl
 
 It is built in Rust. It runs on Vulkan through [ash](https://crates.io/crates/ash), with shaders in [Slang](https://shader-slang.org). A small C++ Hydra render delegate copies scene data in, and materials will come from the upstream MaterialX shader generator rather than a custom compiler.
 
-Today Pika draws meshes. It syncs them from the host with their subdivision, instancing, holes, normals, visibility and purpose, and renders color, depth and normal AOVs for the host's camera. Each mesh is shaded by its material's MaterialX surface under a headlight, with grey clay where none is bound; textures, lights and shadows come next.
+Today Pika draws meshes. It syncs them from the host with their subdivision, instancing, holes, normals, visibility and purpose, and renders color, depth and normal AOVs for the host's camera. Each mesh is shaded by its material's MaterialX surface under a headlight, its textures baked once into a cache and read through the mesh's `st`, with grey clay where no material is bound; lights and shadows come next.
 
 ## Requirements
 

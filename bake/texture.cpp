@@ -85,7 +85,8 @@ Level read(OIIO::ImageInput &in, std::string const &path) {
 // The source's stored levels from the first at or below the cap, or from
 // the smallest when none is; later levels that do not halve the one before
 // (a ripmap's) are left to the filter.
-std::vector<Level> stored(std::string const &path, unsigned cap, int &channels) {
+std::vector<Level> stored(std::string const &path, unsigned cap, int &channels,
+                          OIIO::TypeDesc &type) {
     std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
     if (!in)
         throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
@@ -99,8 +100,10 @@ std::vector<Level> stored(std::string const &path, unsigned cap, int &channels) 
     std::vector<Level> levels;
     for (int m = first; m < count; ++m) {
         in->seek_subimage(0, m);
-        if (m == first)
+        if (m == first) {
             channels = std::min(in->spec().nchannels, 4);
+            type = in->spec().format;
+        }
         Level level = read(*in, path);
         if (!levels.empty() && (level.width != half(levels.back().width) ||
                                 level.height != half(levels.back().height)))
@@ -251,8 +254,15 @@ void texture(std::string const &source, std::string const &space, std::string co
     if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
         throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
     int channels = 0;
-    std::vector<Level> levels = stored(source, cap, channels);
-    convert(levels, space, config);
+    OIIO::TypeDesc type;
+    std::vector<Level> levels = stored(source, cap, channels, type);
+    // USD's "auto": sRGB for 8-bit images, raw for the rest. The file's own
+    // colour space metadata is not read: OpenImageIO calls a float image
+    // "linear", which under an ACES config means ACEScg.
+    std::string resolved = space;
+    if (space == "auto")
+        resolved = type == OIIO::TypeDesc::UINT8 ? "srgb_texture" : "raw";
+    convert(levels, resolved, config);
     while (!fits(levels.front(), cap))
         levels.front() = halve(levels.front());
     while (levels.back().width > 1 || levels.back().height > 1)

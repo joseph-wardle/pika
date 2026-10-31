@@ -18,6 +18,7 @@ def Xform "world"
         int[] faceVertexCounts = [3]
         int[] faceVertexIndices = [0, 1, 2]
         point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "faceVarying")
         uniform token subdivisionScheme = "none"
         rel material:binding = </world/mtl/paint>
     }
@@ -41,7 +42,7 @@ def Xform "world"
             def Shader "tex"
             {
                 uniform token info:id = "UsdUVTexture"
-                asset inputs:file = @network.usda@ (colorSpace = "raw")
+                asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
                 float4 inputs:scale = (2, 2, 2, 1)
                 float2 inputs:st.connect = </world/mtl/paint/st.outputs:result>
                 token inputs:wrapS = "clamp"

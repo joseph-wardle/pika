@@ -18,6 +18,9 @@ struct View
     // One per point (src/geometry.rs Layout).
     float *smooth;
     uint2 *vertices;
+    // Per st value, and the st index (or NONE) per vertex.
+    float *st;
+    uint *vertex_st;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
     // Each instance's draw record.

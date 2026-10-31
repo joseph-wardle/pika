@@ -42,8 +42,15 @@ What the reference encodes:
   left-handed), normalized. Either is interpolated, moved by the inverse
   transpose of the world matrix and normalized. A face's front is the side
   its moved geometric normal points to, reversed when left-handed; seen from
-  behind, the normal is negated. Color is grey: the normal against the
-  direction toward the eye, clamped, with alpha 1.
+  behind, the normal is negated.
+- Color is the material's, with alpha 1. A mesh bound to a MaterialX
+  surface whose emission is a uniform EDF of an image sampled at a primvar
+  (hydra/images/textured.usda) shows the image's bilinear sample, level 0,
+  at the hit's primvar, under the image node's address modes, with st
+  (0, 0) at the image's bottom-left corner as USD and MaterialX read it, the
+  channels padded with 0 to three. Any other mesh is clay: grey, the normal
+  against the direction toward the eye, clamped. Other materials are
+  refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
@@ -61,7 +68,7 @@ import sys
 
 import numpy as np
 import OpenImageIO as oiio
-from pxr import CameraUtil, Gf, Usd, UsdGeom, UsdRender
+from pxr import CameraUtil, Gf, Usd, UsdGeom, UsdRender, UsdShade
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
@@ -75,6 +82,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
+            "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "frame 1's reference"]
 HUSK_PURPOSES = ("default", "render")
 USDRECORD_PURPOSES = ("default", "proxy")
@@ -242,13 +250,87 @@ def surface(mesh, time, control=None):
     return refine(points, counts, indices, holes, scheme, control)
 
 
+def upstream(shader, name):
+    """The shader connected to `shader`'s input `name`, or None."""
+    source = shader.GetInput(name).GetConnectedSource() if shader.GetInput(name) else None
+    return UsdShade.Shader(source[0].GetPrim()) if source else None
+
+
+def emission(prim):
+    """The closed form of the mesh's material, or None for clay: the image
+    file, its address modes (u, v) and the primvar it is sampled at, for a
+    MaterialX surface whose emission is a uniform EDF of an image node's
+    vector2 sample, through converts (hydra/images/textured.usda)."""
+    material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+    if not material:
+        return None
+    source = material.GetSurfaceOutput().GetConnectedSource()
+    surface = UsdShade.Shader(source[0].GetPrim()) if source else None
+    refuse = ValueError(f"{prim.GetPath()}: the reference knows only clay and the emissive ramp")
+    if not surface or surface.GetShaderId() != "ND_surface":
+        raise refuse
+    edf = upstream(surface, "edf")
+    if not edf or edf.GetShaderId() != "ND_uniform_edf" or upstream(surface, "bsdf"):
+        raise refuse
+    image = upstream(edf, "color")
+    while image and image.GetShaderId().startswith("ND_convert_"):
+        image = upstream(image, "in")
+    if not image or image.GetShaderId() != "ND_image_vector2":
+        raise refuse
+    reader = upstream(image, "texcoord")
+    if not reader or reader.GetShaderId() != "ND_geompropvalue_vector2":
+        raise refuse
+    modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
+                  for m in ("uaddressmode", "vaddressmode"))
+    return image.GetInput("file").Get().resolvedPath, modes, reader.GetInput("geomprop").Get()
+
+
+def sample(path, st, modes, control=None):
+    """The bilinear sample of level 0 of the image at `path` at each st (an
+    (n, 2) array), rows from the bottom as USD reads st, under the address
+    modes (u, v); the channels padded with 0 to three."""
+    image = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
+    h, w = image.shape[:2]
+    texels = np.zeros((h, w, 3))
+    texels[..., :min(3, image.shape[2])] = image[..., :3]
+    if control != "st origin at the top":
+        texels = texels[::-1]
+    if control == "st wrapped, not clamped":
+        modes = ("periodic", "periodic")
+    f = st * [w, h] - 0.5
+    if control == "nearest texel":
+        f = np.floor(st * [w, h])
+    i0 = np.floor(f).astype(int)
+    fx, fy = (f - i0)[:, :1], (f - i0)[:, 1:]
+
+    def address(i, n, mode):
+        if mode == "clamp":
+            return np.clip(i, 0, n - 1)
+        if mode == "periodic":
+            return i % n
+        raise ValueError(f"the reference samples clamp and periodic, not {mode}")
+
+    x0, x1 = address(i0[:, 0], w, modes[0]), address(i0[:, 0] + 1, w, modes[0])
+    y0, y1 = address(i0[:, 1], h, modes[1]), address(i0[:, 1] + 1, h, modes[1])
+    return ((texels[y0, x0] * (1 - fx) + texels[y0, x1] * fx) * (1 - fy) +
+            (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
+
+
 def triangles(stage, time, purposes, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix,
-    whether it is left-handed, and a face id."""
+    whether it is left-handed, a face id, and its material's emission with
+    the sampled primvar at its corners (None for clay)."""
     out = []
     for instance, (prim, world) in enumerate(meshes(stage, time, purposes, control)):
         mesh = UsdGeom.Mesh(prim)
+        emitted = emission(prim)
+        if emitted:
+            primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(emitted[2])
+            if not primvar or mesh.GetSubdivisionSchemeAttr().Get(time) != UsdGeom.Tokens.none:
+                raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar "
+                                 "of an unsubdivided mesh")
+            st_values, st_interpolation = primvar.ComputeFlattened(time), primvar.GetInterpolation()
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
         points, counts, indices, holes = surface(mesh, time, control)
@@ -275,23 +357,27 @@ def triangles(stage, time, purposes, control=None):
                 corner += count
                 continue
 
-            def normal(c):
-                if interpolation == UsdGeom.Tokens.uniform:
-                    return Gf.Vec3d(normals[face])
-                if interpolation == UsdGeom.Tokens.faceVarying:
-                    return Gf.Vec3d(normals[corner + c])
-                return Gf.Vec3d(normals[indices[corner + c]])
+            def value(values, kind, c):
+                if kind == UsdGeom.Tokens.constant:
+                    return values[0]
+                if kind == UsdGeom.Tokens.uniform:
+                    return values[face]
+                if kind == UsdGeom.Tokens.faceVarying:
+                    return values[corner + c]
+                return values[indices[corner + c]]
 
             for k in range(1, count - 1):
                 cs = (0, k, k + 1)
                 out.append({
                     "points": [world.Transform(Gf.Vec3d(points[indices[corner + c]])) for c in cs],
                     "object": [Gf.Vec3d(points[indices[corner + c]]) for c in cs],
-                    "normals": [normal(c) for c in cs],
+                    "normals": [Gf.Vec3d(value(normals, interpolation, c)) for c in cs],
                     "normal_matrix": normal_matrix,
                     "left": left,
                     "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
+                    "emission": emitted,
+                    "st": [list(value(st_values, st_interpolation, c)) for c in cs] if emitted else None,
                 })
             corner += count
     return out
@@ -362,13 +448,20 @@ def reference(stage, time, width, height, purposes, control=None):
     lit[dot(lit, toward) < 0] *= -1
     light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
     grey = 0.18 * np.clip(dot(lit, light), 0.0, 1.0)
+    color = np.c_[grey, grey, grey, np.ones(len(grey))]
+    kinds = sorted({t["emission"] for t in tris if t["emission"]})
+    which = np.array([kinds.index(t["emission"]) if t["emission"] else -1 for t in tris])[i]
+    for k, emitted in enumerate(kinds):
+        on = which == k
+        st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
+        color[on, :3] = sample(emitted[0], np.einsum("nc,ncj->nj", bary[on], st), emitted[1], control)
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":
         depth = 1 - depth
     faces = {}
     face = np.array([faces.setdefault(t["face"], len(faces)) for t in tris])
-    image["color"][hit] = np.c_[grey, grey, grey, np.ones(len(grey))]
+    image["color"][hit] = color
     image["depth"][hit] = depth
     image["normal"][hit] = n
     image["face"][hit] = face[i]

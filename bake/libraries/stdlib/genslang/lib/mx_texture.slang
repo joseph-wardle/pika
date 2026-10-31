@@ -30,14 +30,17 @@ struct SamplerTexture2D
 
     // The layer and the coordinate within it. A one-layer texture leaves
     // the wrapping to the sampler; a UDIM set holds tile 1001 + u + 10 v.
+    // USD and MaterialX put st (0, 0) at an image's bottom-left corner,
+    // and a baked texture keeps the image's rows top first, so v is
+    // flipped here, inside the tile (hydra/images/textured.usda).
     float3 locate(float2 uv)
     {
         uint width, height, layers, levels;
         tex.GetDimensions(0, width, height, layers, levels);
         if (layers == 1)
-            return float3(uv, 0.0);
+            return float3(uv.x, 1.0 - uv.y, 0.0);
         float2 tile = floor(uv);
-        return float3(uv - tile, tile.x + 10.0 * tile.y);
+        return float3(uv.x - tile.x, 1.0 - (uv.y - tile.y), tile.x + 10.0 * tile.y);
     }
 }
 

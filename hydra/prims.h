@@ -33,6 +33,10 @@ private:
     void _SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer);
+    void _SyncSt(HdSceneDelegate *delegate, pika_renderer *renderer);
+    // The interpolation of the mesh's primvar `name`, if it has one.
+    bool _FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
+                      HdInterpolation &interpolation);
     void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
     Pika &_pika;

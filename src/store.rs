@@ -32,6 +32,9 @@ pub struct Mesh {
     pub points: Option<Vec<[f32; 3]>>,
     /// `Some(None)` when the mesh has no normals primvar.
     pub normals: Option<Option<Normals>>,
+    /// The `st` primvar, the texture coordinates materials read;
+    /// `Some(None)` when the mesh has none.
+    pub st: Option<Option<St>>,
     /// Hydra's `GfMatrix4d`: row-major, translation in the last row.
     pub transform: Option<[f64; 16]>,
     pub visible: Option<bool>,
@@ -255,6 +258,12 @@ pub struct Normals {
     pub values: Vec<[f32; 3]>,
 }
 
+#[derive(Clone, PartialEq, Debug)]
+pub struct St {
+    pub interpolation: Interpolation,
+    pub values: Vec<[f32; 2]>,
+}
+
 /// Hydra's primvar interpolations, as USD names them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Interpolation {
@@ -293,13 +302,15 @@ impl Interpolation {
 /// that. Only changed values count: a redundant pull moves nothing.
 #[derive(PartialEq, Debug, Default)]
 pub struct Moved {
-    /// A mesh was added, removed or remodelled, or its points or normals
-    /// changed size or kind: the layout of every mesh's data is rebuilt.
+    /// A mesh was added, removed or remodelled, or its points, normals or
+    /// st changed size or kind: the layout of every mesh's data is rebuilt.
     pub layout: bool,
     /// Meshes whose points changed, keeping their count.
     pub points: BTreeSet<u64>,
     /// Meshes whose normals changed, keeping their interpolation and count.
     pub normals: BTreeSet<u64>,
+    /// Meshes whose st changed, keeping its interpolation and count.
+    pub st: BTreeSet<u64>,
     /// Meshes whose transform changed: only their instances are rewritten.
     pub transforms: BTreeSet<u64>,
     /// A visibility, render tag or instancing changed: the instances and
@@ -346,7 +357,7 @@ pub struct Census {
     /// The same two counts as drawn: a refined mesh's refined faces.
     pub refined_triangles: usize,
     pub refined_prototype_triangles: usize,
-    /// Points, normals and face indices, counting each mesh once.
+    /// Points, normals, st and face indices, counting each mesh once.
     pub geometry_bytes: usize,
     /// The refined faces and stencils, counting each mesh once.
     pub refined_bytes: usize,
@@ -407,6 +418,7 @@ impl Store {
                 topology: None,
                 points: None,
                 normals: None,
+                st: None,
                 transform: None,
                 visible: None,
                 instancing: None,
@@ -478,6 +490,22 @@ impl Store {
                 self.moved.layout = true;
             } else {
                 self.moved.normals.insert(id);
+            }
+        }
+        Ok(())
+    }
+
+    /// `None` when the mesh has no st primvar.
+    pub fn set_st(&mut self, id: u64, st: Option<St>) -> Result<(), String> {
+        let bytes = st.as_ref().map_or(0, |s| size_of_val(s.values.as_slice()));
+        let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
+        let kind = |s: &Option<St>| s.as_ref().map(|s| (s.interpolation, s.values.len()));
+        let reshaped = mesh.st.as_ref().map(kind) != Some(kind(&st));
+        if write(&mut self.stats.mesh, &mut mesh.st, st, bytes) {
+            if reshaped {
+                self.moved.layout = true;
+            } else {
+                self.moved.st.insert(id);
             }
         }
         Ok(())
@@ -739,6 +767,10 @@ impl Store {
                 + match &mesh.normals {
                     Some(Some(n)) => size_of_val(n.values.as_slice()),
                     _ => 0,
+                }
+                + match &mesh.st {
+                    Some(Some(s)) => size_of_val(s.values.as_slice()),
+                    _ => 0,
                 };
             materials.extend(mesh.material.iter().map(String::as_str));
             materials.extend(topology.subsets.iter().map(|s| s.material.as_str()));
@@ -860,6 +892,16 @@ impl fmt::Display for Mesh {
             }
             Some(None) => writeln!(f, "  normals none")?,
             None => writeln!(f, "  normals {UNSYNCED}")?,
+        }
+        match &self.st {
+            Some(Some(s)) => {
+                writeln!(f, "  st {} {}", s.interpolation.token(), s.values.len())?;
+                for v in &s.values {
+                    writeln!(f, "   {}", List(v))?;
+                }
+            }
+            Some(None) => writeln!(f, "  st none")?,
+            None => writeln!(f, "  st {UNSYNCED}")?,
         }
         Ok(())
     }
@@ -1149,6 +1191,19 @@ mod tests {
         assert_eq!((moved.layout, moved.draws), (false, false));
         assert_eq!(moved.normals, BTreeSet::from([a]));
         assert_eq!(moved.transforms, BTreeSet::from([a]));
+        let st = |values| St {
+            interpolation: Interpolation::FaceVarying,
+            values,
+        };
+        store.set_st(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        assert!(store.take_moved().layout);
+        store.set_st(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        assert_eq!(store.take_moved(), Moved::default());
+        store.set_st(a, Some(st(vec![[1.0; 2]; 7]))).unwrap();
+        let moved = store.take_moved();
+        assert_eq!((moved.layout, &moved.st), (false, &BTreeSet::from([a])));
+        store.set_st(a, None).unwrap();
+        assert!(store.take_moved().layout);
 
         // Changing the point count moves the layout, not the points.
         store.set_points(a, vec![[1.0; 3]; 5]).unwrap();
@@ -1307,6 +1362,15 @@ mod tests {
                 }),
             )
             .unwrap();
+        store
+            .set_st(
+                b,
+                Some(St {
+                    interpolation: Interpolation::Vertex,
+                    values: vec![[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]],
+                }),
+            )
+            .unwrap();
         let mut moved = [0.0; 16];
         for i in [0, 5, 10, 15] {
             moved[i] = 1.0;
@@ -1348,6 +1412,7 @@ mesh /world/a
   topology not synced
   points not synced
   normals not synced
+  st not synced
 counted sphereLight /world/aa
 mesh /world/b
   render_tag not synced
@@ -1371,6 +1436,10 @@ mesh /world/b
     0 0.0000001 3
   normals uniform 1
     0 0 1
+  st vertex 3
+    0 0
+    0.5 0
+    0 1
 curves /world/c
   bytes pulled 68
 instancer /world/i

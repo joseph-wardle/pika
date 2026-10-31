@@ -12,7 +12,7 @@ material /world/mtl/paint
     diffuseColor from tex rgb
   node tex UsdUVTexture
     colorSpace:file text "raw"
-    file asset "hydra/fixtures/network.usda"
+    file asset "bake/fixtures/swatch.png"
     scale float 2 2 2 1
     typeName:file text "asset"
     typeName:scale text "float4"
@@ -37,6 +37,10 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
+  st faceVarying 3
+    0 0
+    1 0
+    0 1
 sync 2
 material /world/mtl/paint
   surface surface
@@ -51,7 +55,7 @@ material /world/mtl/paint
     diffuseColor from tex rgb
   node tex UsdUVTexture
     colorSpace:file text "raw"
-    file asset "hydra/fixtures/network.usda"
+    file asset "bake/fixtures/swatch.png"
     scale float 2 2 2 1
     typeName:file text "asset"
     typeName:scale text "float4"
@@ -76,3 +80,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
+  st faceVarying 3
+    0 0
+    1 0
+    0 1

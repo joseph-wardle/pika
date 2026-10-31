@@ -23,6 +23,7 @@ mesh /world/strip
     2 1 0
   normals constant 1
     0 0 1
+  st none
 sync 2
 mesh /world/strip
   render_tag geometry
@@ -48,3 +49,4 @@ mesh /world/strip
     2 1 0
   normals constant 1
     0 0 1
+  st none

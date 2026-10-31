@@ -6,6 +6,7 @@
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/enum.h>
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -20,10 +21,16 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
+TF_DEFINE_PRIVATE_TOKENS(_tokens, (st));
+
 namespace {
 
 // An empty VtArray's data may be null, so this casts rather than dereferences.
 const float *xyz(VtVec3fArray const &values) {
+    return reinterpret_cast<const float *>(values.cdata());
+}
+
+const float *xy(VtVec2fArray const &values) {
     return reinterpret_cast<const float *>(values.cdata());
 }
 
@@ -125,6 +132,8 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     // general primvar change.
     if (bits & (HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar))
         _SyncNormals(delegate, renderer);
+    if (bits & HdChangeTracker::DirtyPrimvar)
+        _SyncSt(delegate, renderer);
     if (bits & HdChangeTracker::DirtyTransform) {
         GfMatrix4d matrix = delegate->GetTransform(GetId());
         _pika.report(pika_mesh_transform(renderer, _id, matrix.data()), path + " transform");
@@ -203,34 +212,59 @@ void PikaMesh::_SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer) {
            GetId().GetString() + " points");
 }
 
-void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) {
+bool PikaMesh::_FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
+                            HdInterpolation &interpolation) {
     // The interpolations a mesh primvar can have.
     static const HdInterpolation interpolations[] = {
         HdInterpolationConstant, HdInterpolationUniform, HdInterpolationVarying,
         HdInterpolationVertex,   HdInterpolationFaceVarying,
     };
-    std::string const &path = GetId().GetString();
-    for (HdInterpolation interpolation : interpolations) {
-        for (HdPrimvarDescriptor const &primvar :
-             GetPrimvarDescriptors(delegate, interpolation)) {
-            if (primvar.name != HdTokens->normals)
-                continue;
-            VtValue value = GetNormals(delegate);
-            if (!value.IsHolding<VtVec3fArray>()) {
-                fail(path + ": normals are " + value.GetTypeName() +
-                     "; Pika reads float3 normals");
-                return;
+    for (HdInterpolation candidate : interpolations) {
+        for (HdPrimvarDescriptor const &primvar : GetPrimvarDescriptors(delegate, candidate)) {
+            if (primvar.name == name) {
+                interpolation = candidate;
+                return true;
             }
-            VtVec3fArray const &normals = value.UncheckedGet<VtVec3fArray>();
-            // Hydra's display name for an interpolation is USD's token.
-            std::string token = TfEnum::GetDisplayName(interpolation);
-            _pika.report(pika_mesh_normals(renderer, _id, token.c_str(), xyz(normals),
-                                           normals.size()),
-                         path + " normals");
-            return;
         }
     }
-    _pika.report(pika_mesh_no_normals(renderer, _id), path + " normals");
+    return false;
+}
+
+void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) {
+    std::string const &path = GetId().GetString();
+    HdInterpolation interpolation;
+    if (!_FindPrimvar(delegate, HdTokens->normals, interpolation)) {
+        _pika.report(pika_mesh_no_normals(renderer, _id), path + " normals");
+        return;
+    }
+    VtValue value = GetNormals(delegate);
+    if (!value.IsHolding<VtVec3fArray>()) {
+        fail(path + ": normals are " + value.GetTypeName() + "; Pika reads float3 normals");
+        return;
+    }
+    VtVec3fArray const &normals = value.UncheckedGet<VtVec3fArray>();
+    // Hydra's display name for an interpolation is USD's token.
+    std::string token = TfEnum::GetDisplayName(interpolation);
+    _pika.report(
+        pika_mesh_normals(renderer, _id, token.c_str(), xyz(normals), normals.size()),
+        path + " normals");
+}
+
+void PikaMesh::_SyncSt(HdSceneDelegate *delegate, pika_renderer *renderer) {
+    std::string const &path = GetId().GetString();
+    HdInterpolation interpolation;
+    if (!_FindPrimvar(delegate, _tokens->st, interpolation)) {
+        _pika.report(pika_mesh_no_st(renderer, _id), path + " st");
+        return;
+    }
+    VtValue value = GetPrimvar(delegate, _tokens->st);
+    if (!value.IsHolding<VtVec2fArray>()) {
+        fail(path + ": st is " + value.GetTypeName() + "; Pika reads float2 st");
+        return;
+    }
+    VtVec2fArray const &st = value.UncheckedGet<VtVec2fArray>();
+    std::string token = TfEnum::GetDisplayName(interpolation);
+    _pika.report(pika_mesh_st(renderer, _id, token.c_str(), xy(st), st.size()), path + " st");
 }
 
 void PikaMesh::_SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer) {

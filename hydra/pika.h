@@ -190,6 +190,11 @@ int pika_mesh_normals(const pika_renderer *renderer, uint64_t id, const char *in
                       const float *normals, size_t count);
 // For a mesh without a normals primvar.
 int pika_mesh_no_normals(const pika_renderer *renderer, uint64_t id);
+// The st primvar, the texture coordinates materials read: `count` pairs.
+int pika_mesh_st(const pika_renderer *renderer, uint64_t id, const char *interpolation,
+                 const float *st, size_t count);
+// For a mesh without an st primvar.
+int pika_mesh_no_st(const pika_renderer *renderer, uint64_t id);
 // The world transform: Hydra's row-major GfMatrix4d.
 int pika_mesh_transform(const pika_renderer *renderer, uint64_t id,
                         const double matrix[16]);
