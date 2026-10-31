@@ -11,7 +11,7 @@ View *view;
 
 // A vertex's normal index when its normal is its point's smooth normal.
 static const uint SMOOTH = 0xffffffff;
-// A vertex's st index when its mesh has no st.
+// A vertex's texcoord index when its mesh has none.
 static const uint NONE = 0xffffffff;
 
 struct Vertex
@@ -20,8 +20,8 @@ struct Vertex
     float3 world;
     // In world space, not normalized; zero for a degenerate normal.
     float3 normal;
-    // The st primvar; zero where the mesh has none.
-    float2 st;
+    // The float2 primvar the mesh's material reads; zero where the mesh has none.
+    float2 texcoord;
     // Whether the mesh's winding is reversed (src/transform.rs Instance).
     uint flip;
 };
@@ -40,13 +40,13 @@ Vertex pull(uint vertex, uint slot)
     float4 p = float4(load3(view->points, v.x), 1);
     float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
     float3 n = v.y == SMOOTH ? load3(view->smooth, v.x) : load3(view->normals, v.y);
-    uint s = view->vertex_st[vertex];
+    uint t = view->vertex_texcoord[vertex];
 
     Vertex o;
     o.position = project(view, world);
     o.world = world.xyz;
     o.normal = float3(dot(m[3].xyz, n), dot(m[4].xyz, n), dot(m[5].xyz, n));
-    o.st = s == NONE ? float2(0) : float2(view->st[2 * s], view->st[2 * s + 1]);
+    o.texcoord = t == NONE ? float2(0) : float2(view->texcoord[2 * t], view->texcoord[2 * t + 1]);
     o.flip = asuint(m[6].x) & 1;
     return o;
 }

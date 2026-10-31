@@ -192,6 +192,9 @@ impl Shade {
             self.materials.remove(&id);
             return Ok(());
         };
+        // A network reading two primvars is refused: the vertex stage would
+        // feed both from the mesh's one texcoord.
+        material::texcoord(network)?;
         if !self.surfaces.contains_key(&document.hash) {
             let (surface, fresh) = Shade::build(&self.bake, device, &document)?;
             update.compiled += usize::from(fresh);

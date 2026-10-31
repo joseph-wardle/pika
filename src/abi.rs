@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
     Connection, InstancePrimvars, Instancing, Interpolation, Network, Node, Normals, Refined,
-    Scheme, St, Subset, Topology, Value,
+    Scheme, Subset, Texcoord, Topology, Value,
 };
 
 pub const OK: i32 = 0;
@@ -513,36 +513,73 @@ pub unsafe extern "C" fn pika_mesh_no_normals(renderer: *const Handle, id: u64) 
     call(|| lock(unsafe { &*renderer })?.store.set_normals(id, None))
 }
 
+/// Writes the name of the float2 primvar the mesh's material reads, the
+/// texcoord to fetch, to `out`, or "" when it reads none.
+///
 /// # Safety
-/// `renderer` must be live, `interpolation` a NUL-terminated string and
-/// `st` valid for `count` reads.
+/// `renderer` must be live and `out` valid for `capacity` writes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pika_mesh_st(
+pub unsafe extern "C" fn pika_mesh_texcoord_name(
     renderer: *const Handle,
     id: u64,
+    out: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer.
+        let name = lock(unsafe { &*renderer })?.store.texcoord_name(id)?;
+        let name = CString::new(name.unwrap_or_default())
+            .map_err(|_| "the primvar's name holds a NUL".to_owned())?;
+        let bytes = name.as_bytes_with_nul();
+        if bytes.len() > capacity {
+            return Err(format!(
+                "the primvar's name {name:?} is longer than {capacity} bytes"
+            ));
+        }
+        // SAFETY: the caller guarantees `capacity` writable bytes at `out`,
+        // and `bytes` is no longer.
+        unsafe {
+            out.cast::<u8>()
+                .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len())
+        };
+        Ok(())
+    })
+}
+
+/// The float2 primvar `name` of the mesh, the texcoord its material reads.
+///
+/// # Safety
+/// `renderer` must be live, `name` and `interpolation` NUL-terminated
+/// strings and `values` valid for `count` reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_texcoord(
+    renderer: *const Handle,
+    id: u64,
+    name: *const c_char,
     interpolation: *const c_char,
-    st: *const [f32; 2],
+    values: *const [f32; 2],
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the string and the array.
-        let (handle, token) = unsafe { (&*renderer, string(interpolation)?) };
+        // SAFETY: the caller guarantees the renderer, the strings and the array.
+        let (handle, name, token) = unsafe { (&*renderer, string(name)?, string(interpolation)?) };
         // SAFETY: as above.
-        let values = unsafe { slice(st, count) }.to_vec();
-        let st = St {
+        let values = unsafe { slice(values, count) }.to_vec();
+        let texcoord = Texcoord {
+            name,
             interpolation: Interpolation::from_token(&token)?,
             values,
         };
-        lock(handle)?.store.set_st(id, Some(st))
+        lock(handle)?.store.set_texcoord(id, Some(texcoord))
     })
 }
 
 /// # Safety
 /// `renderer` must be live.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn pika_mesh_no_st(renderer: *const Handle, id: u64) -> i32 {
+pub unsafe extern "C" fn pika_mesh_no_texcoord(renderer: *const Handle, id: u64) -> i32 {
     // SAFETY: the caller guarantees the renderer.
-    call(|| lock(unsafe { &*renderer })?.store.set_st(id, None))
+    call(|| lock(unsafe { &*renderer })?.store.set_texcoord(id, None))
 }
 
 /// # Safety
@@ -750,21 +787,26 @@ pub unsafe extern "C" fn pika_material_free(renderer: *const Handle, id: u64) ->
     call(|| lock(unsafe { &*renderer })?.store.remove_material(id))
 }
 
-/// Replaces a material's network.
+/// Replaces a material's network, and writes to `*dirty` whether its
+/// meshes must sync again, because it reads a primvar it did not before.
 ///
 /// # Safety
-/// `renderer` must be live, and `network` and everything it points to valid
-/// for reads for the duration of the call.
+/// `renderer` must be live, `network` and everything it points to valid
+/// for reads for the duration of the call, and `dirty` for one write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_network(
     renderer: *const Handle,
     id: u64,
     network: *const CNetwork,
+    dirty: *mut bool,
 ) -> i32 {
     call(|| {
         // SAFETY: the caller guarantees the renderer and the network.
         let (handle, network) = unsafe { (&*renderer, self::network(&*network)?) };
-        lock(handle)?.store.set_network(id, network)
+        let changed = lock(handle)?.store.set_network(id, network)?;
+        // SAFETY: the caller guarantees `dirty` is writable.
+        unsafe { dirty.write(changed) };
+        Ok(())
     })
 }
 

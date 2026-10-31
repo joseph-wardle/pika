@@ -114,8 +114,8 @@ fixture() {
     grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
         fail "$name: the summary has no memory budget"
     # An edit to a value or an asset path compiles nothing; one to the
-    # network's structure compiles its surface; a texture is baked once per
-    # file. The scenes that edit a material are each other's control, and
+    # network's structure, the primvar a reader names included, compiles its
+    # surface; a texture is baked once per file. The scenes that edit a material are each other's control, and
     # each must compile in one frame, so a counter that never moves fails.
     # A material that cannot be built is warned of when it is tried, which
     # is once, though husk renders a frame more than once; the repair
@@ -125,6 +125,7 @@ fixture() {
         network) first=1 edit="0 1" ;;
         rewired) first=1 edit="1 0" ;;
         broken) edit="1 0" warnings=1 ;;
+        texcoord) first=1 edit="1 0" ;;
     esac
     read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats")"
     [ "$second" = "$edit" ] ||

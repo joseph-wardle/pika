@@ -1,0 +1,86 @@
+#usda 1.0
+(
+    doc = "The textured quad, its material reading the ramp through a primvar named perfuv instead of st, which is authored too, at other values: the mesh must carry the primvar its material names."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.2, -0.7, -5), (0.6, -0.7, -5), (0.6, 0.7, -5), (-1.2, 0.7, -5)]
+    texCoord2f[] primvars:perfuv (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:perfuv.timeSamples = {
+        1: [(-0.25, -0.25), (1.25, -0.25), (1.25, 1.25), (-0.25, 1.25)],
+        2: [(-0.1, -0.25), (1.4, -0.25), (1.4, 1.25), (-0.1, 1.25)],
+    }
+    texCoord2f[] primvars:st = [(0.5, 0.5), (0.75, 0.5), (0.75, 0.75), (0.5, 0.75)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </ramp>
+}
+
+def Material "ramp"
+{
+    token outputs:surface.connect = </ramp/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </ramp/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </ramp/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </ramp/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </ramp/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/ramp.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </ramp/perfuv.outputs:out>
+        float2 outputs:out
+    }
+
+    def Shader "perfuv"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "perfuv"
+        float2 outputs:out
+    }
+}

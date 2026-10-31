@@ -17,7 +17,7 @@ mesh /world/arm/hand
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none
 sync 2
 mesh /world/arm/hand
   render_tag geometry
@@ -37,4 +37,4 @@ mesh /world/arm/hand
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none

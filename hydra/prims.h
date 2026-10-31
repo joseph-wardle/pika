@@ -22,6 +22,10 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
+    // Fetches the float2 primvar the mesh's material reads, which Pika
+    // names from the network. Sync calls it; so does the material's, when
+    // its network reads another primvar (PikaMaterial::Sync).
+    void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) const;
 
 protected:
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override {
@@ -33,10 +37,9 @@ private:
     void _SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer);
-    void _SyncSt(HdSceneDelegate *delegate, pika_renderer *renderer);
     // The interpolation of the mesh's primvar `name`, if it has one.
     bool _FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
-                      HdInterpolation &interpolation);
+                      HdInterpolation &interpolation) const;
     void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
     Pika &_pika;

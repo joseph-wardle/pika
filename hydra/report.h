@@ -39,15 +39,16 @@ public:
     // the delegate is recreated.
     pika_renderer *renderer() const { return _stopped ? nullptr : _renderer; }
 
-    // Reports a failed call, saying what the delegate was doing. After a
-    // panic every call fails, so the first to see it stops the rest and is
-    // the only one reported.
-    void report(int status, std::string const &what) const {
-        if (status == PIKA_OK || _stopped)
-            return;
-        if (status == PIKA_PANIC && _stopped.exchange(true))
-            return;
+    // Reports a failed call, saying what the delegate was doing, and says
+    // whether it succeeded. After a panic every call fails, so the first to
+    // see it stops the rest and is the only one reported.
+    bool report(int status, std::string const &what) const {
+        if (status == PIKA_OK)
+            return true;
+        if (_stopped || (status == PIKA_PANIC && _stopped.exchange(true)))
+            return false;
         fail(what + ": " + pika_last_error());
+        return false;
     }
 
 private:

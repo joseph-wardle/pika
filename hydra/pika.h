@@ -190,11 +190,15 @@ int pika_mesh_normals(const pika_renderer *renderer, uint64_t id, const char *in
                       const float *normals, size_t count);
 // For a mesh without a normals primvar.
 int pika_mesh_no_normals(const pika_renderer *renderer, uint64_t id);
-// The st primvar, the texture coordinates materials read: `count` pairs.
-int pika_mesh_st(const pika_renderer *renderer, uint64_t id, const char *interpolation,
-                 const float *st, size_t count);
-// For a mesh without an st primvar.
-int pika_mesh_no_st(const pika_renderer *renderer, uint64_t id);
+// Writes the name of the float2 primvar the mesh's material reads, its
+// texcoord, to `out`, or "" when it reads none; the material must be set.
+int pika_mesh_texcoord_name(const pika_renderer *renderer, uint64_t id, char *out,
+                            size_t capacity);
+// The texcoord: the mesh's primvar `name`, `count` pairs.
+int pika_mesh_texcoord(const pika_renderer *renderer, uint64_t id, const char *name,
+                       const char *interpolation, const float *values, size_t count);
+// For a mesh whose material reads no primvar, or that lacks the one it reads.
+int pika_mesh_no_texcoord(const pika_renderer *renderer, uint64_t id);
 // The world transform: Hydra's row-major GfMatrix4d.
 int pika_mesh_transform(const pika_renderer *renderer, uint64_t id,
                         const double matrix[16]);
@@ -224,9 +228,10 @@ int pika_instancer_primvars(const pika_renderer *renderer, uint64_t id,
 // Adds a material and writes its id, never reused, to `*out`.
 int pika_material_new(const pika_renderer *renderer, const char *path, uint64_t *out);
 int pika_material_free(const pika_renderer *renderer, uint64_t id);
-// Replaces the material's whole network.
+// Replaces the material's whole network, and writes to `*dirty` whether its
+// meshes must sync again: it reads a primvar it did not before.
 int pika_material_network(const pika_renderer *renderer, uint64_t id,
-                          const pika_network *network);
+                          const pika_network *network, bool *dirty);
 
 // Basis curves are fetched only to measure them: the delegate reports the
 // bytes it pulled and drops them.

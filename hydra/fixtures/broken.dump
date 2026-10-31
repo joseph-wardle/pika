@@ -28,7 +28,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none
 sync 2
 material /world/mtl/glow
   surface surface
@@ -59,4 +59,4 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none

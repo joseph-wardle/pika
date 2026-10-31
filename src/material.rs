@@ -8,7 +8,7 @@
 //! uniforms and textures, so a material whose values change keeps its
 //! shader, and materials of one structure share it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::cache;
@@ -251,6 +251,40 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     }))
 }
 
+/// The float2 primvar the network's surface reads, through its
+/// UsdPrimvarReader_float2 and ND_geompropvalue_vector2 nodes: the texcoord
+/// its meshes carry. A network reading two is refused, since a mesh
+/// carries one: ALab's meshes carry `st` and `perfuv` both and each
+/// material reads one of them, so carrying every float2 primvar would
+/// double the texture coordinates for nothing.
+pub fn texcoord(network: &Network) -> Result<Option<String>, String> {
+    let Some(surface) = &network.surface else {
+        return Ok(None);
+    };
+    let mut order = Vec::new();
+    visit(network, surface, &mut order)?;
+    let mut names = BTreeSet::new();
+    for path in order {
+        let node = &network.nodes[path];
+        if node.node_type != "UsdPrimvarReader_float2"
+            && node.node_type != "ND_geompropvalue_vector2"
+        {
+            continue;
+        }
+        if let Some(Value::Text(name)) = node.params.get(store_input(node, "geomprop")) {
+            names.insert(name.clone());
+        }
+    }
+    let mut names = names.into_iter();
+    let name = names.next();
+    match (&name, names.next()) {
+        (Some(a), Some(b)) => Err(format!(
+            "reads the primvars {a} and {b}, and a mesh is drawn with one texcoord"
+        )),
+        _ => Ok(name),
+    }
+}
+
 /// Lists the nodes upstream of `path` in document order: each node before
 /// what feeds it, inputs by name.
 fn visit<'a>(network: &'a Network, path: &'a str, order: &mut Vec<&'a str>) -> Result<(), String> {
@@ -424,6 +458,29 @@ pub mod tests {
             .insert("varname".into(), Value::Text("uv".into()));
         assert_ne!(hash(&edited), hash(&fixture()));
         assert!(text(&edited).contains("value=\"uv\""));
+    }
+
+    #[test]
+    fn the_texcoord_is_the_one_primvar_read() {
+        assert_eq!(texcoord(&fixture()).unwrap(), Some("st".to_owned()));
+        assert_eq!(texcoord(&clay()).unwrap(), None);
+
+        // A second reader of the same name is one texcoord; of another, two.
+        let mut network = fixture();
+        let mut reader = network.nodes["st"].clone();
+        network.nodes.insert("uv".into(), reader.clone());
+        (network.nodes.get_mut("tex").unwrap().connections)
+            .insert("bias".into(), connection("uv", "result"));
+        assert_eq!(texcoord(&network).unwrap(), Some("st".to_owned()));
+        reader
+            .params
+            .insert("varname".into(), Value::Text("perfuv".into()));
+        network.nodes.insert("uv".into(), reader);
+        let error = texcoord(&network).unwrap_err();
+        assert!(error.contains("perfuv") && error.contains("st"), "{error}");
+        // The control: a reader nothing reads through does not count.
+        (network.nodes.get_mut("tex").unwrap().connections).remove("bias");
+        assert_eq!(texcoord(&network).unwrap(), Some("st".to_owned()));
     }
 
     #[test]

@@ -6,7 +6,6 @@
 #include <pxr/base/gf/vec2f.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/enum.h>
-#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/hd/renderIndex.h>
 #include <pxr/imaging/hd/sceneDelegate.h>
 #include <pxr/imaging/hd/tokens.h>
@@ -20,8 +19,6 @@
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
-
-TF_DEFINE_PRIVATE_TOKENS(_tokens, (st));
 
 namespace {
 
@@ -132,15 +129,20 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     // general primvar change.
     if (bits & (HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar))
         _SyncNormals(delegate, renderer);
-    if (bits & HdChangeTracker::DirtyPrimvar)
-        _SyncSt(delegate, renderer);
     if (bits & HdChangeTracker::DirtyTransform) {
         GfMatrix4d matrix = delegate->GetTransform(GetId());
         _pika.report(pika_mesh_transform(renderer, _id, matrix.data()), path + " transform");
     }
-    if (bits & HdChangeTracker::DirtyMaterialId)
-        _pika.report(pika_mesh_material(renderer, _id, delegate->GetMaterialId(GetId()).GetText()),
-                     path + " material");
+    if (bits & HdChangeTracker::DirtyMaterialId) {
+        SdfPath material = delegate->GetMaterialId(GetId());
+        // Kept on the rprim for PikaMaterial::Sync to find the meshes bound
+        // to it.
+        SetMaterialId(material);
+        _pika.report(pika_mesh_material(renderer, _id, material.GetText()), path + " material");
+    }
+    // The material decides which primvar is fetched, so it goes first.
+    if (bits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyMaterialId))
+        SyncTexcoord(delegate, renderer);
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
         _SyncInstancing(delegate, renderer);
 }
@@ -213,7 +215,7 @@ void PikaMesh::_SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer) {
 }
 
 bool PikaMesh::_FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
-                            HdInterpolation &interpolation) {
+                            HdInterpolation &interpolation) const {
     // The interpolations a mesh primvar can have.
     static const HdInterpolation interpolations[] = {
         HdInterpolationConstant, HdInterpolationUniform, HdInterpolationVarying,
@@ -250,21 +252,28 @@ void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) 
         path + " normals");
 }
 
-void PikaMesh::_SyncSt(HdSceneDelegate *delegate, pika_renderer *renderer) {
+// Materials sync before meshes, so the name is there on the first frame.
+void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) const {
     std::string const &path = GetId().GetString();
+    char name[256];
+    if (!_pika.report(pika_mesh_texcoord_name(renderer, _id, name, sizeof name),
+                      path + " texcoord"))
+        return;
     HdInterpolation interpolation;
-    if (!_FindPrimvar(delegate, _tokens->st, interpolation)) {
-        _pika.report(pika_mesh_no_st(renderer, _id), path + " st");
+    if (!name[0] || !_FindPrimvar(delegate, TfToken(name), interpolation)) {
+        _pika.report(pika_mesh_no_texcoord(renderer, _id), path + " texcoord");
         return;
     }
-    VtValue value = GetPrimvar(delegate, _tokens->st);
+    VtValue value = GetPrimvar(delegate, TfToken(name));
     if (!value.IsHolding<VtVec2fArray>()) {
-        fail(path + ": st is " + value.GetTypeName() + "; Pika reads float2 st");
+        fail(path + ": " + name + " is " + value.GetTypeName() + "; its material reads a float2");
         return;
     }
-    VtVec2fArray const &st = value.UncheckedGet<VtVec2fArray>();
+    VtVec2fArray const &values = value.UncheckedGet<VtVec2fArray>();
     std::string token = TfEnum::GetDisplayName(interpolation);
-    _pika.report(pika_mesh_st(renderer, _id, token.c_str(), xy(st), st.size()), path + " st");
+    _pika.report(
+        pika_mesh_texcoord(renderer, _id, name, token.c_str(), xy(values), values.size()),
+        path + " texcoord");
 }
 
 void PikaMesh::_SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer) {
@@ -472,7 +481,22 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
                          surface == network.terminals.end()
                              ? ""
                              : surface->second.upstreamNode.GetText()};
-    _pika.report(pika_material_network(renderer, _id, &flat), path + " network");
+    bool dirty = false;
+    if (!_pika.report(pika_material_network(renderer, _id, &flat, &dirty), path + " network"))
+        return;
+    // Hydra tells no mesh that its material's network changed, so the
+    // meshes bound to it fetch their texcoord again here. Marking them
+    // dirty instead does not reach them: with scene index emulation on,
+    // the bits go through the emulation scene index, which drops them on
+    // USD 25 and the custom bits too on USD 26.
+    if (!dirty)
+        return;
+    HdRenderIndex &index = delegate->GetRenderIndex();
+    for (SdfPath const &id : index.GetRprimIds()) {
+        auto mesh = dynamic_cast<PikaMesh const *>(index.GetRprim(id));
+        if (mesh && mesh->GetMaterialId() == GetId())
+            mesh->SyncTexcoord(delegate, renderer);
+    }
 }
 
 PikaCurves::PikaCurves(SdfPath const &id, Pika &pika) : HdBasisCurves(id), _pika(pika) {

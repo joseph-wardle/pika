@@ -37,7 +37,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st faceVarying 3
+  texcoord st faceVarying 3
     0 0
     1 0
     0 1
@@ -82,7 +82,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st faceVarying 3
+  texcoord st faceVarying 3
     0 0
     1 0
     0 1

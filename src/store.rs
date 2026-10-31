@@ -8,6 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
+use crate::material;
+
 pub struct Store {
     /// Ids are never reused, so a stale id is an error rather than a write to
     /// a newer prim.
@@ -32,9 +34,10 @@ pub struct Mesh {
     pub points: Option<Vec<[f32; 3]>>,
     /// `Some(None)` when the mesh has no normals primvar.
     pub normals: Option<Option<Normals>>,
-    /// The `st` primvar, the texture coordinates materials read;
-    /// `Some(None)` when the mesh has none.
-    pub st: Option<Option<St>>,
+    /// The texture coordinates: the float2 primvar the mesh's material
+    /// reads, by name. `Some(None)` when the material reads none or the
+    /// mesh lacks it.
+    pub texcoord: Option<Option<Texcoord>>,
     /// Hydra's `GfMatrix4d`: row-major, translation in the last row.
     pub transform: Option<[f64; 16]>,
     pub visible: Option<bool>,
@@ -259,7 +262,8 @@ pub struct Normals {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct St {
+pub struct Texcoord {
+    pub name: String,
     pub interpolation: Interpolation,
     pub values: Vec<[f32; 2]>,
 }
@@ -303,14 +307,15 @@ impl Interpolation {
 #[derive(PartialEq, Debug, Default)]
 pub struct Moved {
     /// A mesh was added, removed or remodelled, or its points, normals or
-    /// st changed size or kind: the layout of every mesh's data is rebuilt.
+    /// texcoord changed size or kind: the layout of every mesh's data is
+    /// rebuilt.
     pub layout: bool,
     /// Meshes whose points changed, keeping their count.
     pub points: BTreeSet<u64>,
     /// Meshes whose normals changed, keeping their interpolation and count.
     pub normals: BTreeSet<u64>,
-    /// Meshes whose st changed, keeping its interpolation and count.
-    pub st: BTreeSet<u64>,
+    /// Meshes whose texcoord changed, keeping its interpolation and count.
+    pub texcoord: BTreeSet<u64>,
     /// Meshes whose transform changed: only their instances are rewritten.
     pub transforms: BTreeSet<u64>,
     /// A visibility, render tag or instancing changed: the instances and
@@ -357,7 +362,7 @@ pub struct Census {
     /// The same two counts as drawn: a refined mesh's refined faces.
     pub refined_triangles: usize,
     pub refined_prototype_triangles: usize,
-    /// Points, normals, st and face indices, counting each mesh once.
+    /// Points, normals, texcoord and face indices, counting each mesh once.
     pub geometry_bytes: usize,
     /// The refined faces and stencils, counting each mesh once.
     pub refined_bytes: usize,
@@ -418,7 +423,7 @@ impl Store {
                 topology: None,
                 points: None,
                 normals: None,
-                st: None,
+                texcoord: None,
                 transform: None,
                 visible: None,
                 instancing: None,
@@ -495,20 +500,36 @@ impl Store {
         Ok(())
     }
 
-    /// `None` when the mesh has no st primvar.
-    pub fn set_st(&mut self, id: u64, st: Option<St>) -> Result<(), String> {
-        let bytes = st.as_ref().map_or(0, |s| size_of_val(s.values.as_slice()));
+    /// `None` when the mesh's material reads no primvar or the mesh lacks
+    /// the one it reads.
+    pub fn set_texcoord(&mut self, id: u64, texcoord: Option<Texcoord>) -> Result<(), String> {
+        let bytes = (texcoord.as_ref()).map_or(0, |t| size_of_val(t.values.as_slice()));
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        let kind = |s: &Option<St>| s.as_ref().map(|s| (s.interpolation, s.values.len()));
-        let reshaped = mesh.st.as_ref().map(kind) != Some(kind(&st));
-        if write(&mut self.stats.mesh, &mut mesh.st, st, bytes) {
+        let kind = |t: &Option<Texcoord>| t.as_ref().map(|t| (t.interpolation, t.values.len()));
+        let reshaped = mesh.texcoord.as_ref().map(kind) != Some(kind(&texcoord));
+        if write(&mut self.stats.mesh, &mut mesh.texcoord, texcoord, bytes) {
             if reshaped {
                 self.moved.layout = true;
             } else {
-                self.moved.st.insert(id);
+                self.moved.texcoord.insert(id);
             }
         }
         Ok(())
+    }
+
+    /// The float2 primvar mesh `id`'s material reads, the texcoord the
+    /// delegate fetches for it: none when no material is bound, the
+    /// material is not in the store or has no network, or its network
+    /// reads none. A network reading two is refused when it is built
+    /// (`shade` warns and draws it pink), so its meshes carry none.
+    pub fn texcoord_name(&self, id: u64) -> Result<Option<String>, String> {
+        let mesh = self.meshes.get(&id).ok_or_else(|| stale("mesh", id))?;
+        let Some(path) = &mesh.material else {
+            return Ok(None);
+        };
+        let network =
+            (self.materials.values().find(|m| &m.path == path)).and_then(|m| m.network.as_ref());
+        Ok(network.and_then(|n| material::texcoord(n).ok().flatten()))
     }
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
@@ -668,12 +689,18 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_network(&mut self, id: u64, network: Network) -> Result<(), String> {
+    /// Whether the material's meshes must sync again: the network reads a
+    /// primvar the one before it did not, so their texcoord is stale. A
+    /// first network is not a change: its meshes sync after it anyway.
+    pub fn set_network(&mut self, id: u64, network: Network) -> Result<bool, String> {
         let bytes = network.bytes();
         let material = self
             .materials
             .get_mut(&id)
             .ok_or_else(|| stale("material", id))?;
+        let reads = |n: &Network| material::texcoord(n).ok().flatten();
+        let before = material.network.as_ref().map(reads);
+        let after = reads(&network);
         if write(
             &mut self.stats.material,
             &mut material.network,
@@ -682,7 +709,7 @@ impl Store {
         ) {
             self.moved.materials.insert(id);
         }
-        Ok(())
+        Ok(before.is_some_and(|b| b != after))
     }
 
     pub fn insert_curves(&mut self, path: String) -> u64 {
@@ -768,8 +795,8 @@ impl Store {
                     Some(Some(n)) => size_of_val(n.values.as_slice()),
                     _ => 0,
                 }
-                + match &mesh.st {
-                    Some(Some(s)) => size_of_val(s.values.as_slice()),
+                + match &mesh.texcoord {
+                    Some(Some(t)) => size_of_val(t.values.as_slice()),
                     _ => 0,
                 };
             materials.extend(mesh.material.iter().map(String::as_str));
@@ -893,15 +920,16 @@ impl fmt::Display for Mesh {
             Some(None) => writeln!(f, "  normals none")?,
             None => writeln!(f, "  normals {UNSYNCED}")?,
         }
-        match &self.st {
-            Some(Some(s)) => {
-                writeln!(f, "  st {} {}", s.interpolation.token(), s.values.len())?;
-                for v in &s.values {
+        match &self.texcoord {
+            Some(Some(t)) => {
+                let (name, kind) = (&t.name, t.interpolation.token());
+                writeln!(f, "  texcoord {name} {kind} {}", t.values.len())?;
+                for v in &t.values {
                     writeln!(f, "   {}", List(v))?;
                 }
             }
-            Some(None) => writeln!(f, "  st none")?,
-            None => writeln!(f, "  st {UNSYNCED}")?,
+            Some(None) => writeln!(f, "  texcoord none")?,
+            None => writeln!(f, "  texcoord {UNSYNCED}")?,
         }
         Ok(())
     }
@@ -1130,6 +1158,48 @@ mod tests {
     }
 
     #[test]
+    fn the_texcoord_name_follows_the_bound_material() {
+        let mut store = Store::new();
+        let a = store.insert_mesh("/a".into());
+        assert_eq!(store.texcoord_name(a).unwrap(), None);
+        store.set_material(a, "/mtl/paint".into()).unwrap();
+        // Bound before the material is in the store, or has a network.
+        assert_eq!(store.texcoord_name(a).unwrap(), None);
+        let m = store.insert_material("/mtl/paint".into());
+        assert_eq!(store.texcoord_name(a).unwrap(), None);
+        let network = material::tests::fixture();
+        // A first network is not a change.
+        assert!(!store.set_network(m, network.clone()).unwrap());
+        assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
+        // A value edit keeps what it reads; a new name is a change.
+        let mut edited = network.clone();
+        (edited.nodes.get_mut("surface").unwrap().params)
+            .insert("roughness".into(), Value::Float(vec![0.75]));
+        assert!(!store.set_network(m, edited).unwrap());
+        let mut renamed = network.clone();
+        (renamed.nodes.get_mut("st").unwrap().params)
+            .insert("varname".into(), Value::Text("perfuv".into()));
+        assert!(store.set_network(m, renamed).unwrap());
+        assert_eq!(store.texcoord_name(a).unwrap(), Some("perfuv".to_owned()));
+        // A network reading two gives its meshes none; the control is a stale mesh.
+        let mut two = network;
+        let mut uv = two.nodes["st"].clone();
+        uv.params
+            .insert("varname".into(), Value::Text("perfuv".into()));
+        two.nodes.insert("uv".into(), uv);
+        (two.nodes.get_mut("tex").unwrap().connections).insert(
+            "bias".into(),
+            Connection {
+                node: "uv".into(),
+                output: "result".into(),
+            },
+        );
+        assert!(store.set_network(m, two).unwrap());
+        assert_eq!(store.texcoord_name(a).unwrap(), None);
+        assert!(store.texcoord_name(a + 1).is_err());
+    }
+
+    #[test]
     fn unchanged_pulls_count_as_redundant() {
         let mut store = Store::new();
         let a = store.insert_mesh("/a".into());
@@ -1191,18 +1261,22 @@ mod tests {
         assert_eq!((moved.layout, moved.draws), (false, false));
         assert_eq!(moved.normals, BTreeSet::from([a]));
         assert_eq!(moved.transforms, BTreeSet::from([a]));
-        let st = |values| St {
+        let st = |values| Texcoord {
+            name: "st".into(),
             interpolation: Interpolation::FaceVarying,
             values,
         };
-        store.set_st(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        store.set_texcoord(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
         assert!(store.take_moved().layout);
-        store.set_st(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        store.set_texcoord(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
         assert_eq!(store.take_moved(), Moved::default());
-        store.set_st(a, Some(st(vec![[1.0; 2]; 7]))).unwrap();
+        store.set_texcoord(a, Some(st(vec![[1.0; 2]; 7]))).unwrap();
         let moved = store.take_moved();
-        assert_eq!((moved.layout, &moved.st), (false, &BTreeSet::from([a])));
-        store.set_st(a, None).unwrap();
+        assert_eq!(
+            (moved.layout, &moved.texcoord),
+            (false, &BTreeSet::from([a]))
+        );
+        store.set_texcoord(a, None).unwrap();
         assert!(store.take_moved().layout);
 
         // Changing the point count moves the layout, not the points.
@@ -1363,9 +1437,10 @@ mod tests {
             )
             .unwrap();
         store
-            .set_st(
+            .set_texcoord(
                 b,
-                Some(St {
+                Some(Texcoord {
+                    name: "st".into(),
                     interpolation: Interpolation::Vertex,
                     values: vec![[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]],
                 }),
@@ -1412,7 +1487,7 @@ mesh /world/a
   topology not synced
   points not synced
   normals not synced
-  st not synced
+  texcoord not synced
 counted sphereLight /world/aa
 mesh /world/b
   render_tag not synced
@@ -1436,7 +1511,7 @@ mesh /world/b
     0 0.0000001 3
   normals uniform 1
     0 0 1
-  st vertex 3
+  texcoord st vertex 3
     0 0
     0.5 0
     0 1

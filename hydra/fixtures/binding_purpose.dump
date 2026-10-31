@@ -24,7 +24,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none
 mesh /world/whole
   render_tag geometry
   visible true
@@ -44,7 +44,7 @@ mesh /world/whole
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none
 sync 2
 material /world/mtl/base
   surface none
@@ -70,7 +70,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none
 mesh /world/whole
   render_tag geometry
   visible true
@@ -89,4 +89,4 @@ mesh /world/whole
     1 0 0
     0 1 0
   normals none
-  st none
+  texcoord none

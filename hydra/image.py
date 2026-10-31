@@ -46,9 +46,10 @@ What the reference encodes:
 - Color is the material's, with alpha 1. A mesh bound to a MaterialX
   surface whose emission is a uniform EDF of an image sampled at a primvar
   (hydra/images/textured.usda) shows the image's bilinear sample, level 0,
-  at the hit's primvar, under the image node's address modes, with st
-  (0, 0) at the image's bottom-left corner as USD and MaterialX read it, the
-  channels padded with 0 to three. A mesh bound to a material whose surface
+  at the hit's primvar, the one the material's reader names
+  (hydra/images/primvar.usda), under the image node's address modes, with
+  st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
+  the channels padded with 0 to three. A mesh bound to a material whose surface
   shader names a MaterialX nodedef (ND_...) the host's libraries do not
   define is pink, (1, 0, 1), as Pika draws a material it cannot build,
   when the host hands the network over: husk and UsdImaging's scene-index
@@ -92,7 +93,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
-            "failed materials drawn clay", "frame 1's reference"]
+            "st read whatever the name", "failed materials drawn clay", "frame 1's reference"]
 PINK = "pink"
 # What a host hands Pika: the purposes it draws, and whether a material
 # whose surface shader the shader registry does not know arrives with its
@@ -365,7 +366,8 @@ def triangles(stage, time, host, control=None):
         mesh = UsdGeom.Mesh(prim)
         emitted = emission(prim, host, control)
         if emitted and emitted != PINK:
-            primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(emitted[2])
+            name = "st" if control == "st read whatever the name" else emitted[2]
+            primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(name)
             if not primvar or mesh.GetSubdivisionSchemeAttr().Get(time) != UsdGeom.Tokens.none:
                 raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar "
                                  "of an unsubdivided mesh")

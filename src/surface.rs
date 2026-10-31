@@ -28,11 +28,17 @@ pub fn vertex_stage(manifest: &Manifest) -> Result<String, String> {
             "normalWorld" => "p.normal".to_owned(),
             "tangentWorld" => "tangent(p.normal)".to_owned(),
             "bitangentWorld" => "cross(p.normal, tangent(p.normal))".to_owned(),
-            "i_geomprop_st" => "p.st".to_owned(),
+            // Every float2 geomprop reads the mesh's one texcoord;
+            // `material::texcoord` refuses a network reading two before it
+            // gets here.
+            name if name.starts_with("i_geomprop_") && v.kind == "vector2" => {
+                "p.texcoord".to_owned()
+            }
             name => {
                 return Err(format!(
-                    "the surface reads {name}, which Pika's vertex stage does not provide \
-                     (of the primvars, it provides st)"
+                    "the surface reads {name} as a {}, which Pika's vertex stage does not \
+                     provide (of the primvars, it provides one float2, the texcoord)",
+                    v.kind
                 ));
             }
         };
@@ -329,13 +335,21 @@ mod tests {
     fn vertex_stage_fills_the_varyings() {
         assert_eq!(vertex_stage(&manifest()).unwrap(), STAGE);
 
+        // Any float2 primvar is the texcoord; one of another type is not provided.
+        let mut renamed = manifest();
+        renamed.varyings[0].name = "i_geomprop_perfuv".into();
+        let stage = vertex_stage(&renamed).unwrap();
+        assert!(
+            stage.contains("o.i_geomprop_perfuv = p.texcoord;"),
+            "{stage}"
+        );
         let mut unknown = manifest();
         unknown.varyings.push(Varying {
-            name: "texcoord_0".into(),
-            kind: "vector2".into(),
+            name: "i_geomprop_displayColor".into(),
+            kind: "color3".into(),
         });
         let error = vertex_stage(&unknown).unwrap_err();
-        assert!(error.contains("texcoord_0"), "{error}");
+        assert!(error.contains("displayColor"), "{error}");
     }
 
     #[test]
