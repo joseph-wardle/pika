@@ -43,9 +43,26 @@ What the reference encodes:
   transpose of the world matrix and normalized. A face's front is the side
   its moved geometric normal points to, reversed when left-handed; seen from
   behind, the normal is negated.
-- Color is the material's, with alpha 1. A mesh bound to a MaterialX
-  surface whose emission is a uniform EDF of an image sampled at a primvar
-  (hydra/images/textured.usda) shows the image's bilinear sample, level 0,
+- Color is the material's albedo under the headlight plus its emission,
+  with alpha 1: the albedo times the normal against the direction toward
+  the eye, clamped, the normal turned toward the eye first as MaterialX's
+  BSDFs turn it, under a headlight of π along the camera's axis, as
+  src/surface.rs sets it, so a facing surface shows its albedo. A mesh
+  with no material bound is clay: albedo 18 % grey, no emission. An
+  OpenPBR surface (hydra/images/pbr.usda) has albedo base_weight ×
+  base_color and emission emission_luminance × emission_color, a Standard
+  Surface base × base_color and emission × emission_color, unauthored
+  inputs at the defaults the host's libraries give them; their specular
+  weight must be 0 and no other input authored or connected, since the
+  rest has no closed form. An OpenPBR surface is checked only within 35°
+  of facing the eye: at specular weight 0 its dielectric layer has an IOR
+  of 1, but MaterialX still attenuates the base by the layer's directional
+  albedo, an analytic fit with F90 = 1 whatever the IOR, which takes 0.2 %
+  of the base at facing (within the colour tolerance for a base under 1),
+  nothing near 25° and 13 % at 67°, so a pixel seen from further round is
+  refused. A mesh bound to a MaterialX surface whose
+  emission is a uniform EDF of an image sampled at a primvar
+  (hydra/images/textured.usda) emits the image's bilinear sample, level 0,
   at the hit's primvar, the one the material's reader names
   (hydra/images/primvar.usda), under the image node's address modes, with
   st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
@@ -60,14 +77,13 @@ What the reference encodes:
   each cage face linearly. Seams ending inside the surface or meeting
   another seam or a boundary at a vertex are refused. A mesh bound to a material whose surface
   shader names a MaterialX nodedef (ND_...) the host's libraries do not
-  define is pink, (1, 0, 1), as Pika draws a material it cannot build,
+  define emits pink, (1, 0, 1), as Pika draws a material it cannot build,
   when the host hands the network over: husk and UsdImaging's scene-index
   path do, UsdImaging's legacy path drops a network whose surface shader
   the shader registry does not know, so Pika sees no surface and draws
   clay. usdrecord takes the path USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX
-  names, off by default in Houdini 21 and on in 22. Any other mesh is
-  clay: grey, the normal against the direction toward the eye, clamped.
-  Other materials are refused, not approximated.
+  names, off by default in Houdini 21 and on in 22. Other materials are
+  refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
@@ -103,10 +119,29 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "st read whatever the name", "st seams smoothed over", "st refined bilinearly",
-            "failed materials drawn clay", "frame 1's reference"]
+            "failed materials drawn clay", "base weight ignored", "emission ignored",
+            "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
-PINK = "pink"
+# A material's closed form: its albedo under the headlight, its emission, the
+# image (file, address modes, primvar) whose sample it emits, if any, and
+# the angle from facing the eye within which the form holds (None: all).
+Look = collections.namedtuple("Look", "albedo emission image facing")
+CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None)
+PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None)
+# Each lit surface's inputs the reference reads: the albedo's weight and
+# colour, the emission's weight and colour, the specular weight, and the
+# facing angle. OpenPBR's specular weight only modulates the IOR, and
+# MaterialX's dielectric layer attenuates its base by a directional albedo
+# fitted with F90 = 1 at any IOR, so grazing angles darken at weight 0 (see
+# the module's doc); Standard Surface's weight is the layer's own, which 0
+# switches off.
+LIT = {
+    "ND_open_pbr_surface_surfaceshader": ("base_weight", "base_color", "emission_luminance",
+                                          "emission_color", "specular_weight", 35),
+    "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
+                                          "specular", None),
+}
 # What a host hands Pika: the purposes it draws, and whether a material
 # whose surface shader the shader registry does not know arrives with its
 # network (see the module's doc).
@@ -367,22 +402,50 @@ def unknown(shader):
     return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
 
 
-def emission(prim, host, control=None):
-    """The closed form of the mesh's material, or None for clay: PINK for a
-    surface shader naming a nodedef the libraries do not define, when
-    `host` delivers it; else the image file, its address modes (u, v) and
-    the primvar it is sampled at, for a MaterialX surface whose emission is
-    a uniform EDF of an image node's vector2 sample, through converts
-    (hydra/images/textured.usda)."""
+def lit(surface, time, control=None):
+    """The Look of an OpenPBR or Standard Surface shader with its specular
+    off (hydra/images/pbr.usda), its inputs read at `time`."""
+    *names, facing = LIT[surface.GetShaderId()]
+    path = surface.GetPath()
+    authored = {i.GetBaseName(): i for i in surface.GetInputs()}
+    extra = sorted(set(authored) - set(names))
+    if extra or any(i.HasConnectedSource() for i in authored.values()):
+        raise ValueError(f"{path}: the reference lights a surface's base and emission as values; "
+                         f"it has no closed form for {extra or 'a connected input'}")
+
+    def value(name):
+        if name in authored:
+            v = authored[name].Get(time)
+        else:
+            v = NODEDEFS.getNodeDef(surface.GetShaderId()).getActiveInput(name).getValue()
+        return tuple(v) if hasattr(v, "__len__") else v
+
+    if value(names[4]) != 0:
+        raise ValueError(f"{path}: the reference has no closed form for a specular lobe; set {names[4]} to 0")
+    weight = 1.0 if control == "base weight ignored" else value(names[0])
+    glow = 0.0 if control == "emission ignored" else value(names[2])
+    return Look(tuple(weight * c for c in value(names[1])), tuple(glow * c for c in value(names[3])),
+                None, facing)
+
+
+def look(prim, host, time, control=None):
+    """The closed form of the mesh's material: CLAY with none bound; PINK
+    for a surface shader naming a nodedef the libraries do not define, when
+    `host` delivers it; a lit surface's; or the image file, its address
+    modes (u, v) and the primvar it is sampled at, for a MaterialX surface
+    whose emission is a uniform EDF of an image node's vector2 sample,
+    through converts (hydra/images/textured.usda)."""
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
     if not material:
-        return None
+        return CLAY
     source = material.GetSurfaceOutput().GetConnectedSource()
     surface = UsdShade.Shader(source[0].GetPrim()) if source else None
-    refuse = ValueError(f"{prim.GetPath()}: the reference knows only clay, pink and the emissive ramp")
+    refuse = ValueError(f"{prim.GetPath()}: the reference knows only clay, pink, lit surfaces and the emissive ramp")
     if surface and unknown(surface):
         clay = control == "failed materials drawn clay" or not host.delivers_unknown
-        return None if clay else PINK
+        return CLAY if clay else PINK
+    if surface and surface.GetShaderId() in LIT:
+        return lit(surface, time, control)
     if not surface or surface.GetShaderId() != "ND_surface":
         raise refuse
     edf = upstream(surface, "edf")
@@ -398,7 +461,8 @@ def emission(prim, host, control=None):
         raise refuse
     modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
                   for m in ("uaddressmode", "vaddressmode"))
-    return image.GetInput("file").Get().resolvedPath, modes, reader.GetInput("geomprop").Get()
+    file = image.GetInput("file").Get().resolvedPath
+    return Look((0.0,) * 3, (0.0,) * 3, (file, modes, reader.GetInput("geomprop").Get()), None)
 
 
 def sample(path, st, modes, control=None):
@@ -435,14 +499,14 @@ def sample(path, st, modes, control=None):
 def triangles(stage, time, host, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix,
-    whether it is left-handed, a face id, and its material's emission with
-    the sampled primvar at its corners (None for clay)."""
+    whether it is left-handed, a face id, its material's Look, and the
+    sampled primvar at its corners when the Look samples an image."""
     out = []
     for instance, (prim, world) in enumerate(meshes(stage, time, host.purposes, control)):
         mesh = UsdGeom.Mesh(prim)
-        emitted = emission(prim, host, control)
-        if emitted and emitted != PINK:
-            name = "st" if control == "st read whatever the name" else emitted[2]
+        shading = look(prim, host, time, control)
+        if shading.image:
+            name = "st" if control == "st read whatever the name" else shading.image[2]
             primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(name)
             if not primvar:
                 raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar")
@@ -492,9 +556,9 @@ def triangles(stage, time, host, control=None):
                     "left": left,
                     "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
-                    "emission": emitted,
+                    "look": shading,
                     "st": ([list(value(st_values, st_interpolation, c)) for c in cs]
-                           if emitted and emitted != PINK else None),
+                           if shading.image else None),
                 })
             corner += count
     return out
@@ -557,23 +621,25 @@ def reference(stage, time, width, height, host, control=None):
         n[behind] *= -1
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
-    # Every mesh is clay until textures: Lambert at 18 % grey under a
-    # headlight of π along the camera's axis, as src/surface.rs sets it, so
-    # a facing surface shows its albedo. MaterialX's BSDFs turn a normal
-    # facing away from the eye toward it before lighting.
-    lit = n.copy()
-    lit[dot(lit, toward) < 0] *= -1
+    # MaterialX's BSDFs turn a normal facing away from the eye toward it
+    # before lighting.
+    facing = n.copy()
+    facing[dot(facing, toward) < 0] *= -1
     light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
-    grey = 0.18 * np.clip(dot(lit, light), 0.0, 1.0)
-    color = np.c_[grey, grey, grey, np.ones(len(grey))]
-    pink = np.array([t["emission"] == PINK for t in tris])[i]
-    color[pink, :3] = [1, 0, 1]
-    kinds = sorted({t["emission"] for t in tris if t["emission"] and t["emission"] != PINK})
-    which = np.array([kinds.index(t["emission"]) if t["emission"] in kinds else -1 for t in tris])[i]
-    for k, emitted in enumerate(kinds):
+    lambert = np.clip(dot(facing, light), 0.0, 1.0)[:, None]
+    looks = [t["look"] for t in tris]
+    limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
+    if (dot(facing, toward) < np.cos(np.radians(limit))).any():
+        raise ValueError("a surface is seen from further round than the angle its closed form holds within")
+    albedo = np.array([l.albedo for l in looks])[i]
+    emission = np.array([l.emission for l in looks])[i]
+    color = np.c_[albedo * lambert + emission, np.ones(len(p))]
+    images = sorted({l.image for l in looks if l.image})
+    which = np.array([images.index(l.image) if l.image else -1 for l in looks])[i]
+    for k, (path, modes, _) in enumerate(images):
         on = which == k
         st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
-        color[on, :3] = sample(emitted[0], np.einsum("nc,ncj->nj", bary[on], st), emitted[1], control)
+        color[on, :3] += sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, control)
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":

@@ -1,0 +1,89 @@
+#usda 1.0
+(
+    doc = "Two quads with face-varying normals fanning out, each with its specular weight 0: one facing the camera bound to an OpenPBR surface, one tilted away bound to a Standard Surface, each a base colour under the headlight plus an emission. The OpenPBR base colour and the Standard Surface emission change at frame 2."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+# MaterialX attenuates OpenPBR's base by its dielectric layer's directional
+# albedo even at specular weight 0 (see hydra/image.py), so this quad stays
+# within 35° of facing the camera, fan included, and its base under 1.
+def Mesh "facing" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-2, -1, -5), (-0.3, -1, -5), (-0.3, 1, -5), (-2, 1, -5)]
+    normal3f[] normals = [(-0.15, -0.15, 1), (0.15, -0.15, 1), (0.15, 0.15, 1), (-0.15, 0.15, 1)] (
+        interpolation = "faceVarying"
+    )
+    rel material:binding = </openpbr>
+}
+
+def Xform "tilt"
+{
+    double3 xformOp:translate = (0, -0.3, -6)
+    float xformOp:rotateX = -50
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateX"]
+
+    def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0.2, -1.5, 0), (2, -1.5, 0), (2, 1.5, 0), (0.2, 1.5, 0)]
+        normal3f[] normals = [(0, -0.4, 1), (0.4, 0, 1), (0, 0.4, 1), (-0.4, 0, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </standard>
+    }
+}
+
+def Material "openpbr"
+{
+    token outputs:surface.connect = </openpbr/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:base_weight = 0.9
+        color3f inputs:base_color.timeSamples = {
+            1: (0.7, 0.3, 0.2),
+            2: (0.2, 0.5, 0.8),
+        }
+        float inputs:specular_weight = 0
+        float inputs:emission_luminance = 0.15
+        color3f inputs:emission_color = (0.1, 0.2, 1)
+        token outputs:out
+    }
+}
+
+def Material "standard"
+{
+    token outputs:surface.connect = </standard/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.3, 0.6, 0.2)
+        float inputs:specular = 0
+        float inputs:emission.timeSamples = {
+            1: 0.2,
+            2: 0.5,
+        }
+        color3f inputs:emission_color = (1, 0.5, 0.1)
+        token outputs:out
+    }
+}
