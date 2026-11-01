@@ -185,33 +185,46 @@ pub struct Topology {
 
 /// A subdivision surface as the delegate's OpenSubdiv refined it, one
 /// uniform level. The refined faces are drawn in place of the cage's, and
-/// each refined point is a stencil: a weighted sum of cage points.
+/// each refined point is a stencil over the cage points.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refined {
     pub face_vertex_counts: Vec<i32>,
     pub face_vertex_indices: Vec<i32>,
     /// The refined faces of the cage's holes.
     pub holes: Vec<i32>,
-    /// Point i's stencil is entries `offsets[i]` to `offsets[i + 1]` of the
-    /// indices and weights.
-    pub offsets: Vec<u32>,
-    pub indices: Vec<i32>,
-    pub weights: Vec<f32>,
+    pub stencils: Stencils,
 }
 
 impl Refined {
     /// The refined points.
     pub fn point_count(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
+        self.stencils.count()
     }
 
     fn bytes(&self) -> usize {
-        4 * (self.face_vertex_counts.len()
-            + self.face_vertex_indices.len()
-            + self.holes.len()
-            + self.offsets.len()
-            + self.indices.len()
-            + self.weights.len())
+        4 * (self.face_vertex_counts.len() + self.face_vertex_indices.len() + self.holes.len())
+            + self.stencils.bytes()
+    }
+}
+
+/// Refined values as weighted sums of the values they are refined from:
+/// value i's stencil is entries `offsets[i]` to `offsets[i + 1]` of the
+/// indices and weights.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Stencils {
+    pub offsets: Vec<u32>,
+    pub indices: Vec<i32>,
+    pub weights: Vec<f32>,
+}
+
+impl Stencils {
+    /// The refined values.
+    pub fn count(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    pub fn bytes(&self) -> usize {
+        4 * (self.offsets.len() + self.indices.len() + self.weights.len())
     }
 }
 
@@ -266,6 +279,26 @@ pub struct Texcoord {
     pub name: String,
     pub interpolation: Interpolation,
     pub values: Vec<[f32; 2]>,
+    /// How a subdivided mesh's refined faces read it; `None` when the mesh
+    /// is drawn as its cage.
+    pub refined: Option<RefinedTexcoord>,
+}
+
+/// A texcoord refined with its mesh by the delegate's OpenSubdiv: per
+/// corner of the refined faces, in `Refined`'s order, the refined value it
+/// reads, each a stencil over the values handed over. A faceVarying
+/// texcoord's values are welded first (see the delegate), so they are the
+/// distinct ones.
+#[derive(Clone, PartialEq, Debug)]
+pub struct RefinedTexcoord {
+    pub face_vertex_indices: Vec<i32>,
+    pub stencils: Stencils,
+}
+
+impl RefinedTexcoord {
+    fn bytes(&self) -> usize {
+        4 * self.face_vertex_indices.len() + self.stencils.bytes()
+    }
 }
 
 /// Hydra's primvar interpolations, as USD names them.
@@ -503,10 +536,21 @@ impl Store {
     /// `None` when the mesh's material reads no primvar or the mesh lacks
     /// the one it reads.
     pub fn set_texcoord(&mut self, id: u64, texcoord: Option<Texcoord>) -> Result<(), String> {
-        let bytes = (texcoord.as_ref()).map_or(0, |t| size_of_val(t.values.as_slice()));
+        let bytes = (texcoord.as_ref()).map_or(0, |t| {
+            size_of_val(t.values.as_slice()) + t.refined.as_ref().map_or(0, RefinedTexcoord::bytes)
+        });
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        let kind = |t: &Option<Texcoord>| t.as_ref().map(|t| (t.interpolation, t.values.len()));
-        let reshaped = mesh.texcoord.as_ref().map(kind) != Some(kind(&texcoord));
+        // Values alone may change in place: the interpolation, the count and
+        // the refinement are the layout's.
+        let reshaped = match (&mesh.texcoord, &texcoord) {
+            (Some(Some(old)), Some(new)) => {
+                old.interpolation != new.interpolation
+                    || old.values.len() != new.values.len()
+                    || old.refined != new.refined
+            }
+            (Some(None), None) => false,
+            _ => true,
+        };
         if write(&mut self.stats.mesh, &mut mesh.texcoord, texcoord, bytes) {
             if reshaped {
                 self.moved.layout = true;
@@ -785,7 +829,11 @@ impl Store {
             census.prototype_triangles += triangles;
             census.refined_triangles += refined * instances;
             census.refined_prototype_triangles += refined;
-            census.refined_bytes += topology.refined.as_ref().map_or(0, Refined::bytes);
+            census.refined_bytes += topology.refined.as_ref().map_or(0, Refined::bytes)
+                + match &mesh.texcoord {
+                    Some(Some(t)) => t.refined.as_ref().map_or(0, RefinedTexcoord::bytes),
+                    _ => 0,
+                };
             census.geometry_bytes += 4 * topology.face_vertex_indices.len()
                 + mesh
                     .points
@@ -923,7 +971,12 @@ impl fmt::Display for Mesh {
         match &self.texcoord {
             Some(Some(t)) => {
                 let (name, kind) = (&t.name, t.interpolation.token());
-                writeln!(f, "  texcoord {name} {kind} {}", t.values.len())?;
+                write!(f, "  texcoord {name} {kind} {}", t.values.len())?;
+                // Its refinement is dumped by size, as the faces' is.
+                if let Some(r) = &t.refined {
+                    write!(f, " refined values {}", r.stencils.count())?;
+                }
+                writeln!(f)?;
                 for v in &t.values {
                     writeln!(f, "   {}", List(v))?;
                 }
@@ -1261,21 +1314,56 @@ mod tests {
         assert_eq!((moved.layout, moved.draws), (false, false));
         assert_eq!(moved.normals, BTreeSet::from([a]));
         assert_eq!(moved.transforms, BTreeSet::from([a]));
-        let st = |values| Texcoord {
+        let st = |values, refined| Texcoord {
             name: "st".into(),
             interpolation: Interpolation::FaceVarying,
             values,
+            refined,
         };
-        store.set_texcoord(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        store
+            .set_texcoord(a, Some(st(vec![[0.0; 2]; 7], None)))
+            .unwrap();
         assert!(store.take_moved().layout);
-        store.set_texcoord(a, Some(st(vec![[0.0; 2]; 7]))).unwrap();
+        store
+            .set_texcoord(a, Some(st(vec![[0.0; 2]; 7], None)))
+            .unwrap();
         assert_eq!(store.take_moved(), Moved::default());
-        store.set_texcoord(a, Some(st(vec![[1.0; 2]; 7]))).unwrap();
+        store
+            .set_texcoord(a, Some(st(vec![[1.0; 2]; 7], None)))
+            .unwrap();
         let moved = store.take_moved();
         assert_eq!(
             (moved.layout, &moved.texcoord),
             (false, &BTreeSet::from([a]))
         );
+        // Refining it moves the layout, as does refining it differently;
+        // new values under the same refinement move the texcoord.
+        let refined = |weight| {
+            Some(RefinedTexcoord {
+                face_vertex_indices: vec![0; 3],
+                stencils: Stencils {
+                    offsets: vec![0, 1],
+                    indices: vec![0],
+                    weights: vec![weight],
+                },
+            })
+        };
+        store
+            .set_texcoord(a, Some(st(vec![[1.0; 2]; 7], refined(1.0))))
+            .unwrap();
+        assert!(store.take_moved().layout);
+        store
+            .set_texcoord(a, Some(st(vec![[2.0; 2]; 7], refined(1.0))))
+            .unwrap();
+        let moved = store.take_moved();
+        assert_eq!(
+            (moved.layout, &moved.texcoord),
+            (false, &BTreeSet::from([a]))
+        );
+        store
+            .set_texcoord(a, Some(st(vec![[2.0; 2]; 7], refined(0.5))))
+            .unwrap();
+        assert!(store.take_moved().layout);
         store.set_texcoord(a, None).unwrap();
         assert!(store.take_moved().layout);
 
@@ -1365,9 +1453,11 @@ mod tests {
             face_vertex_counts: vec![4; 3],
             face_vertex_indices: vec![0; 12],
             holes: vec![],
-            offsets: vec![0, 1],
-            indices: vec![0],
-            weights: vec![1.0],
+            stencils: Stencils {
+                offsets: vec![0, 1],
+                indices: vec![0],
+                weights: vec![1.0],
+            },
         });
         store.set_topology(plain, topology).unwrap();
         let census = store.census().unwrap();
@@ -1417,9 +1507,11 @@ mod tests {
                         face_vertex_counts: vec![3; 4],
                         face_vertex_indices: vec![0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
                         holes: vec![0, 1, 2, 3],
-                        offsets: vec![0, 1, 2, 3, 5, 7, 9],
-                        indices: vec![0, 1, 2, 0, 1, 1, 2, 2, 0],
-                        weights: vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                        stencils: Stencils {
+                            offsets: vec![0, 1, 2, 3, 5, 7, 9],
+                            indices: vec![0, 1, 2, 0, 1, 1, 2, 2, 0],
+                            weights: vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                        },
                     }),
                 },
             )
@@ -1443,6 +1535,15 @@ mod tests {
                     name: "st".into(),
                     interpolation: Interpolation::Vertex,
                     values: vec![[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]],
+                    // Refined with the points: the same stencils.
+                    refined: Some(RefinedTexcoord {
+                        face_vertex_indices: vec![0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
+                        stencils: Stencils {
+                            offsets: vec![0, 1, 2, 3, 5, 7, 9],
+                            indices: vec![0, 1, 2, 0, 1, 1, 2, 2, 0],
+                            weights: vec![1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+                        },
+                    }),
                 }),
             )
             .unwrap();
@@ -1511,7 +1612,7 @@ mesh /world/b
     0 0.0000001 3
   normals uniform 1
     0 0 1
-  texcoord st vertex 3
+  texcoord st vertex 3 refined values 6
     0 0
     0.5 0
     0 1

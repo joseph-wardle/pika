@@ -14,7 +14,7 @@ use std::sync::{Mutex, MutexGuard};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
     Connection, InstancePrimvars, Instancing, Interpolation, Network, Node, Normals, Refined,
-    Scheme, Subset, Texcoord, Topology, Value,
+    RefinedTexcoord, Scheme, Stencils, Subset, Texcoord, Topology, Value,
 };
 
 pub const OK: i32 = 0;
@@ -58,11 +58,38 @@ pub struct CRefined {
     index_count: usize,
     holes: *const i32,
     hole_count: usize,
-    stencil_offsets: *const u32,
-    point_count: usize,
-    stencil_indices: *const i32,
-    stencil_weights: *const f32,
+    stencils: CStencils,
+}
+
+/// `pika_stencils`.
+#[repr(C)]
+pub struct CStencils {
+    offsets: *const u32,
+    count: usize,
+    indices: *const i32,
+    weights: *const f32,
     entry_count: usize,
+}
+
+/// `pika_refined_texcoord`.
+#[repr(C)]
+pub struct CRefinedTexcoord {
+    face_vertex_indices: *const i32,
+    index_count: usize,
+    stencils: CStencils,
+}
+
+/// # Safety
+/// `s`'s arrays must be valid for the reads its counts say.
+unsafe fn stencils(s: &CStencils) -> Stencils {
+    // SAFETY: the caller guarantees the arrays.
+    unsafe {
+        Stencils {
+            offsets: slice(s.offsets, s.count + 1).to_vec(),
+            indices: slice(s.indices, s.entry_count).to_vec(),
+            weights: slice(s.weights, s.entry_count).to_vec(),
+        }
+    }
 }
 
 /// `pika_instance_primvars`.
@@ -456,9 +483,7 @@ pub unsafe extern "C" fn pika_mesh_topology(
                 face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
                     .to_vec(),
                 holes: unsafe { slice(r.holes, r.hole_count) }.to_vec(),
-                offsets: unsafe { slice(r.stencil_offsets, r.point_count + 1) }.to_vec(),
-                indices: unsafe { slice(r.stencil_indices, r.entry_count) }.to_vec(),
-                weights: unsafe { slice(r.stencil_weights, r.entry_count) }.to_vec(),
+                stencils: unsafe { stencils(&r.stencils) },
             }),
         };
         lock(handle)?.store.set_topology(id, topology)
@@ -559,9 +584,10 @@ pub unsafe extern "C" fn pika_mesh_texcoord(
     interpolation: *const c_char,
     values: *const [f32; 2],
     count: usize,
+    refined: *const CRefinedTexcoord,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the strings and the array.
+        // SAFETY: the caller guarantees the renderer, the strings and the arrays.
         let (handle, name, token) = unsafe { (&*renderer, string(name)?, string(interpolation)?) };
         // SAFETY: as above.
         let values = unsafe { slice(values, count) }.to_vec();
@@ -569,6 +595,13 @@ pub unsafe extern "C" fn pika_mesh_texcoord(
             name,
             interpolation: Interpolation::from_token(&token)?,
             values,
+            // SAFETY: as above.
+            refined: unsafe { refined.as_ref() }.map(|r| RefinedTexcoord {
+                // SAFETY: as above.
+                face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
+                    .to_vec(),
+                stencils: unsafe { stencils(&r.stencils) },
+            }),
         };
         lock(handle)?.store.set_texcoord(id, Some(texcoord))
     })

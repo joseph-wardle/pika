@@ -15,7 +15,10 @@
 
 #include <opensubdiv/far/stencilTableFactory.h>
 
+#include <array>
+#include <cstring>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 PXR_NAMESPACE_OPEN_SCOPE
@@ -36,33 +39,84 @@ const float *xy(VtVec2fArray const &values) {
 // not change it.
 constexpr int refine_level = 1;
 
+// The arrays a pika_stencils points to.
+struct Stencils {
+    std::vector<uint32_t> offsets;
+    std::vector<int32_t> indices;
+    std::vector<float> weights;
+
+    pika_stencils view() const {
+        return {offsets.data(), offsets.size() - 1, indices.data(), weights.data(), weights.size()};
+    }
+};
+
 // The arrays a pika_refined points to.
 struct Refined {
     std::vector<int32_t> counts, indices, holes;
-    std::vector<uint32_t> offsets;
-    std::vector<int32_t> stencil_indices;
-    std::vector<float> weights;
+    Stencils stencils;
+};
+
+// The arrays a pika_refined_texcoord points to, and the values its stencils
+// are over.
+struct RefinedTexcoord {
+    std::vector<GfVec2f> values;
+    std::vector<int32_t> indices;
+    Stencils stencils;
 };
 
 // Refines `topology` uniformly with OpenSubdiv, through the factory Storm
-// uses, so USD's subdivision tags read as they do there. False when
-// the topology is invalid, which OpenSubdiv does not check, or OpenSubdiv
-// refuses it (a Loop mesh with a quad, say).
-bool refine(HdMeshTopology const &topology, Refined &out) {
+// uses, so USD's subdivision tags read as they do there, with a face-varying
+// channel per topology in `fvar`. Null when the topology is invalid, which
+// OpenSubdiv does not check, or OpenSubdiv refuses it (a Loop mesh with a
+// quad, say).
+PxOsdTopologyRefinerSharedPtr refine(HdMeshTopology const &topology,
+                                     std::vector<VtIntArray> const &fvar) {
     using namespace OpenSubdiv;
     if (!topology.GetPxOsdMeshTopology().Validate())
-        return false;
+        return nullptr;
     PxOsdTopologyRefinerSharedPtr refiner =
-        PxOsdRefinerFactory::Create(topology.GetPxOsdMeshTopology());
-    if (!refiner)
-        return false;
-    refiner->RefineUniform(Far::TopologyRefiner::UniformOptions(refine_level));
+        PxOsdRefinerFactory::Create(topology.GetPxOsdMeshTopology(), fvar);
+    if (refiner)
+        refiner->RefineUniform(Far::TopologyRefiner::UniformOptions(refine_level));
+    return refiner;
+}
+
+// The stencils of the refined level's `count` values interpolated in `mode`.
+// False when OpenSubdiv's table does not cover them.
+bool stencils(OpenSubdiv::Far::TopologyRefiner const &refiner,
+              OpenSubdiv::Far::StencilTableFactory::Mode mode, int count, Stencils &out) {
+    using namespace OpenSubdiv;
     Far::StencilTableFactory::Options options;
     options.generateIntermediateLevels = false;
+    options.interpolationMode = mode;
     std::unique_ptr<Far::StencilTable const> table(
-        Far::StencilTableFactory::Create(*refiner, options));
+        Far::StencilTableFactory::Create(refiner, options));
+    if (!table || table->GetNumStencils() != count)
+        return false;
+    // The table's weight array can be longer than its index array, so each
+    // stencil is read through its own size.
+    for (int i = 0; i < count; i++) {
+        Far::Stencil stencil = table->GetStencil(i);
+        out.offsets.push_back(out.indices.size());
+        Far::Index const *indices = stencil.GetVertexIndices();
+        float const *weights = stencil.GetWeights();
+        out.indices.insert(out.indices.end(), indices, indices + stencil.GetSize());
+        out.weights.insert(out.weights.end(), weights, weights + stencil.GetSize());
+    }
+    out.offsets.push_back(out.indices.size());
+    return true;
+}
+
+// The refined faces and the refined points' stencils of `topology`. False
+// when OpenSubdiv refuses it.
+bool refine(HdMeshTopology const &topology, Refined &out) {
+    using namespace OpenSubdiv;
+    PxOsdTopologyRefinerSharedPtr refiner = refine(topology, {});
+    if (!refiner)
+        return false;
     Far::TopologyLevel const &level = refiner->GetLevel(refine_level);
-    if (!table || table->GetNumStencils() != level.GetNumVertices())
+    if (!stencils(*refiner, Far::StencilTableFactory::INTERPOLATE_VERTEX, level.GetNumVertices(),
+                  out.stencils))
         return false;
     for (int f = 0; f < level.GetNumFaces(); f++) {
         Far::ConstIndexArray face = level.GetFaceVertices(f);
@@ -71,17 +125,69 @@ bool refine(HdMeshTopology const &topology, Refined &out) {
         if (level.IsFaceHole(f))
             out.holes.push_back(f);
     }
-    // The table's weight array can be longer than its index array, so each
-    // stencil is read through its own size.
-    for (int i = 0; i < table->GetNumStencils(); i++) {
-        Far::Stencil stencil = table->GetStencil(i);
-        out.offsets.push_back(out.stencil_indices.size());
-        Far::Index const *points = stencil.GetVertexIndices();
-        float const *weights = stencil.GetWeights();
-        out.stencil_indices.insert(out.stencil_indices.end(), points, points + stencil.GetSize());
-        out.weights.insert(out.weights.end(), weights, weights + stencil.GetSize());
+    return true;
+}
+
+struct CornerHash {
+    size_t operator()(std::array<uint32_t, 3> const &key) const {
+        size_t h = 0;
+        for (uint32_t k : key)
+            h ^= std::hash<uint32_t>()(k) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
     }
-    out.offsets.push_back(out.stencil_indices.size());
+};
+
+// Welds a face-varying primvar's values by point and value (bitwise): the
+// distinct values, and the one each corner reads, a face-varying topology
+// for OpenSubdiv. It makes the primvar continuous across an edge whose
+// faces agree on it and a seam where they do not, the reading of Houdini's
+// subdivision, Karma and Blender; Storm keeps every corner apart, which
+// interpolates each cage face on its own.
+void weld(VtIntArray const &corners, VtVec2fArray const &values, std::vector<GfVec2f> &welded,
+          VtIntArray &indices) {
+    std::unordered_map<std::array<uint32_t, 3>, int32_t, CornerHash> seen;
+    for (size_t c = 0; c < corners.size(); c++) {
+        std::array<uint32_t, 3> key;
+        key[0] = corners[c];
+        memcpy(&key[1], values[c].data(), 2 * sizeof(float));
+        auto [it, inserted] = seen.try_emplace(key, welded.size());
+        if (inserted)
+            welded.push_back(values[c]);
+        indices.push_back(it->second);
+    }
+}
+
+// Refines a subdivided mesh's texcoord with its faces, so each refined
+// corner reads a refined value: a vertex or varying texcoord through the
+// points' stencils, a face-varying one through its welded values' under the
+// mesh's faceVaryingLinearInterpolation. False when OpenSubdiv refuses the
+// mesh, as it then refused its topology.
+bool refine_texcoord(HdMeshTopology const &topology, HdInterpolation interpolation,
+                     VtVec2fArray const &values, RefinedTexcoord &out) {
+    using namespace OpenSubdiv;
+    bool facevarying = interpolation == HdInterpolationFaceVarying;
+    std::vector<VtIntArray> fvar;
+    if (facevarying) {
+        fvar.emplace_back();
+        weld(topology.GetFaceVertexIndices(), values, out.values, fvar.back());
+    } else {
+        out.values.assign(values.begin(), values.end());
+    }
+    PxOsdTopologyRefinerSharedPtr refiner = refine(topology, fvar);
+    if (!refiner)
+        return false;
+    Far::TopologyLevel const &level = refiner->GetLevel(refine_level);
+    Far::StencilTableFactory::Mode mode =
+        facevarying                               ? Far::StencilTableFactory::INTERPOLATE_FACE_VARYING
+        : interpolation == HdInterpolationVertex ? Far::StencilTableFactory::INTERPOLATE_VERTEX
+                                                 : Far::StencilTableFactory::INTERPOLATE_VARYING;
+    int count = facevarying ? level.GetNumFVarValues() : level.GetNumVertices();
+    if (!stencils(*refiner, mode, count, out.stencils))
+        return false;
+    for (int f = 0; f < level.GetNumFaces(); f++) {
+        Far::ConstIndexArray face = facevarying ? level.GetFaceFVarValues(f) : level.GetFaceVertices(f);
+        out.indices.insert(out.indices.end(), face.begin(), face.end());
+    }
     return true;
 }
 
@@ -140,8 +246,10 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
         SetMaterialId(material);
         _pika.report(pika_mesh_material(renderer, _id, material.GetText()), path + " material");
     }
-    // The material decides which primvar is fetched, so it goes first.
-    if (bits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyMaterialId))
+    // The material decides which primvar is fetched, so it goes first, and
+    // the topology how it is refined.
+    if (bits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyMaterialId |
+                HdChangeTracker::DirtyTopology | HdChangeTracker::DirtySubdivTags))
         SyncTexcoord(delegate, renderer);
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
         _SyncInstancing(delegate, renderer);
@@ -171,11 +279,7 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer)
                 refined.indices.size(),
                 refined.holes.data(),
                 refined.holes.size(),
-                refined.offsets.data(),
-                refined.offsets.size() - 1,
-                refined.stencil_indices.data(),
-                refined.weights.data(),
-                refined.weights.size(),
+                refined.stencils.view(),
             };
         else
             warn(path + ": OpenSubdiv cannot refine it; its cage is drawn");
@@ -197,7 +301,7 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer)
         holes.size(),
         subsets.data(),
         subsets.size(),
-        refined.offsets.empty() ? nullptr : &r,
+        refined.stencils.offsets.empty() ? nullptr : &r,
     };
     _pika.report(pika_mesh_topology(renderer, _id, &t), path + " topology");
 }
@@ -271,9 +375,42 @@ void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) 
     }
     VtVec2fArray const &values = value.UncheckedGet<VtVec2fArray>();
     std::string token = TfEnum::GetDisplayName(interpolation);
-    _pika.report(
-        pika_mesh_texcoord(renderer, _id, name, token.c_str(), xy(values), values.size()),
-        path + " texcoord");
+    HdMeshTopology topology = GetMeshTopology(delegate);
+    if (topology.GetScheme() == PxOsdOpenSubdivTokens->none) {
+        _pika.report(pika_mesh_texcoord(renderer, _id, name, token.c_str(), xy(values),
+                                        values.size(), nullptr),
+                     path + " texcoord");
+        return;
+    }
+    size_t expected = interpolation == HdInterpolationFaceVarying
+                          ? topology.GetFaceVertexIndices().size()
+                          : topology.GetNumPoints();
+    if (interpolation != HdInterpolationFaceVarying && interpolation != HdInterpolationVertex &&
+        interpolation != HdInterpolationVarying) {
+        fail(path + ": " + name + " is " + token +
+             "; Pika refines a vertex, varying or faceVarying texcoord with a subdivision surface");
+        return;
+    }
+    if (values.size() != expected) {
+        fail(path + ": " + std::to_string(values.size()) + " " + name + " values for " + token +
+             " interpolation, which needs " + std::to_string(expected));
+        return;
+    }
+    topology.SetSubdivTags(GetSubdivTags(delegate));
+    RefinedTexcoord refined;
+    if (!refine_texcoord(topology, interpolation, values, refined)) {
+        // Its cage is drawn (_SyncTopology warned), with the texcoord as it is.
+        _pika.report(pika_mesh_texcoord(renderer, _id, name, token.c_str(), xy(values),
+                                        values.size(), nullptr),
+                     path + " texcoord");
+        return;
+    }
+    pika_refined_texcoord r = {refined.indices.data(), refined.indices.size(),
+                               refined.stencils.view()};
+    _pika.report(pika_mesh_texcoord(renderer, _id, name, token.c_str(),
+                                    reinterpret_cast<const float *>(refined.values.data()),
+                                    refined.values.size(), &r),
+                 path + " texcoord");
 }
 
 void PikaMesh::_SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer) {

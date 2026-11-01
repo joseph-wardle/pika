@@ -126,6 +126,7 @@ fixture() {
         rewired) first=1 edit="1 0" ;;
         broken) edit="1 0" warnings=1 ;;
         texcoord) first=1 edit="1 0" ;;
+        welded) first=1 ;;
     esac
     read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats")"
     [ "$second" = "$edit" ] ||

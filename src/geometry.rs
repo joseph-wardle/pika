@@ -5,28 +5,30 @@
 //! The layout (the vertex table, the triangle indices, the stencils, the
 //! smooth normal pass's table and every mesh's ranges) is rebuilt only when a
 //! mesh is added, removed or remodelled. A playing frame writes only the
-//! points and normals that moved, reruns the stencil and smooth normal passes
-//! on the meshes whose points moved, and rewrites the instances of meshes
-//! whose transform moved. It rewrites every instance and draw record when a
+//! points, normals and texcoords that moved, reruns the stencil and smooth
+//! normal passes on the meshes whose points moved and the stencil pass on
+//! the texcoords that did, and rewrites the instances of meshes whose
+//! transform moved. It rewrites every instance and draw record when a
 //! visibility, render tag or instancer changes, or a moved mesh's instance
 //! count does. Each mesh is one draw record, of the instances of it that the
 //! cull pass finds in a view; its box, in its own space, is recomputed when
 //! its points move.
 //!
 //! A subdivision surface the delegate refined is drawn as its refined faces,
-//! whose points the stencil pass writes from its cage. A mesh's normals are
+//! whose points the stencil pass writes from its cage, and whose texcoord it
+//! writes from the cage's values likewise. A mesh's normals are
 //! its authored ones only when it is not subdivided, as USD specifies; Hydra
 //! hands them over on subdivided meshes too. Otherwise they are its smooth
 //! normals, which the smooth normal pass computes from the points drawn.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 
 use ash::vk;
 
 use crate::gpu::{self, Buffer};
 use crate::smooth::{self, Smooth};
 use crate::store::{
-    Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store, Texcoord,
+    self, Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store, Texcoord,
 };
 use crate::subdiv::{self, Subdiv};
 use crate::transform::{Instance, instance_transforms, multiply};
@@ -46,8 +48,12 @@ struct Range {
     first_cage: Option<u64>,
     first_normal: u64,
     normal_count: usize,
+    /// The texcoord values drawn: a refined mesh's refined values.
     first_texcoord: u64,
     texcoord_count: usize,
+    /// Where a refined mesh's cage texcoord values go; `None` when its
+    /// values are drawn as they are.
+    first_cage_texcoord: Option<u64>,
     first_vertex: i32,
     first_index: u32,
     index_count: u32,
@@ -74,8 +80,15 @@ struct Layout {
     /// authored.
     smooth: Buffer,
     adjacency: Adjacency,
-    /// xy per texcoord value, as authored: per point or corner.
+    /// The refined texcoord values, which come first in `texcoord`, so
+    /// refined value t's stencil is the tth.
+    refined_texcoord_count: u32,
+    /// xy per texcoord value drawn, every mesh's in turn: a refined mesh's
+    /// refined values, else its authored ones, per point or corner.
     texcoord: Buffer,
+    /// xy per cage value of the refined meshes' texcoords.
+    cage_texcoord: Buffer,
+    texcoord_stencils: Stencils,
     /// Point and normal index (or `SMOOTH`) per unique triple of them and
     /// the texcoord index, every mesh's in turn.
     vertices: Buffer,
@@ -85,13 +98,34 @@ struct Layout {
     indices: Buffer,
 }
 
-/// The refined points' stencils, which the stencil pass sums.
+/// Refined values' stencils, which the stencil pass sums.
 struct Stencils {
-    /// Where each refined point's stencil starts, and the end of the last.
+    /// Where each refined value's stencil starts, and the end of the last.
     offsets: Buffer,
-    /// The cage point and weight of each stencil entry.
+    /// The cage value and weight of each stencil entry.
     indices: Buffer,
     weights: Buffer,
+}
+
+impl Stencils {
+    fn new(device: &gpu::Device, tables: &StencilTables) -> Result<Self, String> {
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+        Ok(Self {
+            offsets: Buffer::device_local(device, size(&tables.offsets), storage)?,
+            indices: Buffer::device_local(device, size(&tables.indices), storage)?,
+            weights: Buffer::device_local(device, size(&tables.weights), storage)?,
+        })
+    }
+
+    fn addresses(&self, cage: &Buffer, refined: &Buffer) -> subdiv::Addresses {
+        subdiv::Addresses {
+            cage: cage.address,
+            offsets: self.offsets.address,
+            indices: self.indices.address,
+            weights: self.weights.address,
+            refined: refined.address,
+        }
+    }
 }
 
 /// Each point's corners, whose faces the smooth normal pass sums.
@@ -266,11 +300,15 @@ impl Geometry {
         }
         let bytes = upload(device, &mut self.staging, &copies, cb)?;
 
-        let (refined, points) = match rebuilt {
-            true => (whole(layout.refined_count), whole(layout.point_count)),
-            false => moved_points(&layout.ranges, &moved.points),
+        let rewrite = match rebuilt {
+            true => Rewrite {
+                refined: whole(layout.refined_count),
+                points: whole(layout.point_count),
+                texcoords: whole(layout.refined_texcoord_count),
+            },
+            false => moved_ranges(&layout.ranges, moved),
         };
-        self.refine(device, cb, layout, &refined, &points);
+        self.refine(device, cb, layout, &rewrite);
         Ok(Update {
             bytes,
             layout: rebuilt,
@@ -287,35 +325,39 @@ impl Geometry {
         Ok(tables)
     }
 
-    /// Records the stencil pass over the `refined` points and the smooth
-    /// normal pass over `points`, each with the barrier its readers need.
+    /// Records the stencil pass over the refined texcoord values and points
+    /// in `rewrite` and the smooth normal pass over its points, each with
+    /// the barrier its readers need.
     fn refine(
         &self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         layout: &Layout,
-        refined: &[std::ops::Range<u32>],
-        points: &[std::ops::Range<u32>],
+        rewrite: &Rewrite,
     ) {
-        if !refined.is_empty() {
-            let addresses = subdiv::Addresses {
-                cage: layout.cage.address,
-                offsets: layout.stencils.offsets.address,
-                indices: layout.stencils.indices.address,
-                weights: layout.stencils.weights.address,
-                points: layout.points.address,
-            };
-            self.subdiv.record(cb, addresses, refined);
+        if !rewrite.texcoords.is_empty() {
+            let addresses =
+                (layout.texcoord_stencils).addresses(&layout.cage_texcoord, &layout.texcoord);
+            self.subdiv.record(cb, addresses, 2, &rewrite.texcoords);
+        }
+        if !rewrite.refined.is_empty() {
+            let addresses = layout.stencils.addresses(&layout.cage, &layout.points);
+            self.subdiv.record(cb, addresses, 3, &rewrite.refined);
             barrier(device, cb, vk::PipelineStageFlags2::COMPUTE_SHADER);
         }
-        if !points.is_empty() {
+        if !rewrite.points.is_empty() {
             let addresses = smooth::Addresses {
                 points: layout.points.address,
                 offsets: layout.adjacency.offsets.address,
                 corners: layout.adjacency.corners.address,
                 normals: layout.smooth.address,
             };
-            self.smooth.record(cb, addresses, points);
+            self.smooth.record(cb, addresses, &rewrite.points);
+        }
+        if !(rewrite.texcoords.is_empty()
+            && rewrite.refined.is_empty()
+            && rewrite.points.is_empty())
+        {
             barrier(device, cb, vk::PipelineStageFlags2::VERTEX_SHADER);
         }
     }
@@ -359,6 +401,10 @@ impl Geometry {
                 &l.adjacency.offsets,
                 &l.adjacency.corners,
                 &l.texcoord,
+                &l.cage_texcoord,
+                &l.texcoord_stencils.offsets,
+                &l.texcoord_stencils.indices,
+                &l.texcoord_stencils.weights,
                 &l.vertices,
                 &l.vertex_texcoord,
                 &l.indices,
@@ -375,16 +421,28 @@ impl Geometry {
 }
 
 /// The uploads of a rebuilt layout's tables.
-fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 8] {
+fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 11] {
     [
         Upload::table(bytes(&t.vertices), &l.vertices),
         Upload::table(bytes(&t.vertex_texcoord), &l.vertex_texcoord),
         Upload::table(bytes(&t.indices), &l.indices),
         Upload::table(bytes(&t.corner_offsets), &l.adjacency.offsets),
         Upload::table(bytes(&t.corners), &l.adjacency.corners),
-        Upload::table(bytes(&t.stencil_offsets), &l.stencils.offsets),
-        Upload::table(bytes(&t.stencil_indices), &l.stencils.indices),
-        Upload::table(bytes(&t.stencil_weights), &l.stencils.weights),
+        Upload::table(bytes(&t.stencils.offsets), &l.stencils.offsets),
+        Upload::table(bytes(&t.stencils.indices), &l.stencils.indices),
+        Upload::table(bytes(&t.stencils.weights), &l.stencils.weights),
+        Upload::table(
+            bytes(&t.texcoord_stencils.offsets),
+            &l.texcoord_stencils.offsets,
+        ),
+        Upload::table(
+            bytes(&t.texcoord_stencils.indices),
+            &l.texcoord_stencils.indices,
+        ),
+        Upload::table(
+            bytes(&t.texcoord_stencils.weights),
+            &l.texcoord_stencils.weights,
+        ),
     ]
 }
 
@@ -415,15 +473,18 @@ fn normal_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<U
     })
 }
 
-/// The upload of a mesh's texcoord, when it is drawn with it.
+/// The upload of a mesh's texcoord values, when it has one: to the cage
+/// values when it is refined, else to the values drawn.
 fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<Upload<'a>> {
-    if range.texcoord_count == 0 {
-        return None;
-    }
+    let t = texcoord(mesh).filter(|t| !t.values.is_empty())?;
+    let (buffer, first) = match range.first_cage_texcoord {
+        Some(first) => (layout.cage_texcoord.raw, first),
+        None => (layout.texcoord.raw, range.first_texcoord),
+    };
     Some(Upload {
-        bytes: bytes(&authored_texcoord(mesh)?.values),
-        buffer: layout.texcoord.raw,
-        offset: range.first_texcoord * 8,
+        bytes: bytes(&t.values),
+        buffer,
+        offset: first * 8,
     })
 }
 
@@ -494,6 +555,7 @@ fn upload(
 
 /// The vertex table, triangle indices, stencils and smooth normal table of
 /// every mesh, before upload.
+#[derive(Default)]
 struct Tables {
     vertices: Vec<[u32; 2]>,
     vertex_texcoord: Vec<u32>,
@@ -501,28 +563,29 @@ struct Tables {
     /// One per point, then the end of the last point's corners.
     corner_offsets: Vec<u32>,
     corners: Vec<[u32; 2]>,
-    /// One per refined point, then the end of the last one's stencil.
-    stencil_offsets: Vec<u32>,
-    stencil_indices: Vec<u32>,
-    stencil_weights: Vec<f32>,
+    /// The refined points' stencils, and the refined texcoord values'.
+    stencils: StencilTables,
+    texcoord_stencils: StencilTables,
+}
+
+/// Stencils before upload, their entries counted from the start of the
+/// tables and their cage values from the start of the cage buffer.
+#[derive(Default)]
+struct StencilTables {
+    /// One per refined value, then the end of the last one's stencil.
+    offsets: Vec<u32>,
+    indices: Vec<u32>,
+    weights: Vec<f32>,
 }
 
 /// Lays out every mesh with topology and points, the refined ones first. A
 /// mesh whose data does not fit together is left out, with a warning.
 fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String> {
     let mut ranges = BTreeMap::new();
-    let mut tables = Tables {
-        vertices: Vec::new(),
-        vertex_texcoord: Vec::new(),
-        indices: Vec::new(),
-        corner_offsets: Vec::new(),
-        corners: Vec::new(),
-        stencil_offsets: Vec::new(),
-        stencil_indices: Vec::new(),
-        stencil_weights: Vec::new(),
-    };
-    let (mut points, mut cage, mut normals, mut texcoords) = (0u64, 0u64, 0u64, 0u64);
-    let mut refined_count = 0;
+    let mut tables = Tables::default();
+    let (mut points, mut cage, mut normals) = (0u64, 0u64, 0u64);
+    let (mut texcoords, mut cage_texcoords) = (0u64, 0u64);
+    let (mut refined_count, mut refined_texcoord_count) = (0, 0);
     for refined_pass in [true, false] {
         for (&id, mesh) in store.meshes() {
             let (Some(t), Some(p)) = (&mesh.topology, &mesh.points) else {
@@ -534,15 +597,23 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             let first_vertex = tables.vertices.len();
             let first_index = tables.indices.len();
             let first_corner = tables.corners.len();
-            let first_entry = tables.stencil_indices.len();
+            let first_entry = tables.stencils.indices.len();
+            let first_texcoord_entry = tables.texcoord_stencils.indices.len();
             let normal_count = authored(mesh).map_or(0, |n| n.values.len());
-            let texcoord_count = authored_texcoord(mesh).map_or(0, |t| t.values.len());
+            let (texcoord_count, cage_texcoord_count) = match texcoord(mesh) {
+                Some(t) => match &t.refined {
+                    Some(r) => (r.stencils.count(), t.values.len()),
+                    None => (t.values.len(), 0),
+                },
+                None => (0, 0),
+            };
             let first_cage = refined_pass.then_some(cage);
             let first = Firsts {
                 point: points as u32,
                 cage: cage as u32,
                 normal: normals as u32,
                 texcoord: texcoords as u32,
+                cage_texcoord: cage_texcoords as u32,
             };
             let drawn = match triangulate(mesh, first, &mut tables) {
                 Ok(n) => n,
@@ -554,10 +625,22 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     tables.corner_offsets.truncate(points as usize);
                     tables.corners.truncate(first_corner);
                     if refined_pass {
-                        tables.stencil_offsets.truncate(points as usize);
+                        tables.stencils.offsets.truncate(points as usize);
+                        tables
+                            .texcoord_stencils
+                            .offsets
+                            .truncate(texcoords as usize);
                     }
-                    tables.stencil_indices.truncate(first_entry);
-                    tables.stencil_weights.truncate(first_entry);
+                    tables.stencils.indices.truncate(first_entry);
+                    tables.stencils.weights.truncate(first_entry);
+                    tables
+                        .texcoord_stencils
+                        .indices
+                        .truncate(first_texcoord_entry);
+                    tables
+                        .texcoord_stencils
+                        .weights
+                        .truncate(first_texcoord_entry);
                     continue;
                 }
             };
@@ -571,6 +654,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     normal_count,
                     first_texcoord: texcoords,
                     texcoord_count,
+                    first_cage_texcoord: refined_pass.then_some(cage_texcoords),
                     first_vertex: first_vertex as i32,
                     first_index: first_index as u32,
                     index_count: (tables.indices.len() - first_index) as u32,
@@ -580,15 +664,16 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             points += drawn as u64;
             normals += normal_count as u64;
             texcoords += texcoord_count as u64;
+            cage_texcoords += cage_texcoord_count as u64;
             if refined_pass {
                 cage += p.len() as u64;
             }
         }
         if refined_pass {
             refined_count = points as u32;
-            tables
-                .stencil_offsets
-                .push(tables.stencil_indices.len() as u32);
+            refined_texcoord_count = texcoords as u32;
+            (tables.stencils.offsets).push(tables.stencils.indices.len() as u32);
+            (tables.texcoord_stencils.offsets).push(tables.texcoord_stencils.indices.len() as u32);
         }
     }
     tables.corner_offsets.push(tables.corners.len() as u32);
@@ -598,21 +683,21 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
     let layout = Layout {
         point_count: points as u32,
         refined_count,
-        // Refined points are written by the stencil pass, the rest uploaded.
+        // Refined points and texcoord values are written by the stencil
+        // pass, the rest uploaded.
         points: Buffer::device_local(device, points * 12, storage)?,
         cage: Buffer::device_local(device, cage * 12, storage)?,
-        stencils: Stencils {
-            offsets: Buffer::device_local(device, size(&tables.stencil_offsets), storage)?,
-            indices: Buffer::device_local(device, size(&tables.stencil_indices), storage)?,
-            weights: Buffer::device_local(device, size(&tables.stencil_weights), storage)?,
-        },
+        stencils: Stencils::new(device, &tables.stencils)?,
         normals: Buffer::device_local(device, normals * 12, storage)?,
         smooth: Buffer::device_local(device, points * 12, written)?,
         adjacency: Adjacency {
             offsets: Buffer::device_local(device, size(&tables.corner_offsets), storage)?,
             corners: Buffer::device_local(device, size(&tables.corners), storage)?,
         },
+        refined_texcoord_count,
         texcoord: Buffer::device_local(device, texcoords * 8, storage)?,
+        cage_texcoord: Buffer::device_local(device, cage_texcoords * 8, storage)?,
+        texcoord_stencils: Stencils::new(device, &tables.texcoord_stencils)?,
         vertices: Buffer::device_local(device, size(&tables.vertices), storage)?,
         vertex_texcoord: Buffer::device_local(device, size(&tables.vertex_texcoord), storage)?,
         indices: Buffer::device_local(device, size(&tables.indices), index)?,
@@ -621,23 +706,39 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
     Ok((layout, tables))
 }
 
-/// The ranges of points the stencil pass and the smooth normal pass rewrite
-/// when the meshes in `moved` moved: the refined points, and every point
-/// drawn.
-fn moved_points(
-    ranges: &BTreeMap<u64, Range>,
-    moved: &BTreeSet<u64>,
-) -> (Vec<std::ops::Range<u32>>, Vec<std::ops::Range<u32>>) {
-    let (mut refined, mut points) = (Vec::new(), Vec::new());
-    for range in moved.iter().filter_map(|id| ranges.get(id)) {
+/// What the compute passes rewrite: the refined points to sum from their
+/// cages, the points drawn whose smooth normals to recompute, and the
+/// refined texcoord values to sum.
+struct Rewrite {
+    refined: Vec<std::ops::Range<u32>>,
+    points: Vec<std::ops::Range<u32>>,
+    texcoords: Vec<std::ops::Range<u32>>,
+}
+
+/// The rewrite for the meshes whose points or texcoord moved.
+fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
+    let mut rewrite = Rewrite {
+        refined: Vec::new(),
+        points: Vec::new(),
+        texcoords: Vec::new(),
+    };
+    for range in moved.points.iter().filter_map(|id| ranges.get(id)) {
         let first = range.first_point as u32;
         let drawn = first..first + range.point_count;
         if range.first_cage.is_some() {
-            refined.push(drawn.clone());
+            rewrite.refined.push(drawn.clone());
         }
-        points.push(drawn);
+        rewrite.points.push(drawn);
     }
-    (refined, points)
+    for range in moved.texcoord.iter().filter_map(|id| ranges.get(id)) {
+        if range.first_cage_texcoord.is_some() {
+            let first = range.first_texcoord as u32;
+            rewrite
+                .texcoords
+                .push(first..first + range.texcoord_count as u32);
+        }
+    }
+    rewrite
 }
 
 /// `0..count` as a list of ranges, empty when there is nothing to rewrite.
@@ -670,14 +771,9 @@ fn authored(mesh: &Mesh) -> Option<&Normals> {
     }
 }
 
-/// The texcoord a mesh is drawn with, when it has one and is not
-/// subdivided: refining it with the points needs face-varying stencils,
-/// which the delegate does not build yet.
-fn authored_texcoord(mesh: &Mesh) -> Option<&Texcoord> {
-    match (&mesh.topology, &mesh.texcoord) {
-        (Some(t), Some(Some(s))) if t.scheme == Scheme::None => Some(s),
-        _ => None,
-    }
+/// The texcoord a mesh is drawn with, when it has one.
+fn texcoord(mesh: &Mesh) -> Option<&Texcoord> {
+    mesh.texcoord.as_ref()?.as_ref()
 }
 
 /// Where a mesh's data starts in each buffer.
@@ -687,6 +783,7 @@ struct Firsts {
     cage: u32,
     normal: u32,
     texcoord: u32,
+    cage_texcoord: u32,
 }
 
 /// The faces a mesh is drawn as: its refined ones, or its cage's.
@@ -699,16 +796,16 @@ struct Faces<'a> {
 
 /// Appends a mesh's vertex table and its faces but the holes, split into
 /// triangles by a fan from each face's first corner, its points' corners
-/// and, when refined, its stencils. A vertex is a unique triple of point,
-/// normal and texcoord; each index counts from the start of its buffer. Returns
-/// the points drawn.
+/// and, when refined, its stencils and its texcoord's. A vertex is a unique
+/// triple of point, normal and texcoord; each index counts from the start of
+/// its buffer. Returns the points drawn.
 fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize, String> {
     let (Some(topology), Some(points)) = (&mesh.topology, &mesh.points) else {
         return Ok(0);
     };
     let faces = match &topology.refined {
         Some(r) => {
-            stencils(r, points.len(), first.cage, tables)?;
+            stencils(&r.stencils, points.len(), first.cage, &mut tables.stencils)?;
             Faces {
                 counts: &r.face_vertex_counts,
                 corners: &r.face_vertex_indices,
@@ -763,8 +860,20 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
             expected(n.interpolation)
         ));
     }
-    let texcoord = authored_texcoord(mesh);
+    let texcoord = texcoord(mesh);
+    if let Some(t) = texcoord {
+        let refined = topology.refined.is_some();
+        let cage = first.cage_texcoord;
+        refined_texcoord(
+            t,
+            refined,
+            corners.len(),
+            cage,
+            &mut tables.texcoord_stencils,
+        )?;
+    }
     if let Some(t) = texcoord
+        && t.refined.is_none()
         && t.values.len() != expected(t.interpolation)
     {
         return Err(format!(
@@ -805,6 +914,11 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
             Interpolation::Uniform => face,
             Interpolation::Constant => 0,
         };
+    // A refined texcoord says which refined value each refined corner reads.
+    let texcoord_index = |t: &Texcoord, point: i32, c: usize, face: usize| match &t.refined {
+        Some(r) => r.face_vertex_indices[c] as usize,
+        None => index(t.interpolation, point, c, face),
+    };
     let mut holes = vec![false; counts.len()];
     for &f in faces.holes {
         holes[f as usize] = true;
@@ -820,7 +934,7 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
         face_vertices.clear();
         for (c, &point) in corners.iter().enumerate().take(corner).skip(start) {
             let normal = normals.map(|n| index(n.interpolation, point, c, face));
-            let texcoord = texcoord.map(|t| index(t.interpolation, point, c, face));
+            let texcoord = texcoord.map(|t| texcoord_index(t, point, c, face));
             face_vertices.push(vertex(point, normal, texcoord));
         }
         for i in 1..face_vertices.len().saturating_sub(1) {
@@ -832,39 +946,75 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
     Ok(faces.points)
 }
 
-/// Appends a refined mesh's stencils, their entries counted from the start
-/// of the tables' and their cage points from `first_cage`.
+/// Appends a refined mesh's texcoord stencils, after checking that it was
+/// refined with the mesh (a cage's texcoord must not be) and that its
+/// `corners` each read one of the refined values.
+fn refined_texcoord(
+    t: &Texcoord,
+    refined: bool,
+    corners: usize,
+    first_cage: u32,
+    tables: &mut StencilTables,
+) -> Result<(), String> {
+    let r = match (&t.refined, refined) {
+        (Some(r), true) => r,
+        (None, false) => return Ok(()),
+        (Some(_), false) => {
+            return Err(format!("its {} is refined, but its cage is drawn", t.name));
+        }
+        (None, true) => return Err(format!("its {} is not refined with it", t.name)),
+    };
+    stencils(&r.stencils, t.values.len(), first_cage, tables)?;
+    if r.face_vertex_indices.len() != corners {
+        return Err(format!(
+            "{} refined {} indices for {corners} refined corners",
+            r.face_vertex_indices.len(),
+            t.name
+        ));
+    }
+    let count = r.stencils.count();
+    if let Some(&bad) = (r.face_vertex_indices.iter()).find(|&&i| i < 0 || i as usize >= count) {
+        return Err(format!(
+            "refined {} index {bad} is not one of {count} refined values",
+            t.name
+        ));
+    }
+    Ok(())
+}
+
+/// Appends stencils over `cage_count` values, their entries counted from the
+/// start of the tables' and their cage values from `first_cage`.
 fn stencils(
-    refined: &Refined,
+    s: &store::Stencils,
     cage_count: usize,
     first_cage: u32,
-    tables: &mut Tables,
+    tables: &mut StencilTables,
 ) -> Result<(), String> {
-    let (offsets, entries) = (&refined.offsets, refined.indices.len());
+    let (offsets, entries) = (&s.offsets, s.indices.len());
     let ordered = offsets.first() == Some(&0) && offsets.is_sorted();
-    if !ordered || offsets.last() != Some(&(entries as u32)) || refined.weights.len() != entries {
+    if !ordered || offsets.last() != Some(&(entries as u32)) || s.weights.len() != entries {
         return Err(format!(
             "its stencil offsets do not divide its {entries} stencil entries"
         ));
     }
-    if let Some(&bad) = (refined.indices.iter()).find(|&&p| p < 0 || p as usize >= cage_count) {
+    if let Some(&bad) = (s.indices.iter()).find(|&&p| p < 0 || p as usize >= cage_count) {
         return Err(format!(
-            "stencil index {bad} is not one of {cage_count} points"
+            "stencil index {bad} is not one of {cage_count} values"
         ));
     }
     // The cull pass's boxes rely on every stencil being an affine
     // combination (see `spread`), as subdivision's are.
     if let Some(p) = (offsets.windows(2)).position(|w| {
-        let sum: f32 = refined.weights[w[0] as usize..w[1] as usize].iter().sum();
+        let sum: f32 = s.weights[w[0] as usize..w[1] as usize].iter().sum();
         (sum - 1.0).abs() > 1e-3
     }) {
         return Err(format!("stencil {p}'s weights do not sum to 1"));
     }
-    let first_entry = tables.stencil_indices.len() as u32;
+    let first_entry = tables.indices.len() as u32;
     let starts = &offsets[..offsets.len() - 1];
-    (tables.stencil_offsets).extend(starts.iter().map(|&o| first_entry + o));
-    (tables.stencil_indices).extend(refined.indices.iter().map(|&p| first_cage + p as u32));
-    (tables.stencil_weights).extend_from_slice(&refined.weights);
+    (tables.offsets).extend(starts.iter().map(|&o| first_entry + o));
+    (tables.indices).extend(s.indices.iter().map(|&p| first_cage + p as u32));
+    (tables.weights).extend_from_slice(&s.weights);
     Ok(())
 }
 
@@ -875,9 +1025,9 @@ fn stencils(
 /// negative ones, which Catmull-Clark gives a vertex of valence 2, push it
 /// out, by at most their sum times the box's size.
 fn spread(refined: &Refined) -> f32 {
-    (refined.offsets.windows(2))
+    (refined.stencils.offsets.windows(2))
         .map(|w| {
-            let weights = &refined.weights[w[0] as usize..w[1] as usize];
+            let weights = &refined.stencils.weights[w[0] as usize..w[1] as usize];
             weights
                 .iter()
                 .filter(|&&w| w < 0.0)
@@ -1183,7 +1333,7 @@ fn bytes<T: Copy>(values: &[T]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Topology;
+    use crate::store::{RefinedTexcoord, Stencils, Topology};
 
     /// A quad and a triangle sharing an edge, with optional normals.
     fn mesh(scheme: Scheme, normals: Option<Normals>) -> Mesh {
@@ -1220,18 +1370,19 @@ mod tests {
         let mut t = Tables {
             vertices: vec![[7, 7]],
             vertex_texcoord: vec![7],
-            indices: vec![],
-            corner_offsets: vec![],
-            corners: vec![],
-            stencil_offsets: vec![0],
-            stencil_indices: vec![0, 0],
-            stencil_weights: vec![0.5, 0.5],
+            stencils: StencilTables {
+                offsets: vec![0],
+                indices: vec![0, 0],
+                weights: vec![0.5, 0.5],
+            },
+            ..Tables::default()
         };
         let first = Firsts {
             point: 10,
             cage: 30,
             normal: 20,
             texcoord: 40,
+            cage_texcoord: 50,
         };
         triangulate(mesh, first, &mut t)?;
         Ok(t)
@@ -1271,6 +1422,7 @@ mod tests {
                 name: "st".into(),
                 interpolation,
                 values: vec![[0.5, 0.5]; count],
+                refined: None,
             })
         };
         let mut m = mesh(Scheme::None, None);
@@ -1286,10 +1438,6 @@ mod tests {
         assert_eq!(t.vertices.len() - 1, 7);
         assert_eq!(t.vertices[5..], [[11, 21], [14, 24], [12, 22]]);
         assert_eq!(t.vertex_texcoord[5..], [44, 45, 46]);
-        // A subdivided mesh's texcoord is not refined yet, so it is not drawn.
-        let mut m = mesh(Scheme::CatmullClark, None);
-        m.texcoord = Some(st(Interpolation::Vertex, 5));
-        assert_eq!(tables(&m).unwrap().vertex_texcoord[1..], [NONE; 5]);
         // The controls: the wrong count is refused, as for normals.
         let mut m = mesh(Scheme::None, None);
         m.texcoord = Some(st(Interpolation::FaceVarying, 5));
@@ -1298,6 +1446,53 @@ mod tests {
             error.contains("5 st values") && error.contains("needs 7"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn refined_texcoords_are_read_through_their_refined_corners() {
+        /// The refined mesh with a texcoord refined with it: two welded
+        /// values, refined into four.
+        fn textured() -> Mesh {
+            let mut m = refined();
+            m.texcoord = Some(Some(Texcoord {
+                name: "st".into(),
+                interpolation: Interpolation::FaceVarying,
+                values: vec![[0.0, 0.0], [1.0, 1.0]],
+                refined: Some(RefinedTexcoord {
+                    face_vertex_indices: vec![0, 1, 2, 2, 1, 3],
+                    stencils: Stencils {
+                        offsets: vec![0, 1, 2, 4, 5],
+                        indices: vec![0, 1, 0, 1, 1],
+                        weights: vec![1.0, 1.0, 0.5, 0.5, 1.0],
+                    },
+                }),
+            }));
+            m
+        }
+        let t = tables(&textured()).unwrap();
+        assert_eq!(t.vertex_texcoord[1..], [40, 41, 42]);
+        // Its stencils are laid out like the points', from the mesh's first
+        // cage value.
+        assert_eq!(t.texcoord_stencils.offsets, [0, 1, 2, 4]);
+        assert_eq!(t.texcoord_stencils.indices, [50, 51, 50, 51, 51]);
+        assert_eq!(t.texcoord_stencils.weights, [1.0, 1.0, 0.5, 0.5, 1.0]);
+        // The controls: a texcoord not refined with its refined mesh, one
+        // refined for a cage, a corner too many and a value too few.
+        fn texcoord(m: &mut Mesh) -> &mut Texcoord {
+            m.texcoord.as_mut().unwrap().as_mut().unwrap()
+        }
+        fn indices(m: &mut Mesh) -> &mut Vec<i32> {
+            &mut texcoord(m).refined.as_mut().unwrap().face_vertex_indices
+        }
+        let with = |edit: fn(&mut Mesh)| {
+            let mut m = textured();
+            edit(&mut m);
+            tables(&m).err().unwrap_or_default()
+        };
+        assert!(with(|m| texcoord(m).refined = None).contains("not refined with it"));
+        assert!(with(|m| m.topology.as_mut().unwrap().refined = None).contains("cage is drawn"));
+        assert!(with(|m| indices(m).push(0)).contains("7 refined st indices for 6"));
+        assert!(with(|m| indices(m)[0] = 4).contains("index 4 is not one of 4 refined values"));
     }
 
     #[test]
@@ -1352,9 +1547,11 @@ mod tests {
             face_vertex_counts: vec![3, 3],
             face_vertex_indices: vec![0, 1, 2, 2, 1, 3],
             holes: vec![1],
-            offsets: vec![0, 1, 3, 4, 6],
-            indices: vec![0, 1, 2, 3, 4, 0],
-            weights: vec![1.0, 0.5, 0.5, 1.0, 0.25, 0.75],
+            stencils: Stencils {
+                offsets: vec![0, 1, 3, 4, 6],
+                indices: vec![0, 1, 2, 3, 4, 0],
+                weights: vec![1.0, 0.5, 0.5, 1.0, 0.25, 0.75],
+            },
         });
         m
     }
@@ -1368,9 +1565,9 @@ mod tests {
         assert_eq!(t.corner_offsets, [0, 1, 3, 5]);
         // Stencils count their entries after the earlier mesh's two, and
         // their cage points from the mesh's first cage point.
-        assert_eq!(t.stencil_offsets, [0, 2, 3, 5, 6]);
-        assert_eq!(t.stencil_indices[2..], [30, 31, 32, 33, 34, 30]);
-        assert_eq!(t.stencil_weights.len(), 2 + 6);
+        assert_eq!(t.stencils.offsets, [0, 2, 3, 5, 6]);
+        assert_eq!(t.stencils.indices[2..], [30, 31, 32, 33, 34, 30]);
+        assert_eq!(t.stencils.weights.len(), 2 + 6);
         // The control: the cage alone draws its own three triangles.
         assert_eq!(
             tables(&mesh(Scheme::CatmullClark, None))
@@ -1388,22 +1585,25 @@ mod tests {
             edit(m.topology.as_mut().unwrap().refined.as_mut().unwrap());
             tables(&m).err().unwrap_or_default()
         };
-        assert!(with(|r| r.indices[5] = 5).contains("index 5 is not one of 5"));
-        assert!(with(|r| r.offsets[4] = 5).contains("do not divide"));
-        assert!(with(|r| r.offsets.swap(1, 2)).contains("do not divide"));
+        assert!(with(|r| r.stencils.indices[5] = 5).contains("index 5 is not one of 5"));
+        assert!(with(|r| r.stencils.offsets[4] = 5).contains("do not divide"));
+        assert!(with(|r| r.stencils.offsets.swap(1, 2)).contains("do not divide"));
         assert!(with(|r| r.face_vertex_indices[5] = 4).contains("index 4 is not one of 4"));
         assert!(with(|r| r.holes[0] = 2).contains("hole index 2"));
-        assert!(with(|r| r.weights[0] = 0.5).contains("stencil 0's weights do not sum to 1"));
+        assert!(
+            with(|r| r.stencils.weights[0] = 0.5).contains("stencil 0's weights do not sum to 1")
+        );
     }
 
     /// Each refined point, as the stencil pass writes it.
     fn refined_points(r: &Refined, cage: &[[f32; 3]]) -> Vec<[f32; 3]> {
-        (r.offsets.windows(2))
+        let s = &r.stencils;
+        (s.offsets.windows(2))
             .map(|w| {
                 let entries = w[0] as usize..w[1] as usize;
                 std::array::from_fn(|k| {
                     (entries.clone())
-                        .map(|e| r.weights[e] * cage[r.indices[e] as usize][k])
+                        .map(|e| s.weights[e] * cage[s.indices[e] as usize][k])
                         .sum()
                 })
             })
@@ -1423,7 +1623,7 @@ mod tests {
         // Point 3's stencil leans on a negative weight, as Catmull-Clark's
         // does at a vertex of valence 2, and lands outside the cage's box.
         let r = m.topology.as_mut().unwrap().refined.as_mut().unwrap();
-        r.weights[4..6].copy_from_slice(&[-0.5, 1.5]);
+        r.stencils.weights[4..6].copy_from_slice(&[-0.5, 1.5]);
         let r = r.clone();
         let points = refined_points(&r, m.points.as_ref().unwrap());
         assert_eq!(points[3], [-1.0, -0.5, 0.0]);
@@ -1476,6 +1676,7 @@ mod tests {
                 normal_count: 0,
                 first_texcoord: 0,
                 texcoord_count: 0,
+                first_cage_texcoord: None,
                 first_vertex: 0,
                 first_index: 0,
                 index_count: 9,

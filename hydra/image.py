@@ -49,7 +49,16 @@ What the reference encodes:
   at the hit's primvar, the one the material's reader names
   (hydra/images/primvar.usda), under the image node's address modes, with
   st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
-  the channels padded with 0 to three. A mesh bound to a material whose surface
+  the channels padded with 0 to three. On a subdivided mesh the primvar is
+  refined with the points (hydra/images/subdivided.usda): a vertex primvar
+  by the points' rules, a faceVarying one by the same rules over its own
+  values, welded by point and value first, so it is smooth across an edge
+  whose faces agree on it and creased along a seam, as USD's default
+  faceVaryingLinearInterpolation, cornersPlus1, reads it; a value of a
+  single face stays put. That is the reading of Houdini's subdivision,
+  Karma and Blender; Storm keeps every corner apart, which interpolates
+  each cage face linearly. Seams ending inside the surface or meeting
+  another seam or a boundary at a vertex are refused. A mesh bound to a material whose surface
   shader names a MaterialX nodedef (ND_...) the host's libraries do not
   define is pink, (1, 0, 1), as Pika draws a material it cannot build,
   when the host hands the network over: husk and UsdImaging's scene-index
@@ -93,7 +102,10 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
-            "st read whatever the name", "failed materials drawn clay", "frame 1's reference"]
+            "st read whatever the name", "st seams smoothed over", "st refined bilinearly",
+            "failed materials drawn clay", "frame 1's reference"]
+# The controls under which a subdivided mesh is drawn as its cage.
+CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 PINK = "pink"
 # What a host hands Pika: the purposes it draws, and whether a material
 # whose surface shader the shader registry does not know arrives with its
@@ -257,8 +269,7 @@ def surface(mesh, time, control=None):
     indices = mesh.GetFaceVertexIndicesAttr().Get(time)
     holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
     scheme = mesh.GetSubdivisionSchemeAttr().Get(time)
-    if scheme == UsdGeom.Tokens.none or control in ("cage drawn on subdivided meshes",
-                                                    "authored normals on subdivided meshes"):
+    if scheme == UsdGeom.Tokens.none or control in CAGE_DRAWN:
         return points, counts, indices, holes
     if scheme not in (UsdGeom.Tokens.catmullClark, UsdGeom.Tokens.bilinear):
         raise ValueError(f"{mesh.GetPath()}: the reference does not refine {scheme}")
@@ -267,6 +278,71 @@ def surface(mesh, time, control=None):
             mesh.GetInterpolateBoundaryAttr().Get(time) != UsdGeom.Tokens.edgeAndCorner):
         raise ValueError(f"{mesh.GetPath()}: the reference refines only uncreased edgeAndCorner meshes")
     return refine(points, counts, indices, holes, scheme, control)
+
+
+def weld(counts, indices, values, control=None):
+    """Welds a faceVarying primvar's values by point and value, as Pika
+    does: the distinct values, and the one each corner reads. They are the
+    primvar's own topology: continuous across an edge whose faces agree on
+    it, a seam where they do not. Raises on a seam ending inside the
+    surface or meeting another seam or a boundary at a vertex, which the
+    reference does not refine."""
+    welded, index, corner_value = [], {}, []
+    for point, value in zip(indices, values):
+        key = point if control == "st seams smoothed over" else (point, tuple(value))
+        if key not in index:
+            index[key] = len(welded)
+            welded.append(value)
+        corner_value.append(index[key])
+    # Each edge's sides: the value each of its faces reads at each end.
+    sides = {}
+    corner = 0
+    for count in counts:
+        for j in range(count):
+            a, b = corner + j, corner + (j + 1) % count
+            side = {indices[a]: corner_value[a], indices[b]: corner_value[b]}
+            sides.setdefault(frozenset((indices[a], indices[b])), []).append(side)
+        corner += count
+    parted = collections.Counter()
+    for edge, faces in sides.items():
+        if len(faces) == 2 and faces[0] == faces[1]:
+            continue
+        if len(faces) == 2 and any(faces[0][v] == faces[1][v] for v in edge):
+            raise ValueError("the reference does not refine a seam ending inside the surface")
+        parted.update(edge)
+    if any(n > 2 for n in parted.values()):
+        raise ValueError("the reference does not refine a vertex where three seams or boundaries meet")
+    return welded, corner_value
+
+
+def texcoord(mesh, primvar, time, control=None):
+    """The primvar as the faces drawn read it: its values and their
+    interpolation. On a subdivided mesh they are refined with the points,
+    one per refined corner: a vertex primvar by the points' rules, a
+    faceVarying one by the same rules over its welded values (see `weld`),
+    under cornersPlus1, the only faceVaryingLinearInterpolation the
+    reference knows."""
+    values, interpolation = primvar.ComputeFlattened(time), primvar.GetInterpolation()
+    scheme = mesh.GetSubdivisionSchemeAttr().Get(time)
+    if scheme == UsdGeom.Tokens.none or control in CAGE_DRAWN:
+        return values, interpolation
+    counts = mesh.GetFaceVertexCountsAttr().Get(time)
+    indices = mesh.GetFaceVertexIndicesAttr().Get(time)
+    holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
+    if interpolation == UsdGeom.Tokens.faceVarying:
+        rule = mesh.GetFaceVaryingLinearInterpolationAttr().Get(time)
+        if rule != UsdGeom.Tokens.cornersPlus1:
+            raise ValueError(f"{mesh.GetPath()}: the reference refines faceVarying primvars under cornersPlus1 only")
+        values, indices = weld(counts, indices, values, control)
+    elif interpolation != UsdGeom.Tokens.vertex:
+        raise ValueError(f"{mesh.GetPath()}: the reference refines vertex and faceVarying primvars only")
+    # Storm's reading: it keeps every corner apart, so under cornersPlus1
+    # every value is a corner and every edge a seam, which is linear.
+    if control == "st refined bilinearly":
+        scheme = UsdGeom.Tokens.bilinear
+    sheet = [Gf.Vec3d(v[0], v[1], 0) for v in values]
+    refined, _, corners, _ = refine(sheet, counts, indices, holes, scheme, control)
+    return [Gf.Vec2f(refined[c][0], refined[c][1]) for c in corners], UsdGeom.Tokens.faceVarying
 
 
 def upstream(shader, name):
@@ -368,10 +444,9 @@ def triangles(stage, time, host, control=None):
         if emitted and emitted != PINK:
             name = "st" if control == "st read whatever the name" else emitted[2]
             primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(name)
-            if not primvar or mesh.GetSubdivisionSchemeAttr().Get(time) != UsdGeom.Tokens.none:
-                raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar "
-                                 "of an unsubdivided mesh")
-            st_values, st_interpolation = primvar.ComputeFlattened(time), primvar.GetInterpolation()
+            if not primvar:
+                raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar")
+            st_values, st_interpolation = texcoord(mesh, primvar, time, control)
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
         points, counts, indices, holes = surface(mesh, time, control)

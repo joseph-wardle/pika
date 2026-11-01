@@ -26,10 +26,21 @@ typedef struct pika_subset {
     size_t face_count;
 } pika_subset;
 
+// Refined values as weighted sums of the values they are refined from:
+// value i's stencil is entries offsets[i] to offsets[i + 1] of the indices
+// and weights.
+typedef struct pika_stencils {
+    // count + 1 offsets.
+    const uint32_t *offsets;
+    size_t count;
+    const int32_t *indices;
+    const float *weights;
+    size_t entry_count;
+} pika_stencils;
+
 // A subdivision surface refined by the delegate's OpenSubdiv: the refined
-// faces, untriangulated, with those refined from holes, and per refined point
-// a stencil, the weighted sum of cage points it is. Stencil i is entries
-// stencil_offsets[i] to stencil_offsets[i + 1] of the indices and weights.
+// faces, untriangulated, with those refined from holes, and the refined
+// points' stencils over the cage points.
 typedef struct pika_refined {
     const int32_t *face_vertex_counts;
     size_t face_count;
@@ -37,13 +48,17 @@ typedef struct pika_refined {
     size_t index_count;
     const int32_t *holes;
     size_t hole_count;
-    // point_count + 1 offsets.
-    const uint32_t *stencil_offsets;
-    size_t point_count;
-    const int32_t *stencil_indices;
-    const float *stencil_weights;
-    size_t entry_count;
+    pika_stencils stencils;
 } pika_refined;
+
+// A texcoord refined with its subdivided mesh: per corner of the refined
+// faces, in pika_refined's order, the refined value it reads, and the
+// refined values' stencils over the values handed over.
+typedef struct pika_refined_texcoord {
+    const int32_t *face_vertex_indices;
+    size_t index_count;
+    pika_stencils stencils;
+} pika_refined_texcoord;
 
 // HdMeshTopology, untriangulated. `scheme` is USD's subdivision scheme
 // token: "catmullClark", "loop", "bilinear" or "none". `refined` is null
@@ -194,9 +209,11 @@ int pika_mesh_no_normals(const pika_renderer *renderer, uint64_t id);
 // texcoord, to `out`, or "" when it reads none; the material must be set.
 int pika_mesh_texcoord_name(const pika_renderer *renderer, uint64_t id, char *out,
                             size_t capacity);
-// The texcoord: the mesh's primvar `name`, `count` pairs.
+// The texcoord: the mesh's primvar `name`, `count` pairs, refined with the
+// mesh when it is subdivided (null when its cage is drawn).
 int pika_mesh_texcoord(const pika_renderer *renderer, uint64_t id, const char *name,
-                       const char *interpolation, const float *values, size_t count);
+                       const char *interpolation, const float *values, size_t count,
+                       const pika_refined_texcoord *refined);
 // For a mesh whose material reads no primvar, or that lacks the one it reads.
 int pika_mesh_no_texcoord(const pika_renderer *renderer, uint64_t id);
 // The world transform: Hydra's row-major GfMatrix4d.
