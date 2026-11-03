@@ -13,6 +13,8 @@ use crate::material::Document;
 
 // Built by `make -C bake` from the checkout, like the shaders.
 const TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/bake");
+// The library files that shadow Houdini's, which the generator inlines.
+const LIBRARIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bake/libraries");
 
 /// What the pixel stage expects of the renderer, as the tool lists it:
 /// its public uniforms, textures and the varyings the vertex stage fills.
@@ -94,15 +96,22 @@ pub struct Bake {
     /// The host's OCIO config, or empty for OpenImageIO's default, through
     /// which the tool converts textures to the working space.
     config: String,
-    /// A hash of the tool's own bytes: a rebuilt tool regenerates everything.
+    /// A hash of the tool's own bytes and its library files: a rebuilt or
+    /// edited tool regenerates everything.
     tool: u64,
 }
 
 impl Bake {
     pub fn new() -> Result<Self, String> {
-        let bytes = std::fs::read(TOOL).map_err(|e| {
+        let mut bytes = std::fs::read(TOOL).map_err(|e| {
             format!("cannot read the bake tool {TOOL}: {e}. Build it with `make -C bake`.")
         })?;
+        for file in files(Path::new(LIBRARIES))? {
+            bytes.extend_from_slice(file.as_os_str().as_encoded_bytes());
+            bytes.extend(
+                std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?,
+            );
+        }
         let root = cache::root()?;
         let (materials, textures) = (root.join("materials"), root.join("textures"));
         for dir in [&materials, &textures] {
@@ -148,10 +157,10 @@ impl Bake {
         result
     }
 
-    /// Bakes the image `source`, declared in the colour space `space`, with
-    /// the levels above `cap` texels dropped, in one of the tool's
-    /// encodings, unless the cache holds it; returns the baked file and
-    /// whether it was baked now.
+    /// Bakes the image `source`, or the UDIM set its `<UDIM>` pattern
+    /// names, declared in the colour space `space`, with the levels above
+    /// `cap` texels dropped, in one of the tool's encodings, unless the
+    /// cache holds it; returns the baked file and whether it was baked now.
     pub fn texture(
         &self,
         source: &Path,
@@ -186,8 +195,9 @@ impl Bake {
 
     /// Where `source`'s bake lives: under `textures`, mirroring the source's
     /// own path so one asset's bakes can be found and deleted, named by a
-    /// hash of the source's size and modification time, the parameters, the
-    /// config and the tool, so an edited source or a changed setting misses.
+    /// hash of each of its files' name, size and modification time, the
+    /// parameters, the config and the tool, so an edited source, a tile
+    /// added or a changed setting misses.
     pub fn texture_path(
         &self,
         source: &Path,
@@ -195,19 +205,22 @@ impl Bake {
         encoding: &str,
         cap: u32,
     ) -> Result<PathBuf, String> {
-        let source = std::fs::canonicalize(source)
-            .map_err(|e| format!("cannot find the texture {}: {e}", source.display()))?;
-        let meta = std::fs::metadata(&source)
-            .map_err(|e| format!("cannot read {}: {e}", source.display()))?;
-        let modified = meta
-            .modified()
-            .map_err(|e| format!("{} has no modification time: {e}", source.display()))?
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
+        let mut state = Vec::new();
+        for file in tiles(source)? {
+            let meta = std::fs::metadata(&file)
+                .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
+            let modified = meta
+                .modified()
+                .map_err(|e| format!("{} has no modification time: {e}", file.display()))?
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default();
+            state.extend_from_slice(file.file_name().unwrap().as_encoded_bytes());
+            state.extend_from_slice(&meta.len().to_le_bytes());
+            state.extend_from_slice(&modified.as_secs().to_le_bytes());
+            state.extend_from_slice(&modified.subsec_nanos().to_le_bytes());
+        }
         let key = cache::fnv1a(&[
-            &meta.len().to_le_bytes(),
-            &modified.as_secs().to_le_bytes(),
-            &modified.subsec_nanos().to_le_bytes(),
+            &state,
             space.as_bytes(),
             b"\0",
             encoding.as_bytes(),
@@ -217,12 +230,58 @@ impl Bake {
             &cap.to_le_bytes(),
             &self.tool.to_le_bytes(),
         ]);
-        let mirror: PathBuf = source
-            .components()
-            .filter(|c| matches!(c, Component::Normal(_)))
-            .collect();
+        let dir = source.parent().unwrap_or(Path::new("."));
+        let dir = std::fs::canonicalize(dir)
+            .map_err(|e| format!("cannot find the texture {}: {e}", source.display()))?;
+        let mirror: PathBuf = (dir
+            .join(source.file_name().unwrap_or_default())
+            .components())
+        .filter(|c| matches!(c, Component::Normal(_)))
+        .collect();
         Ok(self.textures.join(mirror).join(format!("{key:016x}")))
     }
+}
+
+/// Every file under `dir`, in path order.
+fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    let entries =
+        std::fs::read_dir(dir).map_err(|e| format!("cannot read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry
+            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+            .path();
+        if path.is_dir() {
+            found.extend(files(&path)?);
+        } else {
+            found.push(path);
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// The files `source` names: itself, or for a `<UDIM>` pattern the tiles
+/// 1001 to 1100 that exist, as USD reads a set. The tool lists them by the
+/// same rule (`bake/texture.cpp`); the key here is what makes a bake miss.
+pub fn tiles(source: &Path) -> Result<Vec<PathBuf>, String> {
+    let text = source.to_string_lossy();
+    let Some((before, after)) = text.split_once("<UDIM>") else {
+        if !source.is_file() {
+            return Err(format!("cannot find the texture {text}"));
+        }
+        return Ok(vec![source.to_owned()]);
+    };
+    let set: Vec<PathBuf> = (1001..=1100)
+        .map(|number| PathBuf::from(format!("{before}{number}{after}")))
+        .filter(|tile| tile.is_file())
+        .collect();
+    if set.is_empty() {
+        return Err(format!(
+            "no tiles of {text} exist: UDIM tiles are numbered 1001 to 1100"
+        ));
+    }
+    Ok(set)
 }
 
 fn run(document: &Document, dir: &Path) -> Result<(), String> {
@@ -290,6 +349,25 @@ pub mod tests {
     }
 
     #[test]
+    fn library_files_are_listed_in_order() {
+        let dir = std::env::temp_dir().join(format!("pika_libraries_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("b/c")).unwrap();
+        std::fs::write(dir.join("b/c/z.slang"), b"z").unwrap();
+        std::fs::write(dir.join("a.slang"), b"a").unwrap();
+        std::fs::write(dir.join("b/y.slang"), b"y").unwrap();
+        assert_eq!(
+            files(&dir).unwrap(),
+            [
+                dir.join("a.slang"),
+                dir.join("b/c/z.slang"),
+                dir.join("b/y.slang")
+            ]
+        );
+        assert!(files(&dir.join("nowhere")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn texture_paths_mirror_the_source_and_key_its_state() {
         let dir = std::env::temp_dir().join(format!("pika_bake_{}", std::process::id()));
         std::fs::create_dir_all(dir.join("assets")).unwrap();
@@ -346,6 +424,47 @@ pub mod tests {
             bake("", 1)
                 .texture_path(Path::new("/nowhere/rock.png"), "raw", "data", 4096)
                 .is_err()
+        );
+
+        // A set is keyed on its tiles: one added or saved again misses.
+        let pattern = dir.join("assets/wall.<UDIM>.png");
+        let error = tiles(&pattern).unwrap_err();
+        assert!(error.contains("wall.<UDIM>.png"), "{error}");
+        std::fs::write(dir.join("assets/wall.1001.png"), b"png").unwrap();
+        std::fs::write(dir.join("assets/wall.1012.png"), b"png").unwrap();
+        std::fs::write(dir.join("assets/wall.1101.png"), b"png").unwrap();
+        assert_eq!(
+            tiles(&pattern).unwrap(),
+            [
+                dir.join("assets/wall.1001.png"),
+                dir.join("assets/wall.1012.png")
+            ]
+        );
+        let set = bake("", 1)
+            .texture_path(&pattern, "raw", "data", 4096)
+            .unwrap();
+        assert_eq!(
+            set.parent().unwrap(),
+            dir.join("textures")
+                .join(real.parent().unwrap().strip_prefix("/").unwrap())
+                .join("wall.<UDIM>.png")
+        );
+        std::fs::write(dir.join("assets/wall.1002.png"), b"png").unwrap();
+        let added = bake("", 1)
+            .texture_path(&pattern, "raw", "data", 4096)
+            .unwrap();
+        assert_ne!(set, added);
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.join("assets/wall.1012.png"))
+            .unwrap();
+        file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(2_000_000))
+            .unwrap();
+        assert_ne!(
+            added,
+            bake("", 1)
+                .texture_path(&pattern, "raw", "data", 4096)
+                .unwrap()
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

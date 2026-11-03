@@ -25,6 +25,18 @@ acescg.exr  32×4, three float channels, eight flat 4×4 blocks of COLORS in
             a row, linear and in ACEScg primaries, the inverse of the matrix
             hydra/image.py converts an acescg image by, so a bake declared
             acescg gives COLORS back.
+udim.<UDIM>.exr
+            A two-tile UDIM set with a gap in each direction: tile 1001 is
+            the ramp, tile 1012 the ramp at half scale, texel (x, y) holding
+            ((x + 0.5) / 16, (y + 0.5) / 16), so a sample tells the tiles
+            apart and the tiles between and around them are missing
+            (hydra/images/udim.usda).
+mixed.<UDIM>.exr
+            A set whose tiles differ in size, as ALab's stoat has: tile 1001
+            is the ramp, tile 1002 a 4×4 ramp, texel (x, y) holding
+            ((x + 0.5) / 4, (y + 0.5) / 4), which a bake enlarges to the
+            set's 8×8 bilinearly, so its texels hold the ramp at their own
+            centres, the outer half texel clamped.
 """
 
 import os
@@ -62,17 +74,35 @@ def linear(srgb):
     return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
 
 
-def ramp():
-    coords = np.zeros((8, 8, 2), np.float32)
-    for y in range(8):
-        for x in range(8):
-            coords[y, x] = ((x + 0.5) / 8, (y + 0.5) / 8)
-    spec = oiio.ImageSpec(8, 8, 2, oiio.FLOAT)
+def ramp_pixels(scale, size=8):
+    coords = np.zeros((size, size, 2), np.float32)
+    for y in range(size):
+        for x in range(size):
+            coords[y, x] = ((x + 0.5) / size * scale, (y + 0.5) / size * scale)
+    return coords
+
+
+def write_ramp(name, scale, size=8):
+    spec = oiio.ImageSpec(size, size, 2, oiio.FLOAT)
     spec.channelnames = ("R", "G")
-    out = oiio.ImageOutput.create("ramp.exr")
-    out.open(os.path.join(HERE, "ramp.exr"), spec)
-    out.write_image(coords)
+    out = oiio.ImageOutput.create(name)
+    out.open(os.path.join(HERE, name), spec)
+    out.write_image(ramp_pixels(scale, size))
     out.close()
+
+
+def ramp():
+    write_ramp("ramp.exr", 1.0)
+
+
+def udim():
+    write_ramp("udim.1001.exr", 1.0)
+    write_ramp("udim.1012.exr", 0.5)
+
+
+def mixed():
+    write_ramp("mixed.1001.exr", 1.0)
+    write_ramp("mixed.1002.exr", 1.0, 4)
 
 
 def swatch_pixels():
@@ -139,3 +169,5 @@ if __name__ == "__main__":
     normal()
     greys()
     acescg()
+    udim()
+    mixed()

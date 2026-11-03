@@ -86,7 +86,11 @@ What the reference encodes:
   at the hit's primvar, the one the material's reader names
   (hydra/images/primvar.usda), under the image node's address modes, with
   st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
-  the channels padded with 0 to three. A color3 image's sample
+  the channels padded with 0 to three. A file naming <UDIM> is a set of
+  tiles (hydra/images/udim.usda): the hit samples tile 1001 + ⌊u⌋ + 10 ⌊v⌋
+  at (u − ⌊u⌋, v − ⌊v⌋), under the same modes within the tile, 0 where the
+  set has no such file, as USD numbers tiles and Storm and Karma read
+  them. A color3 image's sample
   (hydra/images/colorspace.usda) is emitted in the working space, linear
   Rec.709, from the colour space its file input declares: srgb_texture
   decoded by the sRGB curve, acescg by the matrix from AP1 through CIE
@@ -153,6 +157,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "subsets ignored", "subset faces of the cage", "st indices ignored",
             "sRGB read as raw", "8-bit auto read as raw", "ACEScg primaries kept",
+            "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -456,8 +461,12 @@ def sampled(image, kind):
     modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
                   for m in ("uaddressmode", "vaddressmode"))
     file = image.GetInput("file")
-    return (file.Get().resolvedPath, modes, reader.GetInput("geomprop").Get(),
-            file.GetAttr().GetColorSpace() or "auto")
+    # USD resolves a path to the file it names, which a <UDIM> pattern is
+    # not; the pattern is anchored to its layer, as UsdImaging anchors it.
+    path = file.Get().resolvedPath
+    if "<UDIM>" in file.Get().path:
+        path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
+    return (path, modes, reader.GetInput("geomprop").Get(), file.GetAttr().GetColorSpace() or "auto")
 
 
 def lit(surface, time, control=None):
@@ -550,9 +559,25 @@ def working(texels, path, space, control=None):
 
 
 def sample(path, st, modes, space, control=None):
-    """The bilinear sample of level 0 of the image at `path` at each st (an
-    (n, 2) array), rows from the bottom as USD reads st, under the address
-    modes (u, v), in the working space; the channels padded with 0 to three."""
+    """The bilinear sample of level 0 of the image at `path`, or of the tile
+    of the UDIM set `path` names, at each st (an (n, 2) array), rows from
+    the bottom as USD reads st, under the address modes (u, v), in the
+    working space; the channels padded with 0 to three."""
+    if "<UDIM>" in path:
+        tile = np.floor(st)
+        if control == "UDIM tiles read as one image":
+            tile[:] = 0
+        width = 1 if control == "UDIM rows one tile wide" else 10
+        number = 1001 + tile[:, 0].astype(int) + width * tile[:, 1].astype(int)
+        out = np.zeros((len(st), 3))
+        for n in np.unique(number):
+            file = path.replace("<UDIM>", str(n))
+            if not os.path.isfile(file) and control == "missing UDIM tiles read as 1001":
+                file = path.replace("<UDIM>", "1001")
+            if os.path.isfile(file):
+                on = number == n
+                out[on] = sample(file, (st - tile)[on], modes, space, control)
+        return out
     image = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
     h, w = image.shape[:2]
     texels = np.zeros((h, w, 3))

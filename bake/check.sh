@@ -66,6 +66,13 @@ cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_aut
 # A JPEG reads, and a space the config knows beyond sRGB is converted.
 texture greys.jpg auto color 4096 greys
 texture acescg.exr acescg color 4096 acescg
+# A UDIM set is one array, a layer per tile, with a table from tile to layer.
+texture "udim.<UDIM>.exr" raw float 4096 udim
+texture "mixed.<UDIM>.exr" raw float 4096 mixed
+if "$BAKE" texture "$FIXTURES/none.<UDIM>.exr" raw float 4096 "" "$OUT/textures/none.texture" 2> "$OUT/textures/none.err"; then
+    fail "none: a set with no tiles baked"
+fi
+grep -q "none.<UDIM>.exr" "$OUT/textures/none.err" || fail "none: the error does not name the pattern"
 ! cmp -s "$OUT/textures/swatch.texture" "$OUT/textures/swatch_raw.texture" || fail "swatch_raw: raw and sRGB bake alike, so the auto checks prove nothing"
 "$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
 if "$BAKE" texture "$FIXTURES/swatch.png" bogus color 4096 "" "$OUT/textures/bogus.texture" 2> "$OUT/textures/bogus.err"; then

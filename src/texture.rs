@@ -1,10 +1,12 @@
-//! Baked textures: the file `bake texture` writes for one image under the
-//! cache (`bake/texture.cpp`), as the renderer reads it, the image it is
-//! uploaded to, and the set of them loaded for the materials drawn, with
-//! the samplers they are read through. The file is a 24-byte header, `pika`
-//! and five little-endian u32 (width, height, layers, levels, the VkFormat),
-//! then every mip level in order, each layer within it, so an upload is one
-//! copy per level.
+//! Baked textures: the file `bake texture` writes for one image or UDIM
+//! set under the cache (`bake/texture.cpp`), as the renderer reads it, the
+//! image it is uploaded to, and the set of them loaded for the materials
+//! drawn, with the samplers they are read through. The file is a header,
+//! `pika` and five little-endian u32 (width, height, layers, levels, the
+//! VkFormat), the tile table's length and the table (the layer of each
+//! UDIM tile from 1001, or past the layers where the set lacks it; one
+//! entry for a plain image), then every mip level in order, each layer
+//! within it, so an upload is one copy per level.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -19,6 +21,8 @@ pub struct Texture {
     pub height: u32,
     pub layers: u32,
     pub format: vk::Format,
+    /// The layer of each tile, which the shader reads (`mx_texture.slang`).
+    pub tiles: Vec<u32>,
     /// Each level's bytes within `file`, all its layers, finest first.
     pub levels: Vec<Range<usize>>,
     pub file: Vec<u8>,
@@ -30,12 +34,25 @@ pub fn read(path: &Path) -> Result<Texture, String> {
 }
 
 pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
-    if file.len() < 24 || &file[..4] != b"pika" {
+    if file.len() < 28 || &file[..4] != b"pika" {
         return Err("is not a baked texture".into());
     }
     let word = |i: usize| u32::from_le_bytes(file[4 + 4 * i..8 + 4 * i].try_into().unwrap());
     let (width, height, layers, levels) = (word(0), word(1), word(2), word(3));
     let format = vk::Format::from_raw(word(4) as i32);
+    let entries = word(5) as usize;
+    if entries != 1 && entries != 100 || file.len() < 28 + 4 * entries {
+        return Err(format!(
+            "has a tile table of {entries} entries, not 1 or 100"
+        ));
+    }
+    let tiles: Vec<u32> = (0..entries).map(|i| word(6 + i)).collect();
+    if tiles
+        .iter()
+        .any(|&layer| layer != u32::MAX && layer >= layers)
+    {
+        return Err(format!("maps a tile past its {layers} layers"));
+    }
     if level_size(format, 1, 1).is_none() {
         return Err(format!(
             "has the format {format:?}, which the bake tool does not write"
@@ -51,7 +68,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         ));
     }
     let mut ranges = Vec::new();
-    let (mut offset, mut w, mut h) = (24, width, height);
+    let (mut offset, mut w, mut h) = (28 + 4 * entries, width, height);
     for _ in 0..levels {
         let size = level_size(format, w, h).unwrap() * layers as usize;
         ranges.push(offset..offset + size);
@@ -62,8 +79,8 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
     if offset != file.len() {
         return Err(format!(
             "holds {} bytes of levels where {} are expected",
-            file.len() - 24,
-            offset - 24
+            file.len() - ranges[0].start,
+            offset - ranges[0].start
         ));
     }
     Ok(Texture {
@@ -71,6 +88,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         height,
         layers,
         format,
+        tiles,
         levels: ranges,
         file,
     })
@@ -92,7 +110,7 @@ pub fn level_size(format: vk::Format, width: u32, height: u32) -> Option<usize> 
 }
 
 /// A texture on the GPU: a 2D array image with every level, in the layout
-/// the material pass samples once its upload has run.
+/// the material pass samples once its upload has run, and its tile table.
 struct Image {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
@@ -100,6 +118,16 @@ struct Image {
     memory: vk::DeviceMemory,
     view: vk::ImageView,
     bytes: u64,
+    tiles: Buffer,
+}
+
+/// What a surface binds for one texture: its view and its tile table,
+/// whose range is the table's own length, which the shader reads to tell a
+/// plain image from a set (a buffer itself is at least 16 bytes).
+#[derive(Clone, Copy)]
+pub struct Binding {
+    pub view: vk::ImageView,
+    pub tiles: vk::DescriptorBufferInfo,
 }
 
 impl Image {
@@ -119,12 +147,19 @@ impl Image {
             .array_layers(texture.layers)
             .samples(vk::SampleCountFlags::TYPE_1)
             .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let mut tiles = Buffer::host(device, 4 * texture.tiles.len() as u64, usage, host)?;
+        for (i, layer) in texture.tiles.iter().enumerate() {
+            tiles.bytes()[4 * i..4 * i + 4].copy_from_slice(&layer.to_ne_bytes());
+        }
         let mut i = Self {
             device: d.clone(),
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
             bytes: 0,
+            tiles,
         };
         // SAFETY (this and every call below): `d` is live, each info struct
         // outlives its call, and each handle passed in was created on `d`
@@ -149,11 +184,10 @@ impl Image {
         i.view = unsafe { d.create_image_view(&view_info, None) }
             .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
         // The levels alone: each starts at a multiple of its format's block
-        // size then, which a copy's buffer offset must be; the header's 24
-        // bytes are not one.
-        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        // size then, which a copy's buffer offset must be; the header is
+        // not one.
         let usage = vk::BufferUsageFlags::TRANSFER_SRC;
-        let levels = &texture.file[HEADER..];
+        let levels = &texture.file[texture.levels[0].start..];
         let mut staging = Buffer::host(device, levels.len() as u64, usage, host)?;
         staging.bytes()[..levels.len()].copy_from_slice(levels);
         Ok((i, staging))
@@ -183,7 +217,7 @@ impl Image {
         let copies: Vec<_> = (texture.levels.iter().enumerate())
             .map(|(level, bytes)| {
                 vk::BufferImageCopy::default()
-                    .buffer_offset((bytes.start - HEADER) as u64)
+                    .buffer_offset((bytes.start - texture.levels[0].start) as u64)
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: level as u32,
@@ -214,6 +248,17 @@ impl Image {
     }
 }
 
+impl Image {
+    fn binding(&self) -> Binding {
+        Binding {
+            view: self.view,
+            tiles: vk::DescriptorBufferInfo::default()
+                .buffer(self.tiles.raw)
+                .range(self.tiles.size),
+        }
+    }
+}
+
 impl Drop for Image {
     fn drop(&mut self) {
         // SAFETY: every handle was created on `device` or is null, and the
@@ -225,8 +270,6 @@ impl Drop for Image {
         }
     }
 }
-
-const HEADER: usize = 24;
 
 fn range(texture: &Texture) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange {
@@ -265,23 +308,23 @@ impl Textures {
         self.staging.clear();
     }
 
-    /// The view of the baked texture at `path`, loaded now unless it is.
+    /// The baked texture at `path`, loaded now unless it is.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         path: &Path,
-    ) -> Result<vk::ImageView, String> {
+    ) -> Result<Binding, String> {
         if let Some(image) = self.images.get(path) {
-            return Ok(image.view);
+            return Ok(image.binding());
         }
         let texture = read(path)?;
         let (image, staging) = Image::new(device, &texture)?;
         image.record(cb, &staging, &texture);
         self.staging.push(staging);
-        let view = image.view;
+        let binding = image.binding();
         self.images.insert(path.to_owned(), image);
-        Ok(view)
+        Ok(binding)
     }
 
     /// Drops the textures not in `used`. No GPU work may be pending.
@@ -321,13 +364,18 @@ impl Textures {
         Ok(sampler)
     }
 
-    /// The images' bytes, and the staging buffers' on the host side.
+    /// The images' bytes, and the tile tables' and staging buffers' on the
+    /// host side.
     pub fn memory(&self) -> gpu::Memory {
         let mut memory = gpu::Memory {
             device: self.images.values().map(|i| i.bytes).sum(),
             host: 0,
         };
-        for b in &self.staging {
+        for b in self
+            .staging
+            .iter()
+            .chain(self.images.values().map(|i| &i.tiles))
+        {
             memory += b.memory();
         }
         memory
@@ -360,7 +408,9 @@ mod tests {
         let t = parse(RAMP.to_vec()).unwrap();
         assert_eq!((t.width, t.height, t.layers), (8, 8, 1));
         assert_eq!(t.format, vk::Format::R32G32_SFLOAT);
+        assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
+        assert_eq!(t.levels[0].start, 32);
         let texel = |level: usize, x: usize, y: usize| {
             let at = t.levels[level].start + (y * (8 >> level) + x) * 8;
             let f = |i: usize| f32::from_le_bytes(t.file[at + i..at + i + 4].try_into().unwrap());
@@ -380,6 +430,34 @@ mod tests {
         let mut bad = RAMP.to_vec();
         bad[20] = 0;
         assert!(parse(bad).is_err(), "an unknown format");
+        let mut bad = RAMP.to_vec();
+        bad[24] = 2;
+        assert!(parse(bad).is_err(), "a table of two entries");
+        let mut bad = RAMP.to_vec();
+        bad[28] = 1;
+        assert!(parse(bad).is_err(), "a tile past the layers");
+    }
+
+    #[test]
+    fn reads_a_set_of_tiles() {
+        // Two 1×1 R32_SFLOAT layers, tiles 1001 and 1012.
+        let mut file = b"pika".to_vec();
+        for word in [1u32, 1, 2, 1, 100, 100] {
+            file.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut table = [u32::MAX; 100];
+        (table[0], table[11]) = (0, 1);
+        for entry in table {
+            file.extend_from_slice(&entry.to_le_bytes());
+        }
+        file.extend_from_slice(&0.25f32.to_le_bytes());
+        file.extend_from_slice(&0.75f32.to_le_bytes());
+        let t = parse(file.clone()).unwrap();
+        assert_eq!((t.layers, t.tiles.len()), (2, 100));
+        assert_eq!((t.tiles[0], t.tiles[11], t.tiles[1]), (0, 1, u32::MAX));
+        assert_eq!(t.levels, vec![428..436]);
+        file.truncate(file.len() - 4);
+        assert!(parse(file).is_err(), "a layer missing");
     }
 
     #[test]

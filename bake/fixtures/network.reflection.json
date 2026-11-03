@@ -2,7 +2,7 @@
     "parameters": [
         {
             "name": "pixelCB",
-            "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 3},
+            "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4},
             "type": {
                 "kind": "constantBuffer",
                 "elementType": {
@@ -121,10 +121,22 @@
                                             "kind": "samplerState"
                                         },
                                         "binding": {"kind": "descriptorTableSlot", "index": 1}
+                                    },
+                                    {
+                                        "name": "tiles",
+                                        "type": {
+                                            "kind": "resource",
+                                            "baseShape": "structuredBuffer",
+                                            "resultType": {
+                                                "kind": "scalar",
+                                                "scalarType": "uint32"
+                                            }
+                                        },
+                                        "binding": {"kind": "descriptorTableSlot", "index": 2}
                                     }
                                 ]
                             },
-                            "binding": {"kind": "descriptorTableSlot", "index": 1, "count": 2}
+                            "binding": {"kind": "descriptorTableSlot", "index": 1, "count": 3}
                         },
                         {
                             "name": "n1_wrapS",
@@ -479,10 +491,22 @@
                                                 "kind": "samplerState"
                                             },
                                             "binding": {"kind": "descriptorTableSlot", "index": 1}
+                                        },
+                                        {
+                                            "name": "tiles",
+                                            "type": {
+                                                "kind": "resource",
+                                                "baseShape": "structuredBuffer",
+                                                "resultType": {
+                                                    "kind": "scalar",
+                                                    "scalarType": "uint32"
+                                                }
+                                            },
+                                            "binding": {"kind": "descriptorTableSlot", "index": 2}
                                         }
                                     ]
                                 },
-                                "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 2}
+                                "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 3}
                             },
                             {
                                 "name": "n1_wrapS",
@@ -718,7 +742,7 @@
                         ]
                     },
                     "bindings": [
-                        {"kind": "descriptorTableSlot", "index": 1, "count": 2},
+                        {"kind": "descriptorTableSlot", "index": 1, "count": 3},
                         {"kind": "uniform", "offset": 0, "size": 272, "elementStride": 0}
                     ]
                 }
@@ -861,7 +885,7 @@
             "bindings": [
                 {
                     "name": "pixelCB",
-                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 3}
+                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4}
                 },
                 {
                     "name": "view",
@@ -985,7 +1009,7 @@
             "bindings": [
                 {
                     "name": "pixelCB",
-                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 3}
+                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4}
                 },
                 {
                     "name": "view",

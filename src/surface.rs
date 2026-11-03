@@ -60,11 +60,13 @@ pub struct Layout {
     pub textures: Vec<Texture>,
 }
 
+/// A texture's bindings: its image, sampler and tile table.
 #[derive(Debug, PartialEq)]
 pub struct Texture {
     pub name: String,
     pub image: u32,
     pub sampler: u32,
+    pub tiles: u32,
 }
 
 /// Reads `slangc -reflection-json`'s output for a surface.
@@ -107,6 +109,7 @@ pub fn layout(reflection: &str) -> Result<Layout, String> {
                     name: name.to_owned(),
                     image: slot("tex")?,
                     sampler: slot("sampler")?,
+                    tiles: slot("tiles")?,
                 });
             }
             _ => return Err(format!("uniform {name} has a binding Pika does not know")),
@@ -365,7 +368,8 @@ mod tests {
             [Texture {
                 name: "n1_file".into(),
                 image: 1,
-                sampler: 2
+                sampler: 2,
+                tiles: 3,
             }]
         );
 

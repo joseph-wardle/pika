@@ -19,7 +19,7 @@ use crate::shader;
 use crate::store::{Moved, Network, Store};
 use crate::surface::{self, Layout};
 use crate::target;
-use crate::texture::Textures;
+use crate::texture::{Binding, Textures};
 use crate::transform::Camera;
 use crate::view::View;
 
@@ -230,10 +230,10 @@ impl Shade {
             let (texture, fresh) =
                 (self.bake).texture(file, &source.space, source.encoding, CAP)?;
             update.baked += usize::from(fresh);
-            let view = self.textures.load(device, cb, &texture)?;
+            let binding = self.textures.load(device, cb, &texture)?;
             let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
             let sampler = self.textures.sampler(modes)?;
-            bindings.push((view, sampler));
+            bindings.push((binding, sampler));
             uniforms.textures.push(texture);
         }
         uniforms.bind(layout, &bindings);
@@ -351,6 +351,13 @@ impl Surface {
                     .descriptor_count(1)
                     .stage_flags(fragment),
             );
+            bindings.push(
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(texture.tiles)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(fragment),
+            );
         }
         let mut s = Self {
             device: d.clone(),
@@ -455,6 +462,11 @@ impl Uniforms {
                     .ty(vk::DescriptorType::SAMPLER)
                     .descriptor_count(textures),
             );
+            sizes.push(
+                vk::DescriptorPoolSize::default()
+                    .ty(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(textures),
+            );
         }
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
@@ -482,21 +494,22 @@ impl Uniforms {
 
     /// Writes the set: the block, and each of `layout`'s textures from
     /// `bindings` in order. The GPU must not be reading the set.
-    fn bind(&self, layout: &Layout, bindings: &[(vk::ImageView, vk::Sampler)]) {
+    fn bind(&self, layout: &Layout, bindings: &[(Binding, vk::Sampler)]) {
         assert_eq!(bindings.len(), layout.textures.len());
         let buffer_info = [vk::DescriptorBufferInfo::default()
             .buffer(self.buffer.raw)
             .range(vk::WHOLE_SIZE)];
         let images: Vec<_> = (bindings.iter())
-            .map(|&(view, sampler)| {
+            .map(|&(binding, sampler)| {
                 [
                     vk::DescriptorImageInfo::default()
-                        .image_view(view)
+                        .image_view(binding.view)
                         .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
                     vk::DescriptorImageInfo::default().sampler(sampler),
                 ]
             })
             .collect();
+        let tiles: Vec<_> = bindings.iter().map(|&(b, _)| [b.tiles]).collect();
         let mut writes = vec![
             vk::WriteDescriptorSet::default()
                 .dst_set(self.set)
@@ -504,7 +517,7 @@ impl Uniforms {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(&buffer_info),
         ];
-        for (texture, info) in layout.textures.iter().zip(&images) {
+        for ((texture, info), table) in layout.textures.iter().zip(&images).zip(&tiles) {
             writes.push(
                 vk::WriteDescriptorSet::default()
                     .dst_set(self.set)
@@ -519,8 +532,15 @@ impl Uniforms {
                     .descriptor_type(vk::DescriptorType::SAMPLER)
                     .image_info(&info[1..]),
             );
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(texture.tiles)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(table),
+            );
         }
-        // SAFETY: the set, buffer, views and samplers were created on
+        // SAFETY: the set, buffers, views and samplers were created on
         // `device`, which is live, and the infos outlive the call.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
     }

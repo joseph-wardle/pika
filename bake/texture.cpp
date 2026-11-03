@@ -1,17 +1,25 @@
-// The texture job: an image as authored in, the one file the renderer
-// uploads out. OpenImageIO decodes the source; its stored mip levels at or
-// below `cap` texels on a side are kept and the missing ones are built by
-// box filtering; OpenColorIO converts the declared colour space to
-// lin_rec709, Pika's working space; then the levels are encoded:
+// The texture job: an image as authored in, or a UDIM set as the `<UDIM>`
+// pattern naming it, the one file the renderer uploads out. OpenImageIO
+// decodes the source; its stored mip levels at or below `cap` texels on a
+// side are kept and the missing ones are built by box filtering;
+// OpenColorIO converts the declared colour space to lin_rec709, Pika's
+// working space; then the levels are encoded:
 //
 //   float    32-bit floats, one, two or four channels as the source has them
 //   color    BC7, stored sRGB-encoded so that sampling decodes to linear
 //   data     BC7 at linear 8 bits (normals and other vectors)
 //   single   BC4, the first channel at linear 8 bits
 //
-// The file is a 24-byte header of little-endian u32: "pika", width, height,
-// layers, levels, the VkFormat; then each level in order, every layer within
-// it. src/texture.rs reads it.
+// A set's tiles are the files numbered 1001 to 1100 that exist, as USD
+// reads a set, each a layer in tile order, all at the largest tile's size
+// after the cap, smaller ones enlarged bilinearly, so the renderer samples
+// one array (bake/libraries/stdlib/genslang/lib/mx_texture.slang).
+//
+// The file is a header of little-endian u32: "pika", width, height, layers,
+// levels, the VkFormat, then the tile table's length and the table: one
+// entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
+// or 0xFFFFFFFF where the set lacks it. Then each level in order, every
+// layer within it. src/texture.rs reads it.
 
 #include "bake.h"
 #include "bc7enc/bc7enc.h"
@@ -59,6 +67,51 @@ struct Level {
 unsigned half(unsigned n) { return std::max(1u, n / 2); }
 
 bool fits(Level const &level, unsigned cap) { return level.width <= cap && level.height <= cap; }
+
+struct Tile {
+    unsigned number; // 1001 to 1100, or 0 for a plain image
+    std::string path;
+};
+
+// The files `source` names: itself, or the tiles of a `<UDIM>` set that
+// exist. src/bake.rs lists them by the same rule to key the cache.
+std::vector<Tile> tiles(std::string const &source) {
+    size_t at = source.find("<UDIM>");
+    if (at == std::string::npos)
+        return {{0, source}};
+    std::vector<Tile> set;
+    for (unsigned number = 1001; number <= 1100; ++number) {
+        std::string path = source.substr(0, at) + std::to_string(number) + source.substr(at + 6);
+        if (std::ifstream(path).good())
+            set.push_back({number, path});
+    }
+    if (set.empty())
+        throw std::runtime_error("no tiles of " + source +
+                                 " exist: UDIM tiles are numbered 1001 to 1100");
+    return set;
+}
+
+// The size the source's first stored level at or below the cap (or its
+// smallest) takes once halved to fit the cap: the size it bakes at.
+void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &height) {
+    std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
+    if (!in)
+        throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
+    unsigned w = 0, h = 0;
+    for (int m = 0; in->seek_subimage(0, m); ++m) {
+        w = in->spec().width;
+        h = in->spec().height;
+        if (w <= cap && h <= cap)
+            break;
+    }
+    in->close();
+    while (w > cap || h > cap) {
+        w = half(w);
+        h = half(h);
+    }
+    width = std::max(width, w);
+    height = std::max(height, h);
+}
 
 Level read(OIIO::ImageInput &in, std::string const &path) {
     OIIO::ImageSpec const &spec = in.spec();
@@ -114,21 +167,29 @@ std::vector<Level> stored(std::string const &path, unsigned cap, int &channels,
     return levels;
 }
 
-void convert(std::vector<Level> &levels, std::string const &space, std::string const &config) {
-    std::string name = config.empty() ? "OpenImageIO's default OCIO config" : config;
-    OIIO::ColorConfig ocio(config);
-    if (ocio.has_error())
-        throw std::runtime_error("cannot read " + name + ": " + ocio.geterror());
-    OIIO::ColorProcessorHandle processor = ocio.createColorProcessor(space, WORKING);
-    if (!processor)
-        throw std::runtime_error("no transform from the colour space " + space + " to " +
-                                 WORKING + " in " + name + ": " + ocio.geterror());
-    if (processor->isNoOp())
-        return;
-    for (Level &level : levels)
-        processor->apply(level.rgba.data(), level.width, level.height, 4, sizeof(float),
-                         4 * sizeof(float), level.width * 4 * sizeof(float));
-}
+// The transform from a colour space to the working space, under the config.
+struct Conversion {
+    OIIO::ColorConfig ocio;
+    OIIO::ColorProcessorHandle processor;
+
+    Conversion(std::string const &space, std::string const &config) : ocio(config) {
+        std::string name = config.empty() ? "OpenImageIO's default OCIO config" : config;
+        if (ocio.has_error())
+            throw std::runtime_error("cannot read " + name + ": " + ocio.geterror());
+        processor = ocio.createColorProcessor(space, WORKING);
+        if (!processor)
+            throw std::runtime_error("no transform from the colour space " + space + " to " +
+                                     WORKING + " in " + name + ": " + ocio.geterror());
+    }
+
+    void apply(std::vector<Level> &levels) const {
+        if (processor->isNoOp())
+            return;
+        for (Level &level : levels)
+            processor->apply(level.rgba.data(), level.width, level.height, 4, sizeof(float),
+                             4 * sizeof(float), level.width * 4 * sizeof(float));
+    }
+};
 
 // A 2×2 box, the last column or row repeated where the size is odd.
 Level halve(Level const &src) {
@@ -145,6 +206,29 @@ Level halve(Level const &src) {
                 q[c] = (src.at(x0, y0)[c] + src.at(x1, y0)[c] + src.at(x0, y1)[c] +
                         src.at(x1, y1)[c]) *
                        0.25f;
+        }
+    }
+    return dst;
+}
+
+// Bilinear, texel centres aligned, for a tile smaller than its set's.
+Level enlarge(Level const &src, unsigned width, unsigned height) {
+    Level dst;
+    dst.width = width;
+    dst.height = height;
+    dst.rgba.resize(size_t(width) * height * 4);
+    for (unsigned y = 0; y < height; ++y) {
+        float fy = std::max(0.0f, (y + 0.5f) * src.height / height - 0.5f);
+        unsigned y0 = std::min(unsigned(fy), src.height - 1), y1 = std::min(y0 + 1, src.height - 1);
+        float ty = fy - y0;
+        for (unsigned x = 0; x < width; ++x) {
+            float fx = std::max(0.0f, (x + 0.5f) * src.width / width - 0.5f);
+            unsigned x0 = std::min(unsigned(fx), src.width - 1), x1 = std::min(x0 + 1, src.width - 1);
+            float tx = fx - x0;
+            float *q = &dst.rgba[(size_t(y) * width + x) * 4];
+            for (int c = 0; c < 4; ++c)
+                q[c] = (src.at(x0, y0)[c] * (1 - tx) + src.at(x1, y0)[c] * tx) * (1 - ty) +
+                       (src.at(x0, y1)[c] * (1 - tx) + src.at(x1, y1)[c] * tx) * ty;
         }
     }
     return dst;
@@ -247,28 +331,9 @@ void put(std::ofstream &file, uint32_t v) {
     file.write(b, 4);
 }
 
-} // namespace
-
-void texture(std::string const &source, std::string const &space, std::string const &encoding,
-             unsigned cap, std::string const &config, std::string const &out) {
-    if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
-        throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
-    int channels = 0;
-    OIIO::TypeDesc type;
-    std::vector<Level> levels = stored(source, cap, channels, type);
-    // USD's "auto": sRGB for 8-bit images, raw for the rest. The file's own
-    // colour space metadata is not read: OpenImageIO calls a float image
-    // "linear", which under an ACES config means ACEScg.
-    std::string resolved = space;
-    if (space == "auto")
-        resolved = type == OIIO::TypeDesc::UINT8 ? "srgb_texture" : "raw";
-    convert(levels, resolved, config);
-    while (!fits(levels.front(), cap))
-        levels.front() = halve(levels.front());
-    while (levels.back().width > 1 || levels.back().height > 1)
-        levels.push_back(halve(levels.back()));
-
-    uint32_t format;
+// A tile's levels encoded, as the file stores them.
+std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string const &encoding,
+                                         int channels, uint32_t &format) {
     std::vector<std::vector<uint8_t>> bytes;
     if (encoding == "float") {
         channels = channels == 3 ? 4 : channels;
@@ -295,16 +360,69 @@ void texture(std::string const &source, std::string const &space, std::string co
         for (Level const &level : levels)
             bytes.push_back(bc7(level, params));
     }
+    return bytes;
+}
+
+} // namespace
+
+void texture(std::string const &source, std::string const &space, std::string const &encoding,
+             unsigned cap, std::string const &config, std::string const &out) {
+    if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
+        throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
+    std::vector<Tile> set = tiles(source);
+    unsigned width = 0, height = 0;
+    for (Tile const &tile : set)
+        extent(tile.path, cap, width, height);
+
+    // One tile at a time, keeping only its encoded bytes: a 4K tile is 256
+    // MB of floats, and ALab's sets reach 34 tiles. The first tile's
+    // channels and bit depth stand for the set's.
+    int channels = 0;
+    uint32_t format = 0;
+    std::vector<std::vector<std::vector<uint8_t>>> layers;
+    std::unique_ptr<Conversion> conversion;
+    for (Tile const &tile : set) {
+        int tile_channels = 0;
+        OIIO::TypeDesc type;
+        std::vector<Level> levels = stored(tile.path, cap, tile_channels, type);
+        if (!conversion) {
+            channels = tile_channels;
+            // USD's "auto": sRGB for 8-bit images, raw for the rest. The
+            // file's own colour space metadata is not read: OpenImageIO
+            // calls a float image "linear", which under an ACES config
+            // means ACEScg.
+            std::string resolved = space;
+            if (space == "auto")
+                resolved = type == OIIO::TypeDesc::UINT8 ? "srgb_texture" : "raw";
+            conversion = std::make_unique<Conversion>(resolved, config);
+        }
+        conversion->apply(levels);
+        while (!fits(levels.front(), cap))
+            levels.front() = halve(levels.front());
+        if (levels.front().width != width || levels.front().height != height)
+            levels = {enlarge(levels.front(), width, height)};
+        while (levels.back().width > 1 || levels.back().height > 1)
+            levels.push_back(halve(levels.back()));
+        layers.push_back(encode(levels, encoding, channels, format));
+    }
+
+    std::vector<uint32_t> table(set.front().number == 0 ? 1 : 100, 0xFFFFFFFF);
+    for (size_t i = 0; i < set.size(); ++i)
+        table[set[i].number == 0 ? 0 : set[i].number - 1001] = uint32_t(i);
 
     std::ofstream file(out, std::ios::binary);
     file.write("pika", 4);
-    put(file, levels.front().width);
-    put(file, levels.front().height);
-    put(file, 1);
-    put(file, uint32_t(levels.size()));
+    put(file, width);
+    put(file, height);
+    put(file, uint32_t(set.size()));
+    put(file, uint32_t(layers.front().size()));
     put(file, format);
-    for (std::vector<uint8_t> const &level : bytes)
-        file.write(reinterpret_cast<char const *>(level.data()), level.size());
+    put(file, uint32_t(table.size()));
+    for (uint32_t entry : table)
+        put(file, entry);
+    for (size_t level = 0; level < layers.front().size(); ++level)
+        for (std::vector<std::vector<uint8_t>> const &layer : layers)
+            file.write(reinterpret_cast<char const *>(layer[level].data()), layer[level].size());
     if (!file)
         throw std::runtime_error("cannot write " + out);
 }

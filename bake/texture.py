@@ -31,26 +31,30 @@ def fail(what):
 
 
 def header(path):
+    """The header's five numbers, the tile table and the levels' bytes."""
     with open(path, "rb") as f:
         bytes = f.read()
-    magic, width, height, layers, levels, fmt = struct.unpack("<4s5I", bytes[:24])
+    magic, width, height, layers, levels, fmt, entries = struct.unpack("<4s6I", bytes[:28])
     if magic != b"pika":
         raise ValueError(f"{path} is not a texture file")
-    return width, height, layers, levels, fmt, bytes[24:]
+    table = struct.unpack(f"<{entries}I", bytes[28:28 + 4 * entries])
+    return width, height, layers, levels, fmt, table, bytes[28 + 4 * entries:]
 
 
 def decode(path):
-    """Each level as an array of shape (height, width, channels)."""
-    width, height, layers, levels, fmt, data = header(path)
-    if layers != 1:
-        raise ValueError(f"{path} has {layers} layers")
+    """Each level as an array of shape (height, width, channels), or for a
+    float texture of several layers (layers, height, width, channels)."""
+    width, height, layers, levels, fmt, _, data = header(path)
     if fmt in FLOAT:
         out, offset, w, h = [], 0, width, height
         for _ in range(levels):
-            n = w * h * FLOAT[fmt]
-            out.append(np.frombuffer(data[offset:offset + 4 * n], np.float32).reshape(h, w, FLOAT[fmt]))
+            n = layers * w * h * FLOAT[fmt]
+            level = np.frombuffer(data[offset:offset + 4 * n], np.float32).reshape(layers, h, w, FLOAT[fmt])
+            out.append(level if layers > 1 else level[0])
             offset, w, h = offset + 4 * n, max(1, w // 2), max(1, h // 2)
         return out
+    if layers != 1:
+        raise ValueError(f"{path} has {layers} layers")
     dds = path + ".dds"
     flags = 0x1 | 0x2 | 0x4 | 0x1000 | 0x20000 | 0x80000
     caps = 0x1000 | 0x400000 | 0x8
@@ -93,11 +97,11 @@ def check(out):
     fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
     swatch = np.asarray(oiio.ImageBuf(os.path.join(fixtures, "swatch.png")).get_pixels(oiio.UINT8))
 
-    def baked(name, want):
+    def baked(name, want, table=(0,)):
         path = os.path.join(out, name + ".texture")
-        got = header(path)[:5]
-        if got != want:
-            fail(f"{name}: the header says {got}, not {want}")
+        got = header(path)[:6]
+        if got != want + (table,):
+            fail(f"{name}: the header says {got}, not {want + (table,)}")
         return decode(path)
 
     # Floats pass through; the levels below the source are box filtered.
@@ -127,6 +131,25 @@ def check(out):
     expect("greys level 0", levels[0][..., :3], textures.blocks(8, [(g, g, g) for g in textures.GREYS], 16, np.uint8), 0)
     levels = baked("acescg", (32, 4, 1, 6, 146))
     expect("acescg level 0", levels[0][..., :3], textures.blocks(4, textures.COLORS, 8, np.uint8), 1)
+
+    # A set's tiles are its layers in tile order, and the table sends tile
+    # 1001 + i to its layer, the tiles the set lacks past the end.
+    table = [2 ** 32 - 1] * 100
+    table[0], table[11] = 0, 1
+    levels = baked("udim", (8, 8, 2, 4, 103), tuple(table))
+    expect("udim level 0 tile 1001", levels[0][0], textures.ramp_pixels(1.0), 0)
+    expect("udim level 0 tile 1012", levels[0][1], textures.ramp_pixels(0.5), 0)
+    expect("udim level 3 tile 1012", levels[3][1], [[(0.25, 0.25)]], 0)
+
+    # A smaller tile is enlarged to the set's size bilinearly, texel centres
+    # aligned: the ramp's texels then hold their own centres again, but for
+    # the outer half texel, which clamps to the edge.
+    table[1], table[11] = 1, 2 ** 32 - 1
+    levels = baked("mixed", (8, 8, 2, 4, 103), tuple(table))
+    expect("mixed level 0 tile 1001", levels[0][0], textures.ramp_pixels(1.0), 0)
+    centre = (np.clip((np.arange(8) + 0.5) / 2 - 0.5, 0, 3) + 0.5) / 4
+    want = np.stack(np.meshgrid(centre, centre), -1)
+    expect("mixed level 0 tile 1002", levels[0][1], want, 1e-6)
 
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)
