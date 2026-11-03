@@ -17,6 +17,14 @@ normal.exr  4×4, three float channels, every texel the same tangent-space
             normal, (0.2, 0.6, 0.898) encoded as (153, 204, 242) / 255, so
             Pika's 8-bit bake of it is exact and a sample anywhere, at any
             level, returns it (hydra/images/normalmap.usda).
+greys.jpg   128×8 RGB JPEG at quality 100, sixteen flat 8×8 blocks of grey
+            in a row, 0, 17, 34 … 255. A flat grey block is one DC
+            coefficient with centred chroma, so the JPEG decodes exactly,
+            and the generator refuses to write one that does not.
+acescg.exr  32×4, three float channels, eight flat 4×4 blocks of COLORS in
+            a row, linear and in ACEScg primaries, the inverse of the matrix
+            hydra/image.py converts an acescg image by, so a bake declared
+            acescg gives COLORS back.
 """
 
 import os
@@ -26,8 +34,32 @@ import OpenImageIO as oiio
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SWATCH = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)]
+# Neighbouring blocks of these differ by at most 0.2 in linear light: the
+# GPU blends texels with 8-bit weights, so a larger step misses
+# hydra/image.py's tolerance where two blocks blend.
+GREYS = [17 * i for i in range(16)]
+COLORS = [(240, 60, 60), (220, 100, 60), (200, 140, 60), (180, 180, 60),
+          (140, 200, 80), (100, 200, 120), (60, 200, 160), (60, 180, 200)]
+# Linear Rec.709 to ACEScg: the inverse of hydra/image.py's ACESCG_TO_REC709.
+REC709_TO_ACESCG = np.linalg.inv([[1.705051, -0.621792, -0.083259],
+                                  [-0.130256, 1.140805, -0.010548],
+                                  [-0.024003, -0.128969, 1.152972]])
 
 
+def blocks(cell, colors, columns, dtype):
+    """Flat cell×cell blocks, one per colour, in reading order over `columns`."""
+    rows = len(colors) // columns
+    pixels = np.zeros((rows * cell, columns * cell, 3), dtype)
+    for i, color in enumerate(colors):
+        y, x = cell * (i // columns), cell * (i % columns)
+        pixels[y:y + cell, x:x + cell] = color
+    return pixels
+
+
+def linear(srgb):
+    """Linear light from sRGB codes."""
+    v = np.asarray(srgb) / 255
+    return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
 
 
 def ramp():
@@ -44,16 +76,34 @@ def ramp():
 
 
 def swatch_pixels():
-    pixels = np.zeros((8, 8, 3), np.uint8)
-    for i, color in enumerate(SWATCH):
-        pixels[4 * (i // 2):4 * (i // 2) + 4, 4 * (i % 2):4 * (i % 2) + 4] = color
-    return pixels
+    return blocks(4, SWATCH, 2, np.uint8)
 
 
 def swatch():
     out = oiio.ImageOutput.create("swatch.png")
     out.open(os.path.join(HERE, "swatch.png"), oiio.ImageSpec(8, 8, 3, oiio.UINT8))
     out.write_image(swatch_pixels())
+    out.close()
+
+
+def greys():
+    pixels = blocks(8, [(g, g, g) for g in GREYS], 16, np.uint8)
+    spec = oiio.ImageSpec(128, 8, 3, oiio.UINT8)
+    spec.attribute("CompressionQuality", 100)
+    path = os.path.join(HERE, "greys.jpg")
+    out = oiio.ImageOutput.create(path)
+    out.open(path, spec)
+    out.write_image(pixels)
+    out.close()
+    if (np.asarray(oiio.ImageBuf(path).get_pixels(oiio.UINT8)) != pixels).any():
+        raise SystemExit("greys.jpg does not decode to its greys")
+
+
+def acescg():
+    pixels = blocks(4, [REC709_TO_ACESCG @ linear(c) for c in COLORS], 8, np.float32)
+    out = oiio.ImageOutput.create("acescg.exr")
+    out.open(os.path.join(HERE, "acescg.exr"), oiio.ImageSpec(32, 4, 3, oiio.FLOAT))
+    out.write_image(pixels)
     out.close()
 
 
@@ -82,7 +132,10 @@ def normal():
     out.close()
 
 
-ramp()
-swatch()
-mips()
-normal()
+if __name__ == "__main__":
+    ramp()
+    swatch()
+    mips()
+    normal()
+    greys()
+    acescg()

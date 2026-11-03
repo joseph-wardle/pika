@@ -15,6 +15,9 @@ import sys
 import numpy as np
 import OpenImageIO as oiio
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures"))
+import textures  # noqa: E402
+
 # VkFormat to DXGI_FORMAT, and the channel count of the float formats.
 DXGI = {139: 80, 145: 98, 146: 99}
 FLOAT = {100: 1, 103: 2, 109: 4}
@@ -117,6 +120,13 @@ def check(out):
     levels = baked("swatch_raw", (8, 8, 1, 4, 146))
     if np.abs(levels[0][..., :3].astype(int) - swatch).max() < 16:
         fail("swatch_raw: the declared colour space made no difference")
+
+    # An 8-bit JPEG declared auto is sRGB, so its greys come back as
+    # stored; the colours stored in ACEScg primaries come back as sRGB codes.
+    levels = baked("greys", (128, 8, 1, 8, 146))
+    expect("greys level 0", levels[0][..., :3], textures.blocks(8, [(g, g, g) for g in textures.GREYS], 16, np.uint8), 0)
+    levels = baked("acescg", (32, 4, 1, 6, 146))
+    expect("acescg level 0", levels[0][..., :3], textures.blocks(4, textures.COLORS, 8, np.uint8), 1)
 
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)

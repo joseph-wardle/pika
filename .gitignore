@@ -14,3 +14,6 @@
 *.abc
 *.vdb
 *.bgeo*
+
+# Python byte code of the check scripts.
+__pycache__/

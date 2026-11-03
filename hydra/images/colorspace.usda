@@ -1,0 +1,225 @@
+#usda 1.0
+(
+    doc = "Four strips facing the camera, each emitting a color3 image sampled at its st, which shifts at frame 2 and clamps: the sixteen greys of bake/fixtures/greys.jpg declared srgb_texture, declared nothing (auto: sRGB for 8 bits) and declared raw, and bake/fixtures/acescg.exr, eight colours stored in ACEScg primaries, declared acescg. The first two strips show one ramp of greys, the third a lighter one, the fourth the colours in Rec.709."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "jpeg_srgb" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, 0.625, -5), (1.7, 0.625, -5), (1.7, 0.875, -5), (-1.7, 0.875, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(0.1, 0.1), (1.1, 0.1), (1.1, 1.1), (0.1, 1.1)],
+    }
+    rel material:binding = </srgb>
+}
+
+def Material "srgb"
+{
+    token outputs:surface.connect = </srgb/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </srgb/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </srgb/image.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @../../bake/fixtures/greys.jpg@ (colorSpace = "srgb_texture")
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </srgb/st.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
+def Mesh "jpeg_auto" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, 0.125, -5), (1.7, 0.125, -5), (1.7, 0.375, -5), (-1.7, 0.375, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(0.1, 0.1), (1.1, 0.1), (1.1, 1.1), (0.1, 1.1)],
+    }
+    rel material:binding = </auto>
+}
+
+def Material "auto"
+{
+    token outputs:surface.connect = </auto/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </auto/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </auto/image.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @../../bake/fixtures/greys.jpg@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </auto/st.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
+def Mesh "jpeg_raw" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, -0.375, -5), (1.7, -0.375, -5), (1.7, -0.125, -5), (-1.7, -0.125, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(0.1, 0.1), (1.1, 0.1), (1.1, 1.1), (0.1, 1.1)],
+    }
+    rel material:binding = </raw>
+}
+
+def Material "raw"
+{
+    token outputs:surface.connect = </raw/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </raw/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </raw/image.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @../../bake/fixtures/greys.jpg@ (colorSpace = "raw")
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </raw/st.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
+def Mesh "exr_acescg" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, -0.875, -5), (1.7, -0.875, -5), (1.7, -0.625, -5), (-1.7, -0.625, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(0.1, 0.1), (1.1, 0.1), (1.1, 1.1), (0.1, 1.1)],
+    }
+    rel material:binding = </acescg>
+}
+
+def Material "acescg"
+{
+    token outputs:surface.connect = </acescg/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </acescg/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </acescg/image.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @../../bake/fixtures/acescg.exr@ (colorSpace = "acescg")
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </acescg/st.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}

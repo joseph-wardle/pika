@@ -86,7 +86,14 @@ What the reference encodes:
   at the hit's primvar, the one the material's reader names
   (hydra/images/primvar.usda), under the image node's address modes, with
   st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
-  the channels padded with 0 to three. On a subdivided mesh the primvar is
+  the channels padded with 0 to three. A color3 image's sample
+  (hydra/images/colorspace.usda) is emitted in the working space, linear
+  Rec.709, from the colour space its file input declares: srgb_texture
+  decoded by the sRGB curve, acescg by the matrix from AP1 through CIE
+  XYZ, with a Bradford adaptation from the ACES white to D65, to Rec.709,
+  as the ACES configs define it, raw as read, and none (auto, USD's
+  default) as sRGB for an 8-bit source and as read for a float one, the
+  texels converted before they are filtered. Other spaces are refused. On a subdivided mesh the primvar is
   refined with the points (hydra/images/subdivided.usda): a vertex primvar
   by the points' rules, a faceVarying one by the same rules over its own
   values, welded by point and value first, so it is smooth across an edge
@@ -108,7 +115,10 @@ What the reference encodes:
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
 only for coverage, since a rasterizer and a ray decide them differently. Away
-from them, values must agree within TOLERANCE.
+from them, values must agree within TOLERANCE, colour also allowed 1/256 of
+its value: the GPU decodes sRGB texels to about nine significant bits (RTX
+4070 Ti SUPER, driver 580), so a sample of a light grey is off by up to
+half of 1/256 before it is filtered.
 
 Each control perturbs the reference. A control must fail on every scene
 and host whose reference it changes, and must change at least one scene's.
@@ -142,11 +152,16 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "failed materials drawn clay", "base weight ignored", "emission ignored",
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "subsets ignored", "subset faces of the cage", "st indices ignored",
+            "sRGB read as raw", "8-bit auto read as raw", "ACEScg primaries kept",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
+# ACEScg to linear Rec.709 (see the module's doc).
+ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
+                             [-0.130256, 1.140805, -0.010548],
+                             [-0.024003, -0.128969, 1.152972]])
 # A material's closed form: its albedo under the headlight, its emission, the
-# image (file, address modes, primvar) whose sample it emits, if any, the
+# image (file, address modes, primvar, colour space) whose sample it emits, if any, the
 # image whose sample perturbs its normal, if any, and the angle from facing
 # the eye within which the form holds (None: all).
 Look = collections.namedtuple("Look", "albedo emission image normal facing")
@@ -430,8 +445,9 @@ def unknown(shader):
 
 
 def sampled(image, kind):
-    """The file, address modes (u, v) and primvar of an ND_image_<kind> node
-    sampled at a geompropvalue reader, or None for any other node."""
+    """The file, address modes (u, v), primvar and declared colour space
+    (auto when none) of an ND_image_<kind> node sampled at a geompropvalue
+    reader, or None for any other node."""
     if not image or image.GetShaderId() != f"ND_image_{kind}":
         return None
     reader = upstream(image, "texcoord")
@@ -439,7 +455,9 @@ def sampled(image, kind):
         return None
     modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
                   for m in ("uaddressmode", "vaddressmode"))
-    return (image.GetInput("file").Get().resolvedPath, modes, reader.GetInput("geomprop").Get())
+    file = image.GetInput("file")
+    return (file.Get().resolvedPath, modes, reader.GetInput("geomprop").Get(),
+            file.GetAttr().GetColorSpace() or "auto")
 
 
 def lit(surface, time, control=None):
@@ -483,9 +501,10 @@ def look(prim, host, time, control=None):
     """The closed form of the mesh's material: CLAY with none bound; PINK
     for a surface shader naming a nodedef the libraries do not define, when
     `host` delivers it; a lit surface's; or the image file, its address
-    modes (u, v) and the primvar it is sampled at, for a MaterialX surface
-    whose emission is a uniform EDF of an image node's vector2 sample,
-    through converts (hydra/images/textured.usda)."""
+    modes (u, v), the primvar it is sampled at and its colour space, for a
+    MaterialX surface whose emission is a uniform EDF of an image node's
+    vector2 sample through converts (hydra/images/textured.usda) or of its
+    color3 sample (hydra/images/colorspace.usda)."""
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
     if not material:
         return CLAY
@@ -505,20 +524,40 @@ def look(prim, host, time, control=None):
     image = upstream(edf, "color")
     while image and image.GetShaderId().startswith("ND_convert_"):
         image = upstream(image, "in")
-    image = sampled(image, "vector2")
+    image = sampled(image, "vector2") or sampled(image, "color3")
     if not image:
         raise refuse
     return Look((0.0,) * 3, (0.0,) * 3, image, None, None)
 
 
-def sample(path, st, modes, control=None):
+def working(texels, path, space, control=None):
+    """The texels in the working space, linear Rec.709, from the colour
+    space the asset declares (see the module's doc)."""
+    if space == "auto":
+        eight = oiio.ImageBuf(path).spec().format.basetype == oiio.UINT8
+        space = "srgb_texture" if eight and control != "8-bit auto read as raw" else "raw"
+    elif control == "sRGB read as raw" and space == "srgb_texture":
+        space = "raw"
+    elif control == "ACEScg primaries kept" and space == "acescg":
+        space = "raw"
+    if space == "srgb_texture":
+        return np.where(texels <= 0.04045, texels / 12.92, ((texels + 0.055) / 1.055) ** 2.4)
+    if space == "acescg":
+        return texels @ ACESCG_TO_REC709.T
+    if space != "raw":
+        raise ValueError(f"{path}: the reference reads srgb_texture, acescg, raw and auto, not {space}")
+    return texels
+
+
+def sample(path, st, modes, space, control=None):
     """The bilinear sample of level 0 of the image at `path` at each st (an
     (n, 2) array), rows from the bottom as USD reads st, under the address
-    modes (u, v); the channels padded with 0 to three."""
+    modes (u, v), in the working space; the channels padded with 0 to three."""
     image = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
     h, w = image.shape[:2]
     texels = np.zeros((h, w, 3))
     texels[..., :min(3, image.shape[2])] = image[..., :3]
+    texels = working(texels, path, space, control)
     if control != "st origin at the top":
         texels = texels[::-1]
     if control == "st wrapped, not clamped":
@@ -750,10 +789,10 @@ def reference(stage, time, width, height, host, control=None):
         out = np.zeros((len(p), 3))
         images = sorted({getattr(l, field) for l in looks if getattr(l, field)})
         which = np.array([images.index(getattr(l, field)) if getattr(l, field) else -1 for l in looks])[i]
-        for k, (path, modes, _) in enumerate(images):
+        for k, (path, modes, _, space) in enumerate(images):
             on = which == k
             st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
-            out[on] = sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, control)
+            out[on] = sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, space, control)
         return out, which >= 0
 
     # A normal map perturbs the normal before it is turned toward the eye.
@@ -883,9 +922,14 @@ def compare(image, ref, aovs):
     inner = covered & drawn & ~edge
     for aov in aovs:
         error = np.abs(image[aov][..., :4] - ref[aov][..., :4] if aov == "color" else image[aov] - ref[aov])
-        worst = error[inner].max() if inner.any() else 0.0
-        if worst > TOLERANCE[aov]:
-            problems.append(f"{aov} differs by up to {worst:.3g} (tolerance {TOLERANCE[aov]:g})")
+        allowed = TOLERANCE[aov]
+        if aov == "color":
+            allowed = allowed + np.abs(ref[aov][..., :4]) / 256
+        over = error > allowed
+        over = over.reshape(over.shape[:2] + (-1,)).any(-1) & inner
+        if over.any():
+            slack = " plus 1/256 of the value" if aov == "color" else ""
+            problems.append(f"{aov} differs by up to {error[over].max():.3g} (tolerance {TOLERANCE[aov]:g}{slack})")
     return problems
 
 
