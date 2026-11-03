@@ -20,6 +20,7 @@ mod stats;
 mod store;
 mod subdiv;
 mod surface;
+mod tangent;
 pub mod target;
 mod texture;
 mod transform;

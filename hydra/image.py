@@ -60,7 +60,27 @@ What the reference encodes:
   albedo, an analytic fit with F90 = 1 whatever the IOR, which takes 0.2 %
   of the base at facing (within the colour tolerance for a base under 1),
   nothing near 25° and 13 % at 67°, so a pixel seen from further round is
-  refused. A mesh bound to a MaterialX surface whose
+  refused. Either surface's normal (Standard Surface's normal, OpenPBR's
+  geometry_normal) may be a normalmap node of an image node's vector3
+  sample at a primvar (hydra/images/normalmap.usda), which perturbs the
+  normal it is lit with: the sample, each channel × 2 − 1 (a zero sample
+  standing for (0, 0, 1)), taken as x along the tangent, y along the
+  bitangent and z along the normal, normalized, the frame interpolated
+  across the face from its vertices' and each direction normalized first.
+  A vertex's tangent is Lengyel's, as shaders/tangent.slang computes it:
+  the directions its mesh's st u and v increase in, solved from each of
+  its drawn triangles' edges and st deltas in the mesh's own space and
+  summed over them, a vertex being a unique point, normal and st, as Pika
+  welds them; the tangent is the u direction made orthogonal to the
+  vertex's normal, and the bitangent the normal's cross with it, negated
+  where the mapping is mirrored (the summed v direction is against the
+  cross). Both move with the mesh's transform, not its normals' inverse
+  transpose. A triangle without st area adds nothing, and a vertex whose
+  u directions cancel, or without st, gets the y axis crossed with its
+  normal (the x axis when the normal is near y), normalized, and
+  handedness 1. The map is read as Pika bakes a vector3 image, at 8 bits,
+  so the fixture's values are multiples of 1/255. A mesh
+  bound to a MaterialX surface whose
   emission is a uniform EDF of an image sampled at a primvar
   (hydra/images/textured.usda) emits the image's bilinear sample, level 0,
   at the hit's primvar, the one the material's reader names
@@ -120,27 +140,29 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "st read whatever the name", "st seams smoothed over", "st refined bilinearly",
             "failed materials drawn clay", "base weight ignored", "emission ignored",
+            "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 # A material's closed form: its albedo under the headlight, its emission, the
-# image (file, address modes, primvar) whose sample it emits, if any, and
-# the angle from facing the eye within which the form holds (None: all).
-Look = collections.namedtuple("Look", "albedo emission image facing")
-CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None)
-PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None)
+# image (file, address modes, primvar) whose sample it emits, if any, the
+# image whose sample perturbs its normal, if any, and the angle from facing
+# the eye within which the form holds (None: all).
+Look = collections.namedtuple("Look", "albedo emission image normal facing")
+CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None, None)
+PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None, None)
 # Each lit surface's inputs the reference reads: the albedo's weight and
-# colour, the emission's weight and colour, the specular weight, and the
-# facing angle. OpenPBR's specular weight only modulates the IOR, and
+# colour, the emission's weight and colour, the specular weight, the
+# normal, and the facing angle. OpenPBR's specular weight only modulates the IOR, and
 # MaterialX's dielectric layer attenuates its base by a directional albedo
 # fitted with F90 = 1 at any IOR, so grazing angles darken at weight 0 (see
 # the module's doc); Standard Surface's weight is the layer's own, which 0
 # switches off.
 LIT = {
     "ND_open_pbr_surface_surfaceshader": ("base_weight", "base_color", "emission_luminance",
-                                          "emission_color", "specular_weight", 35),
+                                          "emission_color", "specular_weight", "geometry_normal", 35),
     "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
-                                          "specular", None),
+                                          "specular", "normal", None),
 }
 # What a host hands Pika: the purposes it draws, and whether a material
 # whose surface shader the shader registry does not know arrives with its
@@ -402,16 +424,40 @@ def unknown(shader):
     return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
 
 
+def sampled(image, kind):
+    """The file, address modes (u, v) and primvar of an ND_image_<kind> node
+    sampled at a geompropvalue reader, or None for any other node."""
+    if not image or image.GetShaderId() != f"ND_image_{kind}":
+        return None
+    reader = upstream(image, "texcoord")
+    if not reader or reader.GetShaderId() != "ND_geompropvalue_vector2":
+        return None
+    modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
+                  for m in ("uaddressmode", "vaddressmode"))
+    return (image.GetInput("file").Get().resolvedPath, modes, reader.GetInput("geomprop").Get())
+
+
 def lit(surface, time, control=None):
     """The Look of an OpenPBR or Standard Surface shader with its specular
-    off (hydra/images/pbr.usda), its inputs read at `time`."""
-    *names, facing = LIT[surface.GetShaderId()]
+    off (hydra/images/pbr.usda), its inputs read at `time`, its normal
+    mapped when connected (hydra/images/normalmap.usda)."""
+    *names, bump, facing = LIT[surface.GetShaderId()]
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
-    extra = sorted(set(authored) - set(names))
-    if extra or any(i.HasConnectedSource() for i in authored.values()):
+    extra = sorted(set(authored) - set(names) - {bump})
+    connected = [n for n, i in authored.items() if i.HasConnectedSource() and n != bump]
+    if extra or connected:
         raise ValueError(f"{path}: the reference lights a surface's base and emission as values; "
-                         f"it has no closed form for {extra or 'a connected input'}")
+                         f"it has no closed form for {extra or connected}")
+    normal = None
+    if bump in authored:
+        node = upstream(surface, bump)
+        chain = node and node.GetShaderId() == "ND_normalmap_float" and (
+            [i.GetBaseName() for i in node.GetInputs()] == ["in"])
+        normal = sampled(upstream(node, "in"), "vector3") if chain else None
+        if not normal:
+            raise ValueError(f"{path}: the reference perturbs a normal only by a normalmap of an "
+                             "image's vector3 sample at a primvar")
 
     def value(name):
         if name in authored:
@@ -425,7 +471,7 @@ def lit(surface, time, control=None):
     weight = 1.0 if control == "base weight ignored" else value(names[0])
     glow = 0.0 if control == "emission ignored" else value(names[2])
     return Look(tuple(weight * c for c in value(names[1])), tuple(glow * c for c in value(names[3])),
-                None, facing)
+                None, normal, facing)
 
 
 def look(prim, host, time, control=None):
@@ -454,15 +500,10 @@ def look(prim, host, time, control=None):
     image = upstream(edf, "color")
     while image and image.GetShaderId().startswith("ND_convert_"):
         image = upstream(image, "in")
-    if not image or image.GetShaderId() != "ND_image_vector2":
+    image = sampled(image, "vector2")
+    if not image:
         raise refuse
-    reader = upstream(image, "texcoord")
-    if not reader or reader.GetShaderId() != "ND_geompropvalue_vector2":
-        raise refuse
-    modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
-                  for m in ("uaddressmode", "vaddressmode"))
-    file = image.GetInput("file").Get().resolvedPath
-    return Look((0.0,) * 3, (0.0,) * 3, (file, modes, reader.GetInput("geomprop").Get()), None)
+    return Look((0.0,) * 3, (0.0,) * 3, image, None, None)
 
 
 def sample(path, st, modes, control=None):
@@ -496,23 +537,63 @@ def sample(path, st, modes, control=None):
             (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
 
 
+def tangent_sums(points, counts, indices, holes, key, st):
+    """Lengyel's sums over the drawn triangles around each vertex (see the
+    module's doc): the summed u and v directions, by the vertex `key` of
+    each corner, from the corners' `st`."""
+    u = collections.defaultdict(lambda: np.zeros(3))
+    v = collections.defaultdict(lambda: np.zeros(3))
+    corner = 0
+    for face, count in enumerate(counts):
+        for k in range(1, count - 1) if face not in holes else ():
+            tri = (corner, corner + k, corner + k + 1)
+            for j in range(3):
+                a, b, c = tri[j], tri[(j + 1) % 3], tri[(j + 2) % 3]
+                p = [np.array(points[indices[i]]) for i in (a, b, c)]
+                e1, e2 = p[1] - p[0], p[2] - p[0]
+                d1, d2 = np.subtract(st(b), st(a)), np.subtract(st(c), st(a))
+                det = d1[0] * d2[1] - d2[0] * d1[1]
+                if det == 0:
+                    continue
+                u[key(a)] += (e1 * d2[1] - e2 * d1[1]) / det
+                v[key(a)] += (e2 * d1[0] - e1 * d2[0]) / det
+        corner += count
+    return u, v
+
+
+def frame(normal, u, v, control=None):
+    """A vertex's unit tangent and handedness from its normal and summed u
+    and v directions."""
+    n = normalize(np.array(normal, float))
+    t = u - n * np.dot(n, u)
+    if not t.any() or control == "tangent from the first axis":
+        t = np.cross((0, 1, 0) if abs(n[1]) < 0.9 else (1, 0, 0), n)
+    t = normalize(t) if t.any() else np.array((1.0, 0.0, 0.0))
+    mirrored = control != "bitangent from the winding" and np.dot(np.cross(n, t), v) < 0
+    return t, -1.0 if mirrored else 1.0
+
+
 def triangles(stage, time, host, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
-    the world points, the object normals at its corners, the normal matrix,
-    whether it is left-handed, a face id, its material's Look, and the
-    sampled primvar at its corners when the Look samples an image."""
+    the world points, the object normals at its corners, the normal matrix
+    and the world matrix's linear part, whether it is left-handed, a face
+    id, its material's Look, and, when the Look samples an image, the
+    sampled primvar at its corners and, for a normal map, their tangent
+    frames."""
     out = []
     for instance, (prim, world) in enumerate(meshes(stage, time, host.purposes, control)):
         mesh = UsdGeom.Mesh(prim)
         shading = look(prim, host, time, control)
-        if shading.image:
-            name = "st" if control == "st read whatever the name" else shading.image[2]
+        image = shading.image or shading.normal
+        if image:
+            name = "st" if control == "st read whatever the name" else image[2]
             primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(name)
             if not primvar:
                 raise ValueError(f"{prim.GetPath()}: the reference samples an authored primvar")
             st_values, st_interpolation = texcoord(mesh, primvar, time, control)
         # Gf multiplies row vectors, so normals go through the inverse transpose.
-        normal_matrix = world.ExtractRotationMatrix().GetInverse().GetTranspose()
+        linear = world.ExtractRotationMatrix()
+        normal_matrix = linear.GetInverse().GetTranspose()
         points, counts, indices, holes = surface(mesh, time, control)
         cage = Gf.Range3d()
         for p in mesh.GetPointsAttr().Get(time):
@@ -531,34 +612,48 @@ def triangles(stage, time, host, control=None):
             at = FRAMES[0] if control == "frame 1's smooth normals" else time
             normals = smooth_normals(surface(mesh, at, control)[0], counts, indices, left, control)
             interpolation = UsdGeom.Tokens.vertex
+        face_of = [face for face, count in enumerate(counts) for _ in range(count)]
+
+        def value(values, kind, c):
+            """The value corner `c` reads, by the primvar's interpolation."""
+            if kind == UsdGeom.Tokens.constant:
+                return values[0]
+            if kind == UsdGeom.Tokens.uniform:
+                return values[face_of[c]]
+            if kind == UsdGeom.Tokens.faceVarying:
+                return values[c]
+            return values[indices[c]]
+
+        frames = {}
+        if shading.normal:
+            def key(c):
+                return (indices[c], tuple(value(normals, interpolation, c)),
+                        tuple(value(st_values, st_interpolation, c)))
+
+            u, v = tangent_sums(points, counts, indices, holes, key,
+                                lambda c: value(st_values, st_interpolation, c))
+
+            def frame_of(c):
+                k = key(c)
+                if k not in frames:
+                    frames[k] = frame(k[1], u[k], v[k], control)
+                return frames[k]
         corner = 0
         for face, count in enumerate(counts):
-            if face in holes:
-                corner += count
-                continue
-
-            def value(values, kind, c):
-                if kind == UsdGeom.Tokens.constant:
-                    return values[0]
-                if kind == UsdGeom.Tokens.uniform:
-                    return values[face]
-                if kind == UsdGeom.Tokens.faceVarying:
-                    return values[corner + c]
-                return values[indices[corner + c]]
-
-            for k in range(1, count - 1):
-                cs = (0, k, k + 1)
+            for k in range(1, count - 1) if face not in holes else ():
+                cs = (corner, corner + k, corner + k + 1)
                 out.append({
-                    "points": [world.Transform(Gf.Vec3d(points[indices[corner + c]])) for c in cs],
-                    "object": [Gf.Vec3d(points[indices[corner + c]]) for c in cs],
+                    "points": [world.Transform(Gf.Vec3d(points[indices[c]])) for c in cs],
+                    "object": [Gf.Vec3d(points[indices[c]]) for c in cs],
                     "normals": [Gf.Vec3d(value(normals, interpolation, c)) for c in cs],
                     "normal_matrix": normal_matrix,
+                    "linear": linear,
                     "left": left,
                     "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
                     "look": shading,
-                    "st": ([list(value(st_values, st_interpolation, c)) for c in cs]
-                           if shading.image else None),
+                    "st": [list(value(st_values, st_interpolation, c)) for c in cs] if image else None,
+                    "frames": [frame_of(c) for c in cs] if shading.normal else None,
                 })
             corner += count
     return out
@@ -611,35 +706,60 @@ def reference(stage, time, width, height, host, control=None):
     front = np.einsum("ni,nij->nj", np.cross(o[:, 1] - o[:, 0], o[:, 2] - o[:, 0]), m)
     front[np.array([t["left"] for t in tris])[i]] *= -1
     toward = normalize(eye - p)
+    normals = np.array([[list(n) for n in t["normals"]] for t in tris])[i]
     if control == "flat normals":
         n = normalize(front)
     else:
-        normals = np.array([[list(n) for n in t["normals"]] for t in tris])[i]
         n = normalize(np.einsum("ni,nij->nj", np.einsum("nc,ncj->nj", bary, normals), m))
+    shade = n.copy()
     behind = dot(front, toward) < 0
     if control != "unflipped normals":
         n[behind] *= -1
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
+    looks = [t["look"] for t in tris]
+
+    def sampled(field):
+        """Each hit's sample of its look's `field` image at its st, 0 where
+        it has none, and which hits have one."""
+        out = np.zeros((len(p), 3))
+        images = sorted({getattr(l, field) for l in looks if getattr(l, field)})
+        which = np.array([images.index(getattr(l, field)) if getattr(l, field) else -1 for l in looks])[i]
+        for k, (path, modes, _) in enumerate(images):
+            on = which == k
+            st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
+            out[on] = sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, control)
+        return out, which >= 0
+
+    # A normal map perturbs the normal before it is turned toward the eye.
+    value, mapped = sampled("normal")
+    if mapped.any() and control != "normal map ignored":
+        value = np.where(dot(value, value)[:, None] == 0, (0.0, 0.0, 1.0), value * 2 - 1)
+        frames = [t["frames"] or [((0, 0, 0), 1.0)] * 3 for t in tris]
+        tangents = np.array([[list(t) for t, _ in f] for f in frames])[i]
+        handed = np.array([[w for _, w in f] for f in frames])[i]
+        # Each corner's bitangent, from its unnormalized object normal, as
+        # the vertex stage computes it; the frame is interpolated, moved
+        # with the mesh and normalized after.
+        bitangents = handed[:, :, None] * np.cross(normals, tangents)
+        r = np.array([[list(row) for row in t["linear"]] for t in tris])[i]
+        t = normalize(np.einsum("ni,nij->nj", np.einsum("nc,ncj->nj", bary, tangents), r))
+        b = normalize(np.einsum("ni,nij->nj", np.einsum("nc,ncj->nj", bary, bitangents), r))
+        perturbed = normalize(t * value[:, :1] + b * value[:, 1:2] + shade * value[:, 2:])
+        shade[mapped] = perturbed[mapped]
     # MaterialX's BSDFs turn a normal facing away from the eye toward it
     # before lighting.
-    facing = n.copy()
+    facing = shade
     facing[dot(facing, toward) < 0] *= -1
     light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
     lambert = np.clip(dot(facing, light), 0.0, 1.0)[:, None]
-    looks = [t["look"] for t in tris]
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
     albedo = np.array([l.albedo for l in looks])[i]
     emission = np.array([l.emission for l in looks])[i]
     color = np.c_[albedo * lambert + emission, np.ones(len(p))]
-    images = sorted({l.image for l in looks if l.image})
-    which = np.array([images.index(l.image) if l.image else -1 for l in looks])[i]
-    for k, (path, modes, _) in enumerate(images):
-        on = which == k
-        st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
-        color[on, :3] += sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, control)
+    color[:, :3] += sampled("image")[0]
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":

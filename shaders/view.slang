@@ -4,6 +4,11 @@
 // minimum, which the camera and the addresses alone filled, so what
 // materials and lights add goes here.
 
+// A vertex's normal index when its normal is its point's smooth normal.
+static const uint SMOOTH = 0xffffffff;
+// A vertex's texcoord index when its mesh has none.
+static const uint NONE = 0xffffffff;
+
 struct View
 {
     // World to clip space (src/transform.rs Camera): rows of the
@@ -21,6 +26,8 @@ struct View
     // Per texcoord value, and the texcoord index (or NONE) per vertex.
     float *texcoord;
     uint *vertex_texcoord;
+    // Per vertex: its tangent and, in w, its handedness (shaders/tangent.slang).
+    float4 *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
     // Each instance's draw record.

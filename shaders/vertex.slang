@@ -9,11 +9,6 @@
 [[vk::push_constant]]
 View *view;
 
-// A vertex's normal index when its normal is its point's smooth normal.
-static const uint SMOOTH = 0xffffffff;
-// A vertex's texcoord index when its mesh has none.
-static const uint NONE = 0xffffffff;
-
 struct Vertex
 {
     float4 position;
@@ -22,6 +17,10 @@ struct Vertex
     float3 normal;
     // The float2 primvar the mesh's material reads; zero where the mesh has none.
     float2 texcoord;
+    // In world space, not normalized: the directions the texcoord's u and v
+    // increase in (shaders/tangent.slang), for normal maps.
+    float3 tangent;
+    float3 bitangent;
     // Whether the mesh's winding is reversed (src/transform.rs Instance).
     uint flip;
 };
@@ -41,21 +40,17 @@ Vertex pull(uint vertex, uint slot)
     float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
     float3 n = v.y == SMOOTH ? load3(view->smooth, v.x) : load3(view->normals, v.y);
     uint t = view->vertex_texcoord[vertex];
+    float4 tangent = view->tangents[vertex];
+    float3 bitangent = tangent.w * cross(n, tangent.xyz);
 
     Vertex o;
     o.position = project(view, world);
     o.world = world.xyz;
     o.normal = float3(dot(m[3].xyz, n), dot(m[4].xyz, n), dot(m[5].xyz, n));
     o.texcoord = t == NONE ? float2(0) : float2(view->texcoord[2 * t], view->texcoord[2 * t + 1]);
+    // Surface directions move with the mesh, not its normals' inverse transpose.
+    o.tangent = float3(dot(m[0].xyz, tangent.xyz), dot(m[1].xyz, tangent.xyz), dot(m[2].xyz, tangent.xyz));
+    o.bitangent = float3(dot(m[0].xyz, bitangent), dot(m[1].xyz, bitangent), dot(m[2].xyz, bitangent));
     o.flip = asuint(m[6].x) & 1;
     return o;
-}
-
-// A unit tangent orthogonal to `n`, which stands in until the meshes'
-// own tangents reach the shader with normal maps.
-float3 tangent(float3 n)
-{
-    float3 axis = abs(n.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0);
-    float3 t = cross(axis, n);
-    return dot(t, t) > 0 ? normalize(t) : float3(1, 0, 0);
 }

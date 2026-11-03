@@ -11,8 +11,8 @@ VertexData vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
     o.SV_Position = p.position;
     o.i_geomprop_st = p.texcoord;
     o.normalWorld = p.normal;
-    o.tangentWorld = tangent(p.normal);
-    o.bitangentWorld = cross(p.normal, tangent(p.normal));
+    o.tangentWorld = p.tangent;
+    o.bitangentWorld = p.bitangent;
     o.positionWorld = p.world;
     return o;
 }

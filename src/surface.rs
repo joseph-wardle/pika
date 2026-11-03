@@ -26,8 +26,8 @@ pub fn vertex_stage(manifest: &Manifest) -> Result<String, String> {
         let value = match v.name.as_str() {
             "positionWorld" => "p.world".to_owned(),
             "normalWorld" => "p.normal".to_owned(),
-            "tangentWorld" => "tangent(p.normal)".to_owned(),
-            "bitangentWorld" => "cross(p.normal, tangent(p.normal))".to_owned(),
+            "tangentWorld" => "p.tangent".to_owned(),
+            "bitangentWorld" => "p.bitangent".to_owned(),
             // Every float2 geomprop reads the mesh's one texcoord;
             // `material::texcoord` refuses a network reading two before it
             // gets here.

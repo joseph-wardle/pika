@@ -190,6 +190,7 @@ impl Renderer {
         let cull = shader::compile("cull")?;
         let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
+        let tangent = shader::compile("tangent")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -199,7 +200,7 @@ impl Renderer {
             raster: Raster::new(&device, &mesh.spirv)?,
             shade: Shade::new(&device)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv)?,
+            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
             dump,

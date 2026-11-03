@@ -13,6 +13,10 @@ mips.exr    8×8 RGB half, tiled with stored mip levels, as maketx writes
             0.5, 0.25 and 0.125, which no filter of level 0 produces, so a
             bake that reuses the stored levels is told from one that rebuilt
             them.
+normal.exr  4×4, three float channels, every texel the same tangent-space
+            normal, (0.2, 0.6, 0.898) encoded as (153, 204, 242) / 255, so
+            Pika's 8-bit bake of it is exact and a sample anywhere, at any
+            level, returns it (hydra/images/normalmap.usda).
 """
 
 import os
@@ -70,6 +74,15 @@ def mips():
     out.close()
 
 
+def normal():
+    texels = np.broadcast_to(np.array([153, 204, 242], np.float32) / 255, (4, 4, 3))
+    out = oiio.ImageOutput.create("normal.exr")
+    out.open(os.path.join(HERE, "normal.exr"), oiio.ImageSpec(4, 4, 3, oiio.FLOAT))
+    out.write_image(np.ascontiguousarray(texels))
+    out.close()
+
+
 ramp()
 swatch()
 mips()
+normal()

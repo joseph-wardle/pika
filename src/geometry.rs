@@ -6,9 +6,10 @@
 //! smooth normal pass's table and every mesh's ranges) is rebuilt only when a
 //! mesh is added, removed or remodelled. A playing frame writes only the
 //! points, normals and texcoords that moved, reruns the stencil and smooth
-//! normal passes on the meshes whose points moved and the stencil pass on
-//! the texcoords that did, and rewrites the instances of meshes whose
-//! transform moved. It rewrites every instance and draw record when a
+//! normal passes on the meshes whose points moved, the stencil pass on
+//! the texcoords that did, the tangent pass on the vertices of meshes
+//! whose points, normals or texcoord did, and rewrites the instances of
+//! meshes whose transform moved. It rewrites every instance and draw record when a
 //! visibility, render tag or instancer changes, or a moved mesh's instance
 //! count does. Each mesh is one draw record, of the instances of it that the
 //! cull pass finds in a view; its box, in its own space, is recomputed when
@@ -21,7 +22,7 @@
 //! hands them over on subdivided meshes too. Otherwise they are its smooth
 //! normals, which the smooth normal pass computes from the points drawn.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ash::vk;
 
@@ -31,6 +32,7 @@ use crate::store::{
     self, Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store, Texcoord,
 };
 use crate::subdiv::{self, Subdiv};
+use crate::tangent::{self, Tangent};
 use crate::transform::{Instance, instance_transforms, multiply};
 
 /// A vertex's normal index when its normal is its point's smooth normal.
@@ -55,6 +57,7 @@ struct Range {
     /// values are drawn as they are.
     first_cage_texcoord: Option<u64>,
     first_vertex: i32,
+    vertex_count: u32,
     first_index: u32,
     index_count: u32,
     /// How far a refined point can lie outside its cage's box, as a fraction
@@ -66,6 +69,7 @@ struct Range {
 struct Layout {
     ranges: BTreeMap<u64, Range>,
     point_count: u32,
+    vertex_count: u32,
     /// The refined points, which come first in `points`, so refined point
     /// p's stencil is the pth.
     refined_count: u32,
@@ -94,6 +98,9 @@ struct Layout {
     vertices: Buffer,
     /// The texcoord index (or `NONE`) per vertex.
     vertex_texcoord: Buffer,
+    /// xyz and handedness per vertex, written by the tangent pass.
+    tangents: Buffer,
+    vertex_adjacency: Adjacency,
     /// Three vertex indices per triangle, counted from the mesh's first vertex.
     indices: Buffer,
 }
@@ -128,11 +135,14 @@ impl Stencils {
     }
 }
 
-/// Each point's corners, whose faces the smooth normal pass sums.
+/// Each point's corners, whose faces the smooth normal pass sums, or each
+/// vertex's, whose triangles the tangent pass sums.
 struct Adjacency {
-    /// Where each point's corners start, and the end of the last point's.
+    /// Where each point's (or vertex's) corners start, and the end of the
+    /// last one's.
     offsets: Buffer,
-    /// The previous and next point of each corner, grouped by point.
+    /// Per corner, grouped by point: the previous and next point of its
+    /// face; grouped by vertex: its position among the triangle indices.
     corners: Buffer,
 }
 
@@ -190,6 +200,7 @@ pub struct Geometry {
     staging: Option<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
+    tangent: Tangent,
 }
 
 /// The addresses and buffers the cull and mesh passes bind.
@@ -200,6 +211,7 @@ pub struct Bound {
     pub vertices: vk::DeviceAddress,
     pub texcoord: vk::DeviceAddress,
     pub vertex_texcoord: vk::DeviceAddress,
+    pub tangents: vk::DeviceAddress,
     pub instances: vk::DeviceAddress,
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
@@ -238,21 +250,28 @@ impl<'a> Upload<'a> {
 }
 
 impl Geometry {
-    pub fn new(device: &gpu::Device, subdiv: &[u32], smooth: &[u32]) -> Result<Self, String> {
+    pub fn new(
+        device: &gpu::Device,
+        subdiv: &[u32],
+        smooth: &[u32],
+        tangent: &[u32],
+    ) -> Result<Self, String> {
         Ok(Self {
             layout: None,
             draws: None,
             staging: None,
             subdiv: Subdiv::new(device, subdiv)?,
             smooth: Smooth::new(device, smooth)?,
+            tangent: Tangent::new(device, tangent)?,
         })
     }
 
-    /// Records into `cb` the uploads of what moved, the refined points and
-    /// smooth normals of meshes whose points moved, and barriers making them
-    /// visible to the mesh pass, which draws the meshes of render `tags` (all
-    /// of them when there are none). No GPU work may be pending: buffers are
-    /// replaced and the staging buffer rewritten.
+    /// Records into `cb` the uploads of what moved, the refined points,
+    /// smooth normals and tangents of meshes whose points moved, and
+    /// barriers making them visible to the mesh pass, which draws the
+    /// meshes of render `tags` (all of them when there are none). No GPU
+    /// work may be pending: buffers are replaced and the staging buffer
+    /// rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -305,6 +324,7 @@ impl Geometry {
                 refined: whole(layout.refined_count),
                 points: whole(layout.point_count),
                 texcoords: whole(layout.refined_texcoord_count),
+                vertices: whole(layout.vertex_count),
             },
             false => moved_ranges(&layout.ranges, moved),
         };
@@ -326,8 +346,8 @@ impl Geometry {
     }
 
     /// Records the stencil pass over the refined texcoord values and points
-    /// in `rewrite` and the smooth normal pass over its points, each with
-    /// the barrier its readers need.
+    /// in `rewrite`, the smooth normal pass over its points and the tangent
+    /// pass over its vertices, each with the barrier its readers need.
     fn refine(
         &self,
         device: &gpu::Device,
@@ -354,10 +374,26 @@ impl Geometry {
             };
             self.smooth.record(cb, addresses, &rewrite.points);
         }
-        if !(rewrite.texcoords.is_empty()
-            && rewrite.refined.is_empty()
-            && rewrite.points.is_empty())
-        {
+        let summed = !(rewrite.texcoords.is_empty() && rewrite.points.is_empty());
+        if !rewrite.vertices.is_empty() {
+            if summed {
+                barrier(device, cb, vk::PipelineStageFlags2::COMPUTE_SHADER);
+            }
+            let addresses = tangent::Addresses {
+                points: layout.points.address,
+                normals: layout.normals.address,
+                smooth: layout.smooth.address,
+                vertices: layout.vertices.address,
+                texcoord: layout.texcoord.address,
+                vertex_texcoord: layout.vertex_texcoord.address,
+                offsets: layout.vertex_adjacency.offsets.address,
+                corners: layout.vertex_adjacency.corners.address,
+                indices: layout.indices.address,
+                tangents: layout.tangents.address,
+            };
+            self.tangent.record(cb, addresses, &rewrite.vertices);
+        }
+        if summed || !rewrite.vertices.is_empty() {
             barrier(device, cb, vk::PipelineStageFlags2::VERTEX_SHADER);
         }
     }
@@ -372,6 +408,7 @@ impl Geometry {
             vertices: layout.vertices.address,
             texcoord: layout.texcoord.address,
             vertex_texcoord: layout.vertex_texcoord.address,
+            tangents: layout.tangents.address,
             instances: draws.instances.address,
             owners: draws.owners.address,
             boxes: draws.boxes.address,
@@ -407,6 +444,9 @@ impl Geometry {
                 &l.texcoord_stencils.weights,
                 &l.vertices,
                 &l.vertex_texcoord,
+                &l.tangents,
+                &l.vertex_adjacency.offsets,
+                &l.vertex_adjacency.corners,
                 &l.indices,
             ]
         });
@@ -421,13 +461,15 @@ impl Geometry {
 }
 
 /// The uploads of a rebuilt layout's tables.
-fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 11] {
+fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 13] {
     [
         Upload::table(bytes(&t.vertices), &l.vertices),
         Upload::table(bytes(&t.vertex_texcoord), &l.vertex_texcoord),
         Upload::table(bytes(&t.indices), &l.indices),
         Upload::table(bytes(&t.corner_offsets), &l.adjacency.offsets),
         Upload::table(bytes(&t.corners), &l.adjacency.corners),
+        Upload::table(bytes(&t.vertex_offsets), &l.vertex_adjacency.offsets),
+        Upload::table(bytes(&t.vertex_corners), &l.vertex_adjacency.corners),
         Upload::table(bytes(&t.stencils.offsets), &l.stencils.offsets),
         Upload::table(bytes(&t.stencils.indices), &l.stencils.indices),
         Upload::table(bytes(&t.stencils.weights), &l.stencils.weights),
@@ -553,8 +595,8 @@ fn upload(
     Ok(total)
 }
 
-/// The vertex table, triangle indices, stencils and smooth normal table of
-/// every mesh, before upload.
+/// The vertex table, triangle indices, stencils and the smooth normal and
+/// tangent passes' tables of every mesh, before upload.
 #[derive(Default)]
 struct Tables {
     vertices: Vec<[u32; 2]>,
@@ -563,6 +605,10 @@ struct Tables {
     /// One per point, then the end of the last point's corners.
     corner_offsets: Vec<u32>,
     corners: Vec<[u32; 2]>,
+    /// One per vertex, then the end of the last vertex's corners.
+    vertex_offsets: Vec<u32>,
+    /// Each corner's position in `indices`, grouped by vertex.
+    vertex_corners: Vec<u32>,
     /// The refined points' stencils, and the refined texcoord values'.
     stencils: StencilTables,
     texcoord_stencils: StencilTables,
@@ -597,6 +643,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
             let first_vertex = tables.vertices.len();
             let first_index = tables.indices.len();
             let first_corner = tables.corners.len();
+            let first_vertex_corner = tables.vertex_corners.len();
             let first_entry = tables.stencils.indices.len();
             let first_texcoord_entry = tables.texcoord_stencils.indices.len();
             let normal_count = authored(mesh).map_or(0, |n| n.values.len());
@@ -624,6 +671,8 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     tables.indices.truncate(first_index);
                     tables.corner_offsets.truncate(points as usize);
                     tables.corners.truncate(first_corner);
+                    tables.vertex_offsets.truncate(first_vertex);
+                    tables.vertex_corners.truncate(first_vertex_corner);
                     if refined_pass {
                         tables.stencils.offsets.truncate(points as usize);
                         tables
@@ -656,6 +705,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     texcoord_count,
                     first_cage_texcoord: refined_pass.then_some(cage_texcoords),
                     first_vertex: first_vertex as i32,
+                    vertex_count: (tables.vertices.len() - first_vertex) as u32,
                     first_index: first_index as u32,
                     index_count: (tables.indices.len() - first_index) as u32,
                     spread: t.refined.as_ref().map_or(0.0, spread),
@@ -677,11 +727,16 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
         }
     }
     tables.corner_offsets.push(tables.corners.len() as u32);
+    tables
+        .vertex_offsets
+        .push(tables.vertex_corners.len() as u32);
+    let vertices = tables.vertices.len() as u64;
     let storage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-    let index = vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+    let index = vk::BufferUsageFlags::INDEX_BUFFER | storage;
     let written = vk::BufferUsageFlags::STORAGE_BUFFER;
     let layout = Layout {
         point_count: points as u32,
+        vertex_count: vertices as u32,
         refined_count,
         // Refined points and texcoord values are written by the stencil
         // pass, the rest uploaded.
@@ -700,6 +755,11 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
         texcoord_stencils: Stencils::new(device, &tables.texcoord_stencils)?,
         vertices: Buffer::device_local(device, size(&tables.vertices), storage)?,
         vertex_texcoord: Buffer::device_local(device, size(&tables.vertex_texcoord), storage)?,
+        tangents: Buffer::device_local(device, vertices * 16, written)?,
+        vertex_adjacency: Adjacency {
+            offsets: Buffer::device_local(device, size(&tables.vertex_offsets), storage)?,
+            corners: Buffer::device_local(device, size(&tables.vertex_corners), storage)?,
+        },
         indices: Buffer::device_local(device, size(&tables.indices), index)?,
         ranges,
     };
@@ -707,20 +767,22 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
 }
 
 /// What the compute passes rewrite: the refined points to sum from their
-/// cages, the points drawn whose smooth normals to recompute, and the
-/// refined texcoord values to sum.
+/// cages, the points drawn whose smooth normals to recompute, the refined
+/// texcoord values to sum, and the vertices whose tangents to recompute.
 struct Rewrite {
     refined: Vec<std::ops::Range<u32>>,
     points: Vec<std::ops::Range<u32>>,
     texcoords: Vec<std::ops::Range<u32>>,
+    vertices: Vec<std::ops::Range<u32>>,
 }
 
-/// The rewrite for the meshes whose points or texcoord moved.
+/// The rewrite for the meshes whose points, normals or texcoord moved.
 fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
     let mut rewrite = Rewrite {
         refined: Vec::new(),
         points: Vec::new(),
         texcoords: Vec::new(),
+        vertices: Vec::new(),
     };
     for range in moved.points.iter().filter_map(|id| ranges.get(id)) {
         let first = range.first_point as u32;
@@ -737,6 +799,17 @@ fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
                 .texcoords
                 .push(first..first + range.texcoord_count as u32);
         }
+    }
+    let shaped = (moved.points.iter())
+        .chain(&moved.normals)
+        .chain(&moved.texcoord);
+    for range in shaped
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|id| ranges.get(id))
+    {
+        let first = range.first_vertex as u32;
+        rewrite.vertices.push(first..first + range.vertex_count);
     }
     rewrite
 }
@@ -795,10 +868,11 @@ struct Faces<'a> {
 }
 
 /// Appends a mesh's vertex table and its faces but the holes, split into
-/// triangles by a fan from each face's first corner, its points' corners
-/// and, when refined, its stencils and its texcoord's. A vertex is a unique
-/// triple of point, normal and texcoord; each index counts from the start of
-/// its buffer. Returns the points drawn.
+/// triangles by a fan from each face's first corner, its points' corners,
+/// its vertices' corners and, when refined, its stencils and its
+/// texcoord's. A vertex is a unique triple of point, normal and texcoord;
+/// each index counts from the start of its buffer. Returns the points
+/// drawn.
 fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize, String> {
     let (Some(topology), Some(points)) = (&mesh.topology, &mesh.points) else {
         return Ok(0);
@@ -893,6 +967,7 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
     }
 
     let first_vertex = tables.vertices.len();
+    let first_index = tables.indices.len();
     let mut welded: HashMap<[u32; 3], u32> = HashMap::new();
     let mut vertex = |point: i32, normal: Option<usize>, texcoord: Option<usize>| {
         let triple = [
@@ -943,7 +1018,33 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
                 .extend([face_vertices[0], face_vertices[i], face_vertices[i + 1]]);
         }
     }
+    vertex_corners(first_vertex, first_index, tables);
     Ok(faces.points)
+}
+
+/// Appends each vertex's corners, from the mesh's first vertex and
+/// triangle index on: the positions in the indices of the corners reading
+/// it, which the tangent pass sums the triangles of.
+fn vertex_corners(first_vertex: usize, first_index: usize, tables: &mut Tables) {
+    let count = tables.vertices.len() - first_vertex;
+    let mut uses = vec![0u32; count];
+    for &v in &tables.indices[first_index..] {
+        uses[v as usize] += 1;
+    }
+    // Where each vertex's next corner goes.
+    let mut slot = Vec::with_capacity(count);
+    let mut at = tables.vertex_corners.len() as u32;
+    for n in uses {
+        tables.vertex_offsets.push(at);
+        slot.push(at);
+        at += n;
+    }
+    tables.vertex_corners.resize(at as usize, 0);
+    for (i, &v) in tables.indices[first_index..].iter().enumerate() {
+        let s = &mut slot[v as usize];
+        tables.vertex_corners[*s as usize] = (first_index + i) as u32;
+        *s += 1;
+    }
 }
 
 /// Appends a refined mesh's texcoord stencils, after checking that it was
@@ -1416,6 +1517,33 @@ mod tests {
     }
 
     #[test]
+    fn vertex_corners_are_positions_in_the_indices() {
+        // The quad's fan: vertex 0 and 2 are read by both triangles, the
+        // triangle's vertex 4 by one.
+        let t = tables(&mesh(Scheme::None, None)).unwrap();
+        assert_eq!(t.indices, [0, 1, 2, 0, 2, 3, 1, 4, 2]);
+        assert_eq!(t.vertex_offsets, [0, 2, 4, 7, 8]);
+        assert_eq!(t.vertex_corners, [0, 3, 1, 6, 2, 4, 8, 5, 7]);
+        // The control: a second mesh's corners count from the start of the
+        // indices, not its own, and its offsets from the earlier corners.
+        let mut t = t;
+        triangulate(
+            &mesh(Scheme::None, None),
+            Firsts {
+                point: 0,
+                cage: 0,
+                normal: 0,
+                texcoord: 0,
+                cage_texcoord: 0,
+            },
+            &mut t,
+        )
+        .unwrap();
+        assert_eq!(t.vertex_offsets[5..], [9, 11, 13, 16, 17]);
+        assert_eq!(t.vertex_corners[9..11], [9, 12]);
+    }
+
+    #[test]
     fn vertices_weld_over_texcoord_too() {
         let st = |interpolation, count| {
             Some(Texcoord {
@@ -1678,6 +1806,7 @@ mod tests {
                 texcoord_count: 0,
                 first_cage_texcoord: None,
                 first_vertex: 0,
+                vertex_count: 5,
                 first_index: 0,
                 index_count: 9,
                 spread: 0.0,
