@@ -22,10 +22,12 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
-    // Fetches the float2 primvar the mesh's material reads, which Pika
-    // names from the network. Sync calls it; so does the material's, when
+    // Fetches the float2 primvar the mesh's materials read, which Pika
+    // names from the networks. Sync calls it; so does a material's, when
     // its network reads another primvar (PikaMaterial::Sync).
     void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) const;
+    // Whether the mesh or one of its GeomSubsets is bound to the material.
+    bool Binds(SdfPath const &material) const;
 
 protected:
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override {
@@ -43,6 +45,8 @@ private:
     void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
     Pika &_pika;
+    // The materials the GeomSubsets bind, from the last topology.
+    std::vector<SdfPath> _subset_materials;
     uint64_t _id = 0;
 };
 

@@ -566,14 +566,29 @@ impl Store {
     /// material is not in the store or has no network, or its network
     /// reads none. A network reading two is refused when it is built
     /// (`shade` warns and draws it pink), so its meshes carry none.
+    /// The float2 primvar the mesh's materials read, the subsets' included,
+    /// which must agree: the mesh is drawn with one texcoord.
     pub fn texcoord_name(&self, id: u64) -> Result<Option<String>, String> {
         let mesh = self.meshes.get(&id).ok_or_else(|| stale("mesh", id))?;
-        let Some(path) = &mesh.material else {
-            return Ok(None);
-        };
-        let network =
-            (self.materials.values().find(|m| &m.path == path)).and_then(|m| m.network.as_ref());
-        Ok(network.and_then(|n| material::texcoord(n).ok().flatten()))
+        let subsets = (mesh.topology.iter()).flat_map(|t| t.subsets.iter().map(|s| &s.material));
+        let mut reads: Vec<(String, &str)> = Vec::new();
+        for path in mesh.material.iter().chain(subsets) {
+            let network = (self.materials.values().find(|m| &m.path == path))
+                .and_then(|m| m.network.as_ref());
+            let Some(name) = network.and_then(|n| material::texcoord(n).ok().flatten()) else {
+                continue;
+            };
+            if !reads.iter().any(|(n, _)| *n == name) {
+                reads.push((name, path));
+            }
+        }
+        match reads.as_slice() {
+            [] => Ok(None),
+            [(name, _)] => Ok(Some(name.clone())),
+            [(a, pa), (b, pb), ..] => Err(format!(
+                "{pa} reads {a} and {pb} reads {b}; a mesh is drawn with one texcoord, so bind materials that read the same float2 primvar"
+            )),
+        }
     }
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
@@ -1250,6 +1265,48 @@ mod tests {
         assert!(store.set_network(m, two).unwrap());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         assert!(store.texcoord_name(a + 1).is_err());
+    }
+
+    #[test]
+    fn the_texcoord_name_is_the_one_the_subsets_materials_agree_on() {
+        let mut store = Store::new();
+        let a = store.insert_mesh("/a".into());
+        let paint = store.insert_material("/mtl/paint".into());
+        let fur = store.insert_material("/mtl/fur".into());
+        let network = material::tests::fixture();
+        store.set_network(paint, network.clone()).unwrap();
+        let mut renamed = network;
+        (renamed.nodes.get_mut("st").unwrap().params)
+            .insert("varname".into(), Value::Text("perfuv".into()));
+        store.set_network(fur, renamed).unwrap();
+        let subsets = |materials: &[&str]| Topology {
+            scheme: Scheme::None,
+            face_vertex_counts: vec![3; materials.len()],
+            face_vertex_indices: (0..3 * materials.len() as i32).collect(),
+            left_handed: false,
+            holes: vec![],
+            subsets: (materials.iter().enumerate())
+                .map(|(f, m)| Subset {
+                    material: m.to_string(),
+                    faces: vec![f as i32],
+                })
+                .collect(),
+            refined: None,
+        };
+        // Unbound as a whole, the mesh reads what its subsets' materials do.
+        store.set_topology(a, subsets(&["/mtl/paint", ""])).unwrap();
+        assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
+        store.set_material(a, "/mtl/paint".into()).unwrap();
+        store
+            .set_topology(a, subsets(&["/mtl/paint", "/mtl/paint"]))
+            .unwrap();
+        assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
+        // The control: materials reading different primvars name the two.
+        store
+            .set_topology(a, subsets(&["/mtl/paint", "/mtl/fur"]))
+            .unwrap();
+        let e = store.texcoord_name(a).unwrap_err();
+        assert!(e.contains("/mtl/fur reads perfuv"), "{e}");
     }
 
     #[test]

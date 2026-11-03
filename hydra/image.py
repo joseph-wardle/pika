@@ -141,6 +141,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "st read whatever the name", "st seams smoothed over", "st refined bilinearly",
             "failed materials drawn clay", "base weight ignored", "emission ignored",
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
+            "subsets ignored", "subset faces of the cage", "st indices ignored",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -256,7 +257,8 @@ def smooth_normals(points, counts, indices, left, control=None):
 
 def refine(points, counts, indices, holes, scheme, control=None):
     """One level of uniform refinement: the refined points, face vertex
-    counts, face vertex indices and holes."""
+    counts, face vertex indices and holes, and each refined face's cage
+    face."""
     points = [Gf.Vec3d(p) for p in points]
     faces, corner = [], 0
     for count in counts:
@@ -300,7 +302,7 @@ def refine(points, counts, indices, holes, scheme, control=None):
     for e, point in edge_point.items():
         index[e] = len(refined)
         refined.append(point)
-    out_counts, out_indices, out_holes = [], [], []
+    out_counts, out_indices, out_holes, out_parents = [], [], [], []
     for f, face in enumerate(faces):
         middle = len(refined)
         refined.append(centre[f])
@@ -310,24 +312,25 @@ def refine(points, counts, indices, holes, scheme, control=None):
             if f in holes:
                 out_holes.append(len(out_counts))
             out_counts.append(4)
+            out_parents.append(f)
             child = [v, after, middle, before]
             # OpenSubdiv rotates a quad's children to keep its parametric
             # orientation, which decides the diagonal each child is split on.
             rotation = j if len(face) == 4 else 0
             out_indices += child[-rotation:] + child[:-rotation] if rotation else child
-    return refined, out_counts, out_indices, set(out_holes)
+    return refined, out_counts, out_indices, set(out_holes), out_parents
 
 
 def surface(mesh, time, control=None):
     """The points, face vertex counts, face vertex indices and holes a
-    mesh is drawn with at `time`."""
+    mesh is drawn with at `time`, and each drawn face's cage face."""
     points = mesh.GetPointsAttr().Get(time)
     counts = mesh.GetFaceVertexCountsAttr().Get(time)
     indices = mesh.GetFaceVertexIndicesAttr().Get(time)
     holes = set(mesh.GetHoleIndicesAttr().Get(time) or [])
     scheme = mesh.GetSubdivisionSchemeAttr().Get(time)
     if scheme == UsdGeom.Tokens.none or control in CAGE_DRAWN:
-        return points, counts, indices, holes
+        return points, counts, indices, holes, list(range(len(counts)))
     if scheme not in (UsdGeom.Tokens.catmullClark, UsdGeom.Tokens.bilinear):
         raise ValueError(f"{mesh.GetPath()}: the reference does not refine {scheme}")
     authored = [mesh.GetCreaseIndicesAttr(), mesh.GetCornerIndicesAttr()]
@@ -380,6 +383,8 @@ def texcoord(mesh, primvar, time, control=None):
     under cornersPlus1, the only faceVaryingLinearInterpolation the
     reference knows."""
     values, interpolation = primvar.ComputeFlattened(time), primvar.GetInterpolation()
+    if control == "st indices ignored":
+        values = primvar.Get(time)
     scheme = mesh.GetSubdivisionSchemeAttr().Get(time)
     if scheme == UsdGeom.Tokens.none or control in CAGE_DRAWN:
         return values, interpolation
@@ -398,7 +403,7 @@ def texcoord(mesh, primvar, time, control=None):
     if control == "st refined bilinearly":
         scheme = UsdGeom.Tokens.bilinear
     sheet = [Gf.Vec3d(v[0], v[1], 0) for v in values]
-    refined, _, corners, _ = refine(sheet, counts, indices, holes, scheme, control)
+    refined, _, corners, _, _ = refine(sheet, counts, indices, holes, scheme, control)
     return [Gf.Vec2f(refined[c][0], refined[c][1]) for c in corners], UsdGeom.Tokens.faceVarying
 
 
@@ -573,18 +578,39 @@ def frame(normal, u, v, control=None):
     return t, -1.0 if mirrored else 1.0
 
 
+def parts(prim, parents, host, time, control=None):
+    """The Look of each drawn face: its materialBind GeomSubset's, the first
+    of two claiming it, or the mesh's own for a face in none."""
+    own = look(prim, host, time, control)
+    out = [None] * len(parents)
+    subsets = UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets()
+    for subset in () if control == "subsets ignored" else subsets:
+        bound = look(subset.GetPrim(), host, time, control)
+        faces = set(subset.GetIndicesAttr().Get(time))
+        for drawn, cage in enumerate(parents):
+            face = drawn if control == "subset faces of the cage" else cage
+            if face in faces and out[drawn] is None:
+                out[drawn] = bound
+    return [own if part is None else part for part in out]
+
+
 def triangles(stage, time, host, control=None):
     """Every drawn mesh instance's fan triangles, in world space: for each,
     the world points, the object normals at its corners, the normal matrix
     and the world matrix's linear part, whether it is left-handed, a face
-    id, its material's Look, and, when the Look samples an image, the
-    sampled primvar at its corners and, for a normal map, their tangent
-    frames."""
+    id, its face's Look, and, when a Look of the mesh samples an image,
+    the sampled primvar at its corners and, for a normal map, their
+    tangent frames."""
     out = []
     for instance, (prim, world) in enumerate(meshes(stage, time, host.purposes, control)):
         mesh = UsdGeom.Mesh(prim)
-        shading = look(prim, host, time, control)
-        image = shading.image or shading.normal
+        points, counts, indices, holes, parents = surface(mesh, time, control)
+        looks = parts(prim, parents, host, time, control)
+        images = [l.image or l.normal for l in looks if l.image or l.normal]
+        names = sorted({i[2] for i in images})
+        if len(names) > 1:
+            raise ValueError(f"{prim.GetPath()}: its materials sample {names}; a mesh is drawn with one texcoord")
+        image = images[0] if images else None
         if image:
             name = "st" if control == "st read whatever the name" else image[2]
             primvar = UsdGeom.PrimvarsAPI(prim).GetPrimvar(name)
@@ -594,7 +620,6 @@ def triangles(stage, time, host, control=None):
         # Gf multiplies row vectors, so normals go through the inverse transpose.
         linear = world.ExtractRotationMatrix()
         normal_matrix = linear.GetInverse().GetTranspose()
-        points, counts, indices, holes = surface(mesh, time, control)
         cage = Gf.Range3d()
         for p in mesh.GetPointsAttr().Get(time):
             cage.UnionWith(Gf.Vec3d(p))
@@ -625,7 +650,7 @@ def triangles(stage, time, host, control=None):
             return values[indices[c]]
 
         frames = {}
-        if shading.normal:
+        if any(l.normal for l in looks):
             def key(c):
                 return (indices[c], tuple(value(normals, interpolation, c)),
                         tuple(value(st_values, st_interpolation, c)))
@@ -651,9 +676,9 @@ def triangles(stage, time, host, control=None):
                     "left": left,
                     "centre": centre,
                     "face": (str(prim.GetPath()), instance, face),
-                    "look": shading,
+                    "look": looks[face],
                     "st": [list(value(st_values, st_interpolation, c)) for c in cs] if image else None,
-                    "frames": [frame_of(c) for c in cs] if shading.normal else None,
+                    "frames": [frame_of(c) for c in cs] if looks[face].normal else None,
                 })
             corner += count
     return out

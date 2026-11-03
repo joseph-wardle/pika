@@ -15,6 +15,7 @@
 
 #include <opensubdiv/far/stencilTableFactory.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <memory>
@@ -288,8 +289,11 @@ void PikaMesh::_SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer)
     VtIntArray const &indices = topology.GetFaceVertexIndices();
     VtIntArray const &holes = topology.GetHoleIndices();
     std::vector<pika_subset> subsets;
-    for (HdGeomSubset const &s : topology.GetGeomSubsets())
+    _subset_materials.clear();
+    for (HdGeomSubset const &s : topology.GetGeomSubsets()) {
         subsets.push_back({s.materialId.GetText(), s.indices.cdata(), s.indices.size()});
+        _subset_materials.push_back(s.materialId);
+    }
     pika_topology t = {
         topology.GetScheme().GetText(),
         counts.cdata(),
@@ -316,6 +320,12 @@ void PikaMesh::_SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer) {
     VtVec3fArray const &points = value.UncheckedGet<VtVec3fArray>();
     _pika.report(pika_mesh_points(renderer, _id, xyz(points), points.size()),
            GetId().GetString() + " points");
+}
+
+bool PikaMesh::Binds(SdfPath const &material) const {
+    return GetMaterialId() == material ||
+           std::find(_subset_materials.begin(), _subset_materials.end(), material) !=
+               _subset_materials.end();
 }
 
 bool PikaMesh::_FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
@@ -622,16 +632,16 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     if (!_pika.report(pika_material_network(renderer, _id, &flat, &dirty), path + " network"))
         return;
     // Hydra tells no mesh that its material's network changed, so the
-    // meshes bound to it fetch their texcoord again here. Marking them
-    // dirty instead does not reach them: with scene index emulation on,
-    // the bits go through the emulation scene index, which drops them on
-    // USD 25 and the custom bits too on USD 26.
+    // meshes bound to it, whole or by a subset, fetch their texcoord again
+    // here. Marking them dirty instead does not reach them: with scene
+    // index emulation on, the bits go through the emulation scene index,
+    // which drops them on USD 25 and the custom bits too on USD 26.
     if (!dirty)
         return;
     HdRenderIndex &index = delegate->GetRenderIndex();
     for (SdfPath const &id : index.GetRprimIds()) {
         auto mesh = dynamic_cast<PikaMesh const *>(index.GetRprim(id));
-        if (mesh && mesh->GetMaterialId() == GetId())
+        if (mesh && mesh->Binds(GetId()))
             mesh->SyncTexcoord(delegate, renderer);
     }
 }

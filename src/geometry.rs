@@ -11,9 +11,10 @@
 //! whose points, normals or texcoord did, and rewrites the instances of
 //! meshes whose transform moved. It rewrites every instance and draw record when a
 //! visibility, render tag or instancer changes, or a moved mesh's instance
-//! count does. Each mesh is one draw record, of the instances of it that the
-//! cull pass finds in a view; its box, in its own space, is recomputed when
-//! its points move.
+//! count does. Each mesh is one draw record per part (its faces in no
+//! GeomSubset, then each subset's, which the layout orders its triangles
+//! by), of the instances of it that the cull pass finds in a view; its box,
+//! in its own space, is recomputed when its points move.
 //!
 //! A subdivision surface the delegate refined is drawn as its refined faces,
 //! whose points the stencil pass writes from its cage, and whose texcoord it
@@ -30,6 +31,7 @@ use crate::gpu::{self, Buffer};
 use crate::smooth::{self, Smooth};
 use crate::store::{
     self, Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store, Texcoord,
+    Topology,
 };
 use crate::subdiv::{self, Subdiv};
 use crate::tangent::{self, Tangent};
@@ -58,11 +60,22 @@ struct Range {
     first_cage_texcoord: Option<u64>,
     first_vertex: i32,
     vertex_count: u32,
-    first_index: u32,
     index_count: u32,
+    /// The mesh's triangles by material, in order, none empty.
+    parts: Vec<Part>,
     /// How far a refined point can lie outside its cage's box, as a fraction
     /// of the box's size on each axis (see `stencils`); 0 when not refined.
     spread: f32,
+}
+
+/// The triangles of the faces of one mesh bound to one material: those in
+/// no GeomSubset, or one subset's.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Part {
+    /// The subset's index in the topology; `None` for the faces in none.
+    subset: Option<usize>,
+    first_index: u32,
+    index_count: u32,
 }
 
 /// What changes only when a mesh is remodelled, and the buffers sized by it.
@@ -146,14 +159,15 @@ struct Adjacency {
     corners: Buffer,
 }
 
-/// A drawn mesh's draw record and its rows of the instances.
+/// One of a drawn mesh's draw records and its rows of the instances.
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     record: u32,
     instances: std::ops::Range<usize>,
 }
 
-type Rows = BTreeMap<u64, Row>;
+/// Each drawn mesh's rows, one per part.
+type Rows = BTreeMap<u64, Vec<Row>>;
 
 /// The instances and their draw records, before upload.
 struct DrawTables {
@@ -662,8 +676,8 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                 texcoord: texcoords as u32,
                 cage_texcoord: cage_texcoords as u32,
             };
-            let drawn = match triangulate(mesh, first, &mut tables) {
-                Ok(n) => n,
+            let (drawn, parts) = match triangulate(mesh, first, &mut tables) {
+                Ok(drawn) => drawn,
                 Err(e) => {
                     eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
                     tables.vertices.truncate(first_vertex);
@@ -706,8 +720,8 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     first_cage_texcoord: refined_pass.then_some(cage_texcoords),
                     first_vertex: first_vertex as i32,
                     vertex_count: (tables.vertices.len() - first_vertex) as u32,
-                    first_index: first_index as u32,
                     index_count: (tables.indices.len() - first_index) as u32,
+                    parts,
                     spread: t.refined.as_ref().map_or(0.0, spread),
                 },
             );
@@ -867,15 +881,19 @@ struct Faces<'a> {
     points: usize,
 }
 
-/// Appends a mesh's vertex table and its faces but the holes, split into
-/// triangles by a fan from each face's first corner, its points' corners,
-/// its vertices' corners and, when refined, its stencils and its
-/// texcoord's. A vertex is a unique triple of point, normal and texcoord;
-/// each index counts from the start of its buffer. Returns the points
-/// drawn.
-fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize, String> {
+/// Appends a mesh's vertex table and its faces but the holes, part by
+/// part, split into triangles by a fan from each face's first corner, its
+/// points' corners, its vertices' corners and, when refined, its stencils
+/// and its texcoord's. A vertex is a unique triple of point, normal and
+/// texcoord; each index counts from the start of its buffer. Returns the
+/// points drawn and the parts.
+fn triangulate(
+    mesh: &Mesh,
+    first: Firsts,
+    tables: &mut Tables,
+) -> Result<(usize, Vec<Part>), String> {
     let (Some(topology), Some(points)) = (&mesh.topology, &mesh.points) else {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     };
     let faces = match &topology.refined {
         Some(r) => {
@@ -998,16 +1016,25 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
     for &f in faces.holes {
         holes[f as usize] = true;
     }
-    let mut face_vertices = Vec::new();
+    let mut starts = Vec::with_capacity(counts.len());
     let mut corner = 0;
-    for (face, &count) in counts.iter().enumerate() {
-        let start = corner;
+    for &count in counts {
+        starts.push(corner);
         corner += count as usize;
-        if holes[face] {
-            continue;
+    }
+    let mut face_vertices = Vec::new();
+    let mut parts: Vec<Part> = Vec::new();
+    for (subset, face) in ordered_faces(topology, &faces, &holes)? {
+        if parts.last().is_none_or(|p| p.subset != subset) {
+            parts.push(Part {
+                subset,
+                first_index: tables.indices.len() as u32,
+                index_count: 0,
+            });
         }
+        let (start, end) = (starts[face], starts[face] + counts[face] as usize);
         face_vertices.clear();
-        for (c, &point) in corners.iter().enumerate().take(corner).skip(start) {
+        for (c, &point) in corners.iter().enumerate().take(end).skip(start) {
             let normal = normals.map(|n| index(n.interpolation, point, c, face));
             let texcoord = texcoord.map(|t| texcoord_index(t, point, c, face));
             face_vertices.push(vertex(point, normal, texcoord));
@@ -1017,9 +1044,71 @@ fn triangulate(mesh: &Mesh, first: Firsts, tables: &mut Tables) -> Result<usize,
                 .indices
                 .extend([face_vertices[0], face_vertices[i], face_vertices[i + 1]]);
         }
+        parts.last_mut().unwrap().index_count = tables.indices.len() as u32;
+    }
+    for part in &mut parts {
+        part.index_count -= part.first_index;
     }
     vertex_corners(first_vertex, first_index, tables);
-    Ok(faces.points)
+    Ok((faces.points, parts))
+}
+
+/// The faces drawn (not the holes) in the order of their parts: those in no
+/// subset, then each subset's, a face in two subsets in the first. A
+/// refined face belongs to its cage face's subset: OpenSubdiv's uniform
+/// refinement lists a cage face's children together, in the cage's face
+/// order, one per corner under catmullClark and bilinear and four under
+/// loop.
+fn ordered_faces(
+    topology: &Topology,
+    faces: &Faces,
+    holes: &[bool],
+) -> Result<Vec<(Option<usize>, usize)>, String> {
+    let subsets = &topology.subsets;
+    let mut parts: Vec<Vec<usize>> = vec![Vec::new(); subsets.len() + 1];
+    let mut part = vec![None; faces.counts.len()];
+    let cage = &topology.face_vertex_counts;
+    if !subsets.is_empty() {
+        let mut starts = Vec::with_capacity(cage.len() + 1);
+        let mut start = 0;
+        for &count in cage {
+            starts.push(start);
+            start += match (&topology.refined, topology.scheme) {
+                (None, _) => 1,
+                (Some(_), Scheme::Loop) => 4,
+                (Some(_), _) => count.max(0) as usize,
+            };
+        }
+        starts.push(start);
+        if start != faces.counts.len() {
+            return Err(format!(
+                "{} faces drawn for a cage of {} faces, which refine to {start}",
+                faces.counts.len(),
+                cage.len()
+            ));
+        }
+        for (k, subset) in subsets.iter().enumerate() {
+            for &f in &subset.faces {
+                if f < 0 || f as usize >= cage.len() {
+                    return Err(format!(
+                        "subset face {f} is not one of {} faces",
+                        cage.len()
+                    ));
+                }
+                for p in &mut part[starts[f as usize]..starts[f as usize + 1]] {
+                    p.get_or_insert(k);
+                }
+            }
+        }
+    }
+    for (face, &k) in part.iter().enumerate() {
+        if !holes[face] {
+            parts[k.map_or(0, |k| k + 1)].push(face);
+        }
+    }
+    Ok((parts.into_iter().enumerate())
+        .flat_map(|(k, faces)| faces.into_iter().map(move |f| (k.checked_sub(1), f)))
+        .collect())
 }
 
 /// Appends each vertex's corners, from the mesh's first vertex and
@@ -1199,25 +1288,23 @@ fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mu
     }
 }
 
-/// One draw record per visible mesh of render `tags` (or of any, when there
-/// are none), with its box and its rows of the instances it is drawn at,
-/// grouped by material: the unbound meshes first, then each material's.
+/// One draw record per part of each visible mesh of render `tags` (or of
+/// any, when there are none), with its box and its rows of the instances
+/// it is drawn at, grouped by material: the unbound parts first, then each
+/// material's.
 fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawTables {
     let instancers = by_path(store);
     let materials: HashMap<&str, u64> = (store.materials().iter())
         .map(|(&id, m)| (m.path.as_str(), id))
         .collect();
-    let mut ordered: Vec<(Option<u64>, u64, &Range)> = (ranges.iter())
-        .map(|(&id, range)| {
-            let bound = store.meshes()[&id].material.as_deref();
-            (
-                bound.and_then(|path| materials.get(path).copied()),
-                id,
-                range,
-            )
-        })
-        .collect();
-    ordered.sort_by_key(|&(material, id, _)| (material, id));
+    let mut ordered: Vec<(Option<u64>, u64, &Part)> = Vec::new();
+    for (&id, range) in ranges {
+        let mesh = &store.meshes()[&id];
+        for part in &range.parts {
+            ordered.push((part_material(mesh, part, &materials), id, part));
+        }
+    }
+    ordered.sort_by_key(|&(material, id, part)| (material, id, part.first_index));
     let mut t = DrawTables {
         instances: Vec::new(),
         owners: Vec::new(),
@@ -1226,8 +1313,8 @@ fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawT
         groups: Vec::new(),
         rows: Rows::new(),
     };
-    for (material, id, range) in ordered {
-        let mesh = &store.meshes()[&id];
+    for (material, id, part) in ordered {
+        let (mesh, range) = (&store.meshes()[&id], &ranges[&id]);
         let first = t.instances.len();
         t.instances
             .extend(mesh_instances(&instancers, mesh, range, tags));
@@ -1244,23 +1331,34 @@ fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawT
             }),
         }
         t.owners.resize(t.instances.len(), record);
-        t.rows.insert(
-            id,
-            Row {
-                record,
-                instances: first..t.instances.len(),
-            },
-        );
+        t.rows.entry(id).or_default().push(Row {
+            record,
+            instances: first..t.instances.len(),
+        });
         t.boxes.push(mesh_box(mesh, range.spread));
         t.records.push(vk::DrawIndexedIndirectCommand {
-            index_count: range.index_count,
+            index_count: part.index_count,
             instance_count: 0,
-            first_index: range.first_index,
+            first_index: part.first_index,
             vertex_offset: range.first_vertex,
             first_instance: first as u32,
         });
     }
     t
+}
+
+/// The store id of the material a part is drawn with: its subset's, or the
+/// mesh's for the faces in no subset and for a subset binding none; `None`
+/// when Hydra has not made it.
+fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Option<u64> {
+    let subset = part
+        .subset
+        .and_then(|k| mesh.topology.as_ref()?.subsets.get(k));
+    let path = match subset {
+        Some(s) if !s.material.is_empty() => Some(s.material.as_str()),
+        _ => mesh.material.as_deref(),
+    };
+    path.and_then(|p| materials.get(p).copied())
 }
 
 /// Rewrites every instance and draw record of render `tags` into `slot`'s
@@ -1344,20 +1442,21 @@ fn patch(
             continue;
         };
         let moved = mesh_instances(&instancers, &store.meshes()[id], range, tags);
-        let row = rows.get(id).map_or(0..0, |r| r.instances.clone());
-        if moved.len() != row.len() {
+        let rows = rows.get(id).map_or(&[][..], Vec::as_slice);
+        if moved.len() != rows.first().map_or(0, |r| r.instances.len()) {
             return None;
         }
-        if !moved.is_empty() {
-            instances.push((row.start, moved));
+        for row in rows {
+            instances.push((row.instances.start, moved.clone()));
         }
     }
     let mut boxes = Vec::new();
     for id in &moved.points {
-        let (Some(row), Some(range)) = (rows.get(id), ranges.get(id)) else {
+        let (Some(rows), Some(range)) = (rows.get(id), ranges.get(id)) else {
             continue;
         };
-        boxes.push((row.record, mesh_box(&store.meshes()[id], range.spread)));
+        let b = mesh_box(&store.meshes()[id], range.spread);
+        boxes.extend(rows.iter().map(|r| (r.record, b)));
     }
     Some(Patch { instances, boxes })
 }
@@ -1434,7 +1533,7 @@ fn bytes<T: Copy>(values: &[T]) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{RefinedTexcoord, Stencils, Topology};
+    use crate::store::{RefinedTexcoord, Stencils, Subset};
 
     /// A quad and a triangle sharing an edge, with optional normals.
     fn mesh(scheme: Scheme, normals: Option<Normals>) -> Mesh {
@@ -1807,8 +1906,12 @@ mod tests {
                 first_cage_texcoord: None,
                 first_vertex: 0,
                 vertex_count: 5,
-                first_index: 0,
                 index_count: 9,
+                parts: vec![Part {
+                    subset: None,
+                    first_index: 0,
+                    index_count: 9,
+                }],
                 spread: 0.0,
             };
             ranges.insert(id, range);
@@ -1848,7 +1951,7 @@ mod tests {
         };
         assert_eq!(t.groups, [group(None, 0, 1), group(Some(red), 1, 2)]);
         // The records follow the groups, not the meshes' ids.
-        let record = |id| t.rows[&id].record;
+        let record = |id| t.rows[&id][0].record;
         assert_eq!([record(ids[1]), record(ids[0]), record(ids[2])], [0, 1, 2]);
         assert_ne!(record(ids[0]), 0);
         assert_eq!(t.owners, [0, 1, 2]);
@@ -1870,16 +1973,120 @@ mod tests {
         assert_eq!(
             rows,
             [
-                Row {
+                vec![Row {
                     record: 0,
                     instances: 0..1
-                },
-                Row {
+                }],
+                vec![Row {
                     record: 1,
                     instances: 1..2
-                }
+                }]
             ]
         );
+    }
+
+    #[test]
+    fn subsets_are_parts_drawn_with_their_materials() {
+        let (mut store, mut ranges) = drawn(&[("/a", "render"), ("/b", "render")]);
+        let red = store.insert_material("/mtl/red".into());
+        let ids: Vec<u64> = ranges.keys().copied().collect();
+        let mut topology = mesh(Scheme::None, None).topology.unwrap();
+        topology.subsets = vec![Subset {
+            material: "/mtl/red".into(),
+            faces: vec![1],
+        }];
+        store.set_topology(ids[0], topology).unwrap();
+        let part = |subset, first_index, index_count| Part {
+            subset,
+            first_index,
+            index_count,
+        };
+        ranges.get_mut(&ids[0]).unwrap().parts = vec![part(None, 0, 6), part(Some(0), 6, 3)];
+        let t = draws(&store, &ranges, &[]);
+        let group = |material, first, count| Group {
+            material,
+            first,
+            count,
+        };
+        // The subset's record is grouped with its material, after the two
+        // unbound ones, and draws its own triangles over the mesh's instance.
+        assert_eq!(t.groups, [group(None, 0, 2), group(Some(red), 2, 1)]);
+        let record = |r: &vk::DrawIndexedIndirectCommand| (r.first_index, r.index_count);
+        let records: Vec<_> = t.records.iter().map(record).collect();
+        assert_eq!(records, [(0, 6), (0, 9), (6, 3)]);
+        assert_eq!(t.owners, [0, 1, 2]);
+        assert_eq!(t.rows[&ids[0]].len(), 2);
+        assert_eq!(t.boxes.len(), 3);
+        // The control: a subset binding no material draws with the mesh's.
+        store.set_material(ids[0], "/mtl/red".into()).unwrap();
+        let mut topology = mesh(Scheme::None, None).topology.unwrap();
+        topology.subsets = vec![Subset {
+            material: String::new(),
+            faces: vec![1],
+        }];
+        store.set_topology(ids[0], topology).unwrap();
+        let t = draws(&store, &ranges, &[]);
+        assert_eq!(t.groups, [group(None, 0, 1), group(Some(red), 1, 2)]);
+    }
+
+    #[test]
+    fn faces_are_ordered_by_subset_and_refined_ones_by_their_cage_face() {
+        let mut m = mesh(Scheme::None, None);
+        let faces = |m: &Mesh| -> Result<Vec<(Option<usize>, usize)>, String> {
+            let t = m.topology.as_ref().unwrap();
+            let drawn = match &t.refined {
+                Some(r) => Faces {
+                    counts: &r.face_vertex_counts,
+                    corners: &r.face_vertex_indices,
+                    holes: &r.holes,
+                    points: 0,
+                },
+                None => Faces {
+                    counts: &t.face_vertex_counts,
+                    corners: &t.face_vertex_indices,
+                    holes: &t.holes,
+                    points: 0,
+                },
+            };
+            let mut holes = vec![false; drawn.counts.len()];
+            for &f in drawn.holes {
+                holes[f as usize] = true;
+            }
+            ordered_faces(t, &drawn, &holes)
+        };
+        assert_eq!(faces(&m).unwrap(), [(None, 0), (None, 1)]);
+        let subset = |faces: Vec<i32>| Subset {
+            material: "/mtl/red".into(),
+            faces,
+        };
+        m.topology.as_mut().unwrap().subsets = vec![subset(vec![0]), subset(vec![0, 1])];
+        assert_eq!(faces(&m).unwrap(), [(Some(0), 0), (Some(1), 1)]);
+        // Refined: the quad's four children, then the triangle's three; the
+        // subset of the triangle has the last three, less the hole.
+        let mut r = refined();
+        let t = r.topology.as_mut().unwrap();
+        t.subsets = vec![subset(vec![1])];
+        t.refined.as_mut().unwrap().face_vertex_counts = vec![4; 7];
+        t.refined.as_mut().unwrap().holes = vec![5];
+        assert_eq!(
+            faces(&r).unwrap(),
+            [
+                (None, 0),
+                (None, 1),
+                (None, 2),
+                (None, 3),
+                (Some(0), 4),
+                (Some(0), 6)
+            ]
+        );
+        // The controls: a face the cage lacks, and refined faces the rule
+        // does not account for.
+        r.topology.as_mut().unwrap().subsets = vec![subset(vec![2])];
+        assert!(faces(&r).unwrap_err().contains("subset face 2"));
+        let t = r.topology.as_mut().unwrap();
+        t.subsets = vec![subset(vec![1])];
+        t.refined.as_mut().unwrap().face_vertex_counts = vec![4; 6];
+        assert!(faces(&r).unwrap_err().contains("refine to 7"));
     }
 
     #[test]

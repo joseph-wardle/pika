@@ -1,0 +1,185 @@
+#usda 1.0
+(
+    doc = "Two 2x2 grids facing the camera, each bound to a material and split by GeomSubsets. The flat one's faces are the uv ramp (bake/fixtures/ramp.exr) on a faceVarying st whose indices unscramble its values, a red Standard Surface, and a subset binding nothing, which inherits the mesh's green; its st shifts at frame 2. The subdivided one is blue on its two middle cage faces and yellow on the rest, and its middle point moves at frame 2."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "plain" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4, 4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+    point3f[] points = [(-1.6, -0.8, -5), (-0.9, -0.8, -5), (-0.2, -0.8, -5), (-1.6, 0, -5), (-0.9, 0, -5), (-0.2, 0, -5), (-1.6, 0.8, -5), (-0.9, 0.8, -5), (-0.2, 0.8, -5)]
+    # The values are authored corner by corner from the last corner back,
+    # and the indices put them right.
+    texCoord2f[] primvars:st (
+        interpolation = "faceVarying"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 1), (1, 1), (1, 0), (0, 0), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0, 1), (1, 1), (1, 0), (0, 0)],
+        2: [(-0.2, 1), (0.8, 1), (0.8, 0), (-0.2, 0), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (0.5, 0.5), (-0.2, 1), (0.8, 1), (0.8, 0), (-0.2, 0)],
+    }
+    int[] primvars:st:indices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    rel material:binding = </green>
+
+    def GeomSubset "ramp" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token elementType = "face"
+        uniform token familyName = "materialBind"
+        int[] indices = [0, 3]
+        rel material:binding = </ramp>
+    }
+
+    def GeomSubset "red" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token elementType = "face"
+        uniform token familyName = "materialBind"
+        int[] indices = [1]
+        rel material:binding = </red>
+    }
+
+    def GeomSubset "bare"
+    {
+        uniform token elementType = "face"
+        uniform token familyName = "materialBind"
+        int[] indices = [2]
+    }
+}
+
+def Mesh "curved" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "catmullClark"
+    int[] faceVertexCounts = [4, 4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+    point3f[] points.timeSamples = {
+        1: [(0.2, -0.8, -5), (0.9, -0.8, -5), (1.6, -0.8, -5), (0.2, 0, -5), (0.9, 0, -4.6), (1.6, 0, -5), (0.2, 0.8, -5), (0.9, 0.8, -5), (1.6, 0.8, -5)],
+        2: [(0.2, -0.8, -5), (0.9, -0.8, -5), (1.6, -0.8, -5), (0.2, 0, -5), (0.9, 0, -4.3), (1.6, 0, -5), (0.2, 0.8, -5), (0.9, 0.8, -5), (1.6, 0.8, -5)],
+    }
+    rel material:binding = </yellow>
+
+    def GeomSubset "blue" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token elementType = "face"
+        uniform token familyName = "materialBind"
+        int[] indices = [1, 2]
+        rel material:binding = </blue>
+    }
+}
+
+def Material "ramp"
+{
+    token outputs:surface.connect = </ramp/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </ramp/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </ramp/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </ramp/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </ramp/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/ramp.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </ramp/st.outputs:out>
+        float2 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
+def Material "green"
+{
+    token outputs:surface.connect = </green/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.2, 0.7, 0.2)
+        float inputs:specular = 0
+        token outputs:out
+    }
+}
+
+def Material "red"
+{
+    token outputs:surface.connect = </red/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.8, 0.1, 0.1)
+        float inputs:specular = 0
+        token outputs:out
+    }
+}
+
+def Material "blue"
+{
+    token outputs:surface.connect = </blue/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.1, 0.2, 0.9)
+        float inputs:specular = 0
+        token outputs:out
+    }
+}
+
+def Material "yellow"
+{
+    token outputs:surface.connect = </yellow/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.9, 0.8, 0.1)
+        float inputs:specular = 0
+        token outputs:out
+    }
+}
