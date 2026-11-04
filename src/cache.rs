@@ -40,16 +40,6 @@ pub fn unique() -> String {
     )
 }
 
-/// Writes `bytes` to `path` through a temporary name beside it, so another
-/// process reads the whole file or none.
-pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = path.with_file_name(format!("{name}.{}", unique()));
-    std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))
-}
-
 /// Removes the entry `path`, a file or a directory, that cannot be read
 /// (`why`), so its owner rebuilds it as if it were absent.
 pub fn discard(path: &Path, why: &str) -> Result<(), String> {

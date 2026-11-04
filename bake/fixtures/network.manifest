@@ -21,8 +21,3 @@ uniform float n0_ior 1.5
 uniform vector3 n0_normal 0, 0, 1
 uniform float n0_displacement 0
 uniform float n0_occlusion 1
-varying vector2 i_geomprop_st
-varying vector3 normalWorld
-varying vector3 tangentWorld
-varying vector3 bitangentWorld
-varying vector3 positionWorld

@@ -1,8 +1,8 @@
 //! The bake tool (`bake/bake.cpp`) as the renderer runs it: a material's
-//! document in, the pixel stage Houdini's MaterialX generates and the
-//! manifest describing it out; a texture as authored in, the file the
-//! renderer uploads out (`texture`). Both are kept under the cache so
-//! nothing is baked twice.
+//! document in, the pixel stage Houdini's MaterialX generates, the vertex
+//! stage feeding it and the manifest describing them out; a texture as
+//! authored in, the file the renderer uploads out (`texture`). Both are
+//! kept under the cache so nothing is baked twice.
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -18,13 +18,12 @@ const TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/bake");
 const LIBRARIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bake/libraries");
 
 /// What the pixel stage expects of the renderer, as the tool lists it:
-/// its public uniforms, textures and the varyings the vertex stage fills.
+/// its public uniforms and textures.
 #[derive(Debug, Default, PartialEq)]
 pub struct Manifest {
     pub materialx: String,
     pub uniforms: Vec<Uniform>,
     pub textures: Vec<String>,
-    pub varyings: Vec<Varying>,
 }
 
 /// A public uniform: its variable, its MaterialX type and the initial
@@ -34,12 +33,6 @@ pub struct Uniform {
     pub name: String,
     pub kind: String,
     pub initial: String,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Varying {
-    pub name: String,
-    pub kind: String,
 }
 
 pub fn manifest(text: &str) -> Result<Manifest, String> {
@@ -53,24 +46,17 @@ pub fn manifest(text: &str) -> Result<Manifest, String> {
         match kind {
             "materialx" => m.materialx = second.to_owned(),
             "texture" => m.textures.push(second.to_owned()),
-            "uniform" | "varying" => {
+            "uniform" => {
                 let mut rest = rest.splitn(2, ' ');
                 let name = rest.next().unwrap_or("").to_owned();
                 if name.is_empty() {
                     return Err(format!("the manifest line {line:?} names no variable"));
                 }
-                let kind_name = second.to_owned();
-                match kind {
-                    "uniform" => m.uniforms.push(Uniform {
-                        name,
-                        kind: kind_name,
-                        initial: rest.next().unwrap_or("").to_owned(),
-                    }),
-                    _ => m.varyings.push(Varying {
-                        name,
-                        kind: kind_name,
-                    }),
-                }
+                m.uniforms.push(Uniform {
+                    name,
+                    kind: second.to_owned(),
+                    initial: rest.next().unwrap_or("").to_owned(),
+                });
             }
             _ => {
                 return Err(format!(
@@ -83,7 +69,7 @@ pub fn manifest(text: &str) -> Result<Manifest, String> {
 }
 
 /// The tool's output for one document: the directory holding its
-/// `pixel.slang` and `manifest`.
+/// `pixel.slang`, `surface.slang` and `manifest`.
 pub struct Generated {
     pub dir: PathBuf,
     pub manifest: Manifest,
@@ -329,8 +315,10 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
     let path = dir.join("manifest");
     let text = std::fs::read_to_string(&path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !dir.join("pixel.slang").is_file() {
-        return Err(format!("{} has no pixel.slang", dir.display()));
+    for name in ["pixel.slang", "surface.slang"] {
+        if !dir.join(name).is_file() {
+            return Err(format!("{} has no {name}", dir.display()));
+        }
     }
     manifest(&text)
 }
@@ -392,16 +380,9 @@ pub mod tests {
             }
         );
         assert_eq!(m.uniforms[0].initial, "", "a struct uniform has no value");
-        assert_eq!(
-            m.varyings[0],
-            Varying {
-                name: "i_geomprop_st".into(),
-                kind: "vector2".into(),
-            }
-        );
-        assert_eq!(m.varyings.len(), 5);
 
         assert!(manifest("uniform float").is_err());
+        assert!(manifest("varying vector2 i_geomprop_st").is_err());
         assert!(manifest("sampler n1_file").is_err());
     }
 

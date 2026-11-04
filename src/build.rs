@@ -15,7 +15,6 @@ use std::time::Duration;
 
 use crate::abi;
 use crate::bake::{Bake, Baked, Manifest};
-use crate::cache;
 use crate::material::{self, Document, Source};
 use crate::shader;
 use crate::store::Network;
@@ -206,9 +205,9 @@ fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &Sender<Built>) {
     }
 }
 
-/// Generates `document`'s pixel stage and, unless `held`, compiles its
-/// surface, then bakes and reads each texture `network` gives it, under
-/// the cap `cap`.
+/// Generates `document`'s stages and, unless `held`, compiles its surface,
+/// then bakes and reads each texture `network` gives it, under the cap
+/// `cap`.
 pub fn run(
     bake: &Bake,
     document: &Document,
@@ -220,11 +219,6 @@ pub fn run(
     let surface = if held {
         None
     } else {
-        let stage = surface::vertex_stage(&generated.manifest)?;
-        let path = generated.dir.join("surface.slang");
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(&stage) {
-            cache::write(&path, stage.as_bytes())?;
-        }
         Some(shader::surface(&generated.dir)?)
     };
     let mut textures = Vec::new();

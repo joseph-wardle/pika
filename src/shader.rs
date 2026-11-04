@@ -51,8 +51,8 @@ pub struct Surface {
     pub compiled: bool,
 }
 
-/// Compiles `<dir>/surface.slang`, the vertex stage written beside the
-/// pixel stage it includes, unless `dir` holds the SPIR-V for these
+/// Compiles `<dir>/surface.slang`, the vertex stage the tool wrote beside
+/// the pixel stage it includes, unless `dir` holds the SPIR-V for these
 /// sources, flags and slangc: the key hashes everything the SPIR-V depends
 /// on, so a stale entry is impossible.
 pub fn surface(dir: &Path) -> Result<Surface, String> {

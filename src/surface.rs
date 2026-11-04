@@ -1,52 +1,13 @@
 //! What a material's surface shader asks of the renderer, read from the
-//! bake tool's manifest and slangc's reflection: the vertex stage that
-//! fills its varyings, the byte layout of its uniform block, and each
-//! material's values packed into that block.
+//! bake tool's manifest and slangc's reflection: the byte layout of its
+//! uniform block, and each material's values packed into that block.
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use crate::bake::Manifest;
 use crate::json::{self, Json};
 use crate::material::{self, Document};
 use crate::store::{Network, Value};
-
-/// The Slang source of a surface's vertex stage: `pixel.slang`'s
-/// `VertexData`, filled from `shaders/vertex.slang`'s pulling.
-pub fn vertex_stage(manifest: &Manifest) -> Result<String, String> {
-    let mut text = String::from(
-        "// Written by src/surface.rs: the vertex stage for the pixel stage beside it.\n\n\
-         #include \"pixel.slang\"\n#include \"vertex.slang\"\n\n\
-         [shader(\"vertex\")]\n\
-         VertexData vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)\n\
-         {\n    Vertex p = pull(vertex, slot);\n    VertexData o;\n    \
-         o.SV_Position = p.position;\n",
-    );
-    for v in &manifest.varyings {
-        let value = match v.name.as_str() {
-            "positionWorld" => "p.world".to_owned(),
-            "normalWorld" => "p.normal".to_owned(),
-            "tangentWorld" => "p.tangent".to_owned(),
-            "bitangentWorld" => "p.bitangent".to_owned(),
-            // Every float2 geomprop reads the mesh's one texcoord;
-            // `material::texcoord` refuses a network reading two before it
-            // gets here.
-            name if name.starts_with("i_geomprop_") && v.kind == "vector2" => {
-                "p.texcoord".to_owned()
-            }
-            name => {
-                return Err(format!(
-                    "the surface reads {name} as a {}, which Pika's vertex stage does not \
-                     provide (of the primvars, it provides one float2, the texcoord)",
-                    v.kind
-                ));
-            }
-        };
-        writeln!(text, "    o.{} = {value};", v.name).unwrap();
-    }
-    text.push_str("    return o;\n}\n");
-    Ok(text)
-}
 
 /// The uniform block's byte layout and its textures' bindings, in
 /// descriptor set 0, as slangc laid them out.
@@ -323,36 +284,15 @@ impl Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bake::{self, Varying};
+    use crate::bake;
     use crate::material::tests::fixture;
 
-    // bake/check.sh compiles this stage and proves the reflection beside it.
-    const STAGE: &str = include_str!("../bake/fixtures/network.surface.slang");
+    // bake/check.sh compiles the tool's output for bake/fixtures/network.mtlx
+    // and proves this reflection of it.
     const REFLECTION: &str = include_str!("../bake/fixtures/network.reflection.json");
 
     fn manifest() -> Manifest {
         bake::manifest(bake::tests::FIXTURE).unwrap()
-    }
-
-    #[test]
-    fn vertex_stage_fills_the_varyings() {
-        assert_eq!(vertex_stage(&manifest()).unwrap(), STAGE);
-
-        // Any float2 primvar is the texcoord; one of another type is not provided.
-        let mut renamed = manifest();
-        renamed.varyings[0].name = "i_geomprop_perfuv".into();
-        let stage = vertex_stage(&renamed).unwrap();
-        assert!(
-            stage.contains("o.i_geomprop_perfuv = p.texcoord;"),
-            "{stage}"
-        );
-        let mut unknown = manifest();
-        unknown.varyings.push(Varying {
-            name: "i_geomprop_displayColor".into(),
-            kind: "color3".into(),
-        });
-        let error = vertex_stage(&unknown).unwrap_err();
-        assert!(error.contains("displayColor"), "{error}");
     }
 
     #[test]

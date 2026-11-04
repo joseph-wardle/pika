@@ -1,9 +1,10 @@
 // The generate job: a material's document (src/material.rs) in, the pixel
 // stage from Houdini's MaterialX Slang generator out, as <out>/pixel.slang,
-// with <out>/manifest saying what the stage expects of the renderer: its
-// public uniforms with their types and initial values, its textures, and the
-// varyings the vertex stage must deliver. The libraries job lists what
-// generate reads beyond the document, for the renderer's cache key.
+// with <out>/surface.slang, the vertex stage that fills what it reads from
+// the renderer's vertices, and <out>/manifest saying what the stage expects
+// of the renderer: its public uniforms with their types and initial values
+// and its textures. The libraries job lists what generate reads beyond the
+// document, for the renderer's cache key.
 
 #include "bake.h"
 
@@ -56,6 +57,43 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
     return text;
 }
 
+// The vertex stage: pixel.slang's VertexData, filled from the vertex
+// shaders/vertex.slang pulls.
+std::string vertex(mx::ShaderStage const &stage) {
+    std::string text = "// Written by the bake tool: the vertex stage for the pixel stage beside it.\n\n"
+                       "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"
+                       "[shader(\"vertex\")]\n"
+                       "VertexData vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)\n"
+                       "{\n    Vertex p = pull(vertex, slot);\n    VertexData o;\n"
+                       "    o.SV_Position = p.position;\n";
+    mx::VariableBlock const &block = stage.getInputBlock(mx::HW::VERTEX_DATA);
+    for (size_t i = 0; i < block.size(); ++i) {
+        mx::ShaderPort const *port = block[i];
+        std::string const &name = port->getVariable();
+        std::string value;
+        if (name == "positionWorld")
+            value = "p.world";
+        else if (name == "normalWorld")
+            value = "p.normal";
+        else if (name == "tangentWorld")
+            value = "p.tangent";
+        else if (name == "bitangentWorld")
+            value = "p.bitangent";
+        // Every float2 geomprop reads the mesh's one texcoord; the renderer
+        // refuses a network reading two (src/material.rs) before it runs
+        // the tool.
+        else if (name.rfind("i_geomprop_", 0) == 0 && port->getType() == mx::Type::VECTOR2)
+            value = "p.texcoord";
+        else
+            throw std::runtime_error("the surface reads " + name + " as a " +
+                                     port->getType().getName() +
+                                     ", which Pika's vertex stage does not provide (of the "
+                                     "primvars, it provides one float2, the texcoord)");
+        text += "    o." + name + " = " + value + ";\n";
+    }
+    return text + "    return o;\n}\n";
+}
+
 } // namespace
 
 void generate(std::string const &path, std::string const &out) {
@@ -95,9 +133,9 @@ void generate(std::string const &path, std::string const &out) {
                         shader->getSourceCode(mx::Stage::PIXEL);
     mx::ShaderStage const &stage = shader->getStage(mx::Stage::PIXEL);
     std::string manifest = "materialx " + mx::getVersionString() + "\n" +
-                           lines(stage.getUniformBlock(mx::HW::PUBLIC_UNIFORMS), "uniform") +
-                           lines(stage.getInputBlock(mx::HW::VERTEX_DATA), "varying");
+                           lines(stage.getUniformBlock(mx::HW::PUBLIC_UNIFORMS), "uniform");
     write(out + "/pixel.slang", pixel);
+    write(out + "/surface.slang", vertex(stage));
     write(out + "/manifest", manifest);
 }
 

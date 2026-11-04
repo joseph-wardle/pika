@@ -3,11 +3,11 @@
 #
 # Builds the tool and generates bake/fixtures/network.mtlx, the document
 # src/material.rs writes for hydra/fixtures/network.usda. The manifest must
-# match bake/fixtures/network.manifest, and the pixel stage must compile
-# with network.surface.slang, the vertex stage src/surface.rs writes for
-# it, as Pika compiles them, reflecting the layout in
-# network.reflection.json that src/surface.rs's tests pack against. A
-# document naming a nodedef the libraries lack must fail, naming it. The
+# match bake/fixtures/network.manifest, and the surface must compile as
+# Pika compiles it, reflecting the layout in network.reflection.json that
+# src/surface.rs's tests pack against. A
+# document naming a nodedef the libraries lack, or reading a primvar the
+# renderer's vertices lack, must fail, naming it. The
 # libraries job must list the manifest's MaterialX version and the standard
 # library's definitions with their size and time.
 #
@@ -21,7 +21,7 @@ BAKE=$ROOT/target/bake/bake
 
 make -C "$ROOT/bake" --no-print-directory HFS="$HFS"
 rm -rf "$OUT"
-mkdir -p "$OUT/network" "$OUT/missing" "$OUT/textures"
+mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/textures"
 FIXTURES=$ROOT/bake/fixtures
 
 failed=0
@@ -36,7 +36,6 @@ diff "$ROOT/bake/fixtures/network.manifest" "$OUT/network/manifest" ||
     fail "network: the manifest differs from the reference"
 # The generator declares textures inside its uniform block, and slangc warns
 # that it moves them to bindings of their own, which is where Pika binds them.
-cp "$ROOT/bake/fixtures/network.surface.slang" "$OUT/network/surface.slang"
 slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-entrypoint-name \
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
@@ -55,6 +54,15 @@ if "$BAKE" generate "$OUT/missing.mtlx" "$OUT/missing" 2> "$OUT/missing.err"; th
     fail "missing: a document with an unknown nodedef generated"
 fi
 grep -q "ND_missing" "$OUT/missing.err" || fail "missing: the error does not name the nodedef"
+# The vertices carry one float2 primvar; a surface reading a color3 one
+# has no vertex stage.
+sed -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="emissiveColor" nodename="n3" />|' \
+    -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_geompropvalue_color3">\n    <input name="geomprop" type="string" value="displayColor" />\n  </node>\n  <surfacematerial|' \
+    "$ROOT/bake/fixtures/network.mtlx" > "$OUT/primvar.mtlx"
+if "$BAKE" generate "$OUT/primvar.mtlx" "$OUT/primvar" 2> "$OUT/primvar.err"; then
+    fail "primvar: a surface reading a color3 primvar generated"
+fi
+grep -q "i_geomprop_displayColor" "$OUT/primvar.err" || fail "primvar: the error does not name the varying"
 
 texture() {
     "$BAKE" texture "$FIXTURES/$1" "$2" "$3" "$4" "" "$OUT/textures/$5.texture" || fail "$5: texture failed"
