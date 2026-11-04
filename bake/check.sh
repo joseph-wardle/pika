@@ -7,7 +7,9 @@
 # with network.surface.slang, the vertex stage src/surface.rs writes for
 # it, as Pika compiles them, reflecting the layout in
 # network.reflection.json that src/surface.rs's tests pack against. A
-# document naming a nodedef the libraries lack must fail, naming it.
+# document naming a nodedef the libraries lack must fail, naming it. The
+# libraries job must list the manifest's MaterialX version and the standard
+# library's definitions with their size and time.
 #
 #   bake/check.sh
 set -euo pipefail
@@ -41,6 +43,12 @@ slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-en
     fail "network: slangc rejected the surface"
 diff "$ROOT/bake/fixtures/network.reflection.json" "$OUT/network/reflection.json" ||
     fail "network: the reflection differs from the reference"
+
+"$BAKE" libraries > "$OUT/libraries" || fail "libraries: the listing failed"
+[ "$(head -1 "$OUT/libraries")" = "$(head -1 "$FIXTURES/network.manifest")" ] ||
+    fail "libraries: the first line is not the manifest's MaterialX version"
+grep -qE '^stdlib/stdlib_defs\.mtlx [0-9]+ [0-9]+$' "$OUT/libraries" ||
+    fail "libraries: stdlib_defs.mtlx is not listed with its size and time"
 
 sed 's/ND_geompropvalue_vector2/ND_missing/' "$ROOT/bake/fixtures/network.mtlx" > "$OUT/missing.mtlx"
 if "$BAKE" generate "$OUT/missing.mtlx" "$OUT/missing" 2> "$OUT/missing.err"; then

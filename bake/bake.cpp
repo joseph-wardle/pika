@@ -3,11 +3,14 @@
 // host's own.
 //
 //   bake generate <document.mtlx> <out>
+//   bake libraries
 //   bake texture <source> <space> <encoding> <cap> <config> <out>
 //
-// generate turns a material's document into Slang (generate.cpp); texture
-// turns an image into the one file the renderer uploads (texture.cpp). The
-// renderer keys its cache on every argument, so the tool decides nothing.
+// generate turns a material's document into Slang (generate.cpp), and
+// libraries lists what it reads beyond the document; texture turns an image
+// into the one file the renderer uploads (texture.cpp). The renderer keys
+// its cache on every argument and on that listing, so the tool decides
+// nothing.
 
 #include "bake.h"
 
@@ -21,6 +24,8 @@ int main(int argc, char **argv) {
     try {
         if (job == "generate" && argc == 4) {
             generate(argv[2], argv[3]);
+        } else if (job == "libraries" && argc == 2) {
+            libraries();
         } else if (job == "texture" && argc == 8) {
             char *end = nullptr;
             unsigned long cap = strtoul(argv[5], &end, 10);
@@ -30,6 +35,7 @@ int main(int argc, char **argv) {
             texture(argv[2], argv[3], argv[4], cap, argv[6], argv[7]);
         } else {
             fprintf(stderr, "usage: bake generate <document.mtlx> <out>\n"
+                            "       bake libraries\n"
                             "       bake texture <source> <space> <encoding> <cap> <config> <out>\n");
             return 2;
         }

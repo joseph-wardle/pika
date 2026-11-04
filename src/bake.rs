@@ -108,8 +108,9 @@ pub struct Bake {
     /// The host's OCIO config, or empty for OpenImageIO's default, through
     /// which the tool converts textures to the working space.
     config: String,
-    /// A hash of the tool's own bytes and its library files: a rebuilt or
-    /// edited tool regenerates everything.
+    /// A hash of the tool's own bytes, its library files and the listing
+    /// it generates from (`bake libraries`): a rebuilt or edited tool, or a
+    /// Houdini update beneath it, regenerates and re-bakes everything.
     tool: u64,
 }
 
@@ -124,6 +125,14 @@ impl Bake {
                 std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?,
             );
         }
+        let output = tool()
+            .arg("libraries")
+            .output()
+            .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
+        if !output.status.success() {
+            return Err(failed(&output));
+        }
+        bytes.extend_from_slice(&output.stdout);
         let root = cache::root()?;
         let (materials, textures) = (root.join("materials"), root.join("textures"));
         for dir in [&materials, &textures] {
@@ -203,12 +212,11 @@ impl Bake {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let tmp = path.with_extension(cache::unique());
-        let output = Command::new(TOOL)
+        let output = tool()
             .arg("texture")
             .arg(source)
             .args([space, encoding, &cap.to_string(), &self.config])
             .arg(&tmp)
-            .env_remove("LD_LIBRARY_PATH")
             .output()
             .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
         if !output.status.success() {
@@ -332,19 +340,25 @@ fn run(document: &Document, dir: &Path) -> Result<(), String> {
     let path = dir.join("document.mtlx");
     std::fs::write(&path, &document.text)
         .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    // A Houdini 21 host's library path holds an older MaterialX of the
-    // same soname; the tool's rpath finds Houdini 22's without it.
-    let output = Command::new(TOOL)
+    let output = tool()
         .arg("generate")
         .arg(&path)
         .arg(dir)
-        .env_remove("LD_LIBRARY_PATH")
         .output()
         .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
     if !output.status.success() {
         return Err(failed(&output));
     }
     Ok(())
+}
+
+/// The tool, ready for its job's arguments.
+fn tool() -> Command {
+    let mut command = Command::new(TOOL);
+    // A Houdini 21 host's library path holds an older MaterialX of the
+    // same soname; the tool's rpath finds Houdini 22's without it.
+    command.env_remove("LD_LIBRARY_PATH");
+    command
 }
 
 /// The tool's complaint, on one line so a warning quoting it stays one.
