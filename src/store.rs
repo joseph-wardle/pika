@@ -339,9 +339,9 @@ impl Interpolation {
 /// that. Only changed values count: a redundant pull moves nothing.
 #[derive(PartialEq, Debug, Default)]
 pub struct Moved {
-    /// A mesh was added, removed or remodelled, or its points, normals or
-    /// texcoord changed size or kind: the layout of every mesh's data is
-    /// rebuilt.
+    /// A mesh was added, removed or remodelled, its points, normals or
+    /// texcoord changed size or kind, or a cage's faceVarying texcoord its
+    /// values: the layout of every mesh's data is rebuilt.
     pub layout: bool,
     /// Meshes whose points changed, keeping their count.
     pub points: BTreeSet<u64>,
@@ -541,12 +541,14 @@ impl Store {
         });
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
         // Values alone may change in place: the interpolation, the count and
-        // the refinement are the layout's.
+        // the refinement are the layout's, as are a cage's faceVarying
+        // values, which its vertices weld by value (`geometry`).
         let reshaped = match (&mesh.texcoord, &texcoord) {
             (Some(Some(old)), Some(new)) => {
                 old.interpolation != new.interpolation
                     || old.values.len() != new.values.len()
                     || old.refined != new.refined
+                    || (new.refined.is_none() && new.interpolation == Interpolation::FaceVarying)
             }
             (Some(None), None) => false,
             _ => true,
@@ -1385,8 +1387,23 @@ mod tests {
             .set_texcoord(a, Some(st(vec![[0.0; 2]; 7], None)))
             .unwrap();
         assert_eq!(store.take_moved(), Moved::default());
+        // A cage's faceVarying values are welded into its vertices, so new
+        // ones move the layout; vertex values move the texcoord alone.
         store
             .set_texcoord(a, Some(st(vec![[1.0; 2]; 7], None)))
+            .unwrap();
+        let moved = store.take_moved();
+        assert!(moved.layout && moved.texcoord.is_empty());
+        let vertex = |values| Texcoord {
+            interpolation: Interpolation::Vertex,
+            ..st(values, None)
+        };
+        store
+            .set_texcoord(a, Some(vertex(vec![[0.0; 2]; 4])))
+            .unwrap();
+        assert!(store.take_moved().layout);
+        store
+            .set_texcoord(a, Some(vertex(vec![[1.0; 2]; 4])))
             .unwrap();
         let moved = store.take_moved();
         assert_eq!(

@@ -885,8 +885,9 @@ struct Faces<'a> {
 /// part, split into triangles by a fan from each face's first corner, its
 /// points' corners, its vertices' corners and, when refined, its stencils
 /// and its texcoord's. A vertex is a unique triple of point, normal and
-/// texcoord; each index counts from the start of its buffer. Returns the
-/// points drawn and the parts.
+/// texcoord, a faceVarying texcoord's corners welded by value; each index
+/// counts from the start of its buffer. Returns the points drawn and the
+/// parts.
 fn triangulate(
     mesh: &Mesh,
     first: Firsts,
@@ -984,6 +985,22 @@ fn triangulate(
         None => point_corners(&faces, topology.left_handed, first.point, tables),
     }
 
+    // A faceVarying texcoord's corners agreeing on a value are one vertex,
+    // as the delegate welds a subdivided mesh's before refining it, so the
+    // tangent pass sums the triangles on both sides of an edge the faces
+    // agree across; where they disagree, the seam keeps them apart. Each
+    // corner reads the first corner's value equal to its own (bitwise, as
+    // the delegate compares); the point is the vertex's own.
+    let welded_texcoord: Vec<u32> = match texcoord {
+        Some(t) if t.refined.is_none() && t.interpolation == Interpolation::FaceVarying => {
+            let mut first_of: HashMap<[u32; 2], u32> = HashMap::new();
+            (t.values.iter().enumerate())
+                .map(|(c, v)| *first_of.entry(v.map(f32::to_bits)).or_insert(c as u32))
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
     let first_vertex = tables.vertices.len();
     let first_index = tables.indices.len();
     let mut welded: HashMap<[u32; 3], u32> = HashMap::new();
@@ -1010,6 +1027,7 @@ fn triangulate(
     // A refined texcoord says which refined value each refined corner reads.
     let texcoord_index = |t: &Texcoord, point: i32, c: usize, face: usize| match &t.refined {
         Some(r) => r.face_vertex_indices[c] as usize,
+        None if t.interpolation == Interpolation::FaceVarying => welded_texcoord[c] as usize,
         None => index(t.interpolation, point, c, face),
     };
     let mut holes = vec![false; counts.len()];
@@ -1644,30 +1662,39 @@ mod tests {
 
     #[test]
     fn vertices_weld_over_texcoord_too() {
-        let st = |interpolation, count| {
+        let st = |interpolation, values: Vec<[f32; 2]>| {
             Some(Texcoord {
                 name: "st".into(),
                 interpolation,
-                values: vec![[0.5, 0.5]; count],
+                values,
                 refined: None,
             })
         };
         let mut m = mesh(Scheme::None, None);
-        m.texcoord = Some(st(Interpolation::Vertex, 5));
+        m.texcoord = Some(st(Interpolation::Vertex, vec![[0.5, 0.5]; 5]));
         let t = tables(&m).unwrap();
         assert_eq!(t.vertices.len() - 1, 5);
         assert_eq!(t.vertex_texcoord[1..], [40, 41, 42, 43, 44]);
-        // A face-varying texcoord splits the shared points, as face-varying
-        // normals do, even under welded vertex normals.
+        // A face-varying texcoord welds by value: the triangle's corners at
+        // points 1 and 2 (corners 4 and 6) read the quad's values there, so
+        // they are the quad's vertices; its own corner at point 4 is new.
+        let (a, b, c, d, e) = ([0., 0.], [1., 0.], [1., 1.], [0., 1.], [2., 0.]);
         let mut m = mesh(Scheme::None, normals(Interpolation::Vertex, 5));
-        m.texcoord = Some(st(Interpolation::FaceVarying, 7));
+        m.texcoord = Some(st(Interpolation::FaceVarying, vec![a, b, c, d, b, e, c]));
+        let t = tables(&m).unwrap();
+        assert_eq!(t.vertices.len() - 1, 5);
+        assert_eq!(t.vertex_texcoord[1..], [40, 41, 42, 43, 45]);
+        assert_eq!(t.indices, [0, 1, 2, 0, 2, 3, 1, 4, 2]);
+        // The control: a seam, where the triangle reads other values at the
+        // shared points, splits them, as face-varying normals do.
+        m.texcoord = Some(st(Interpolation::FaceVarying, vec![a, b, c, d, e, e, e]));
         let t = tables(&m).unwrap();
         assert_eq!(t.vertices.len() - 1, 7);
         assert_eq!(t.vertices[5..], [[11, 21], [14, 24], [12, 22]]);
-        assert_eq!(t.vertex_texcoord[5..], [44, 45, 46]);
-        // The controls: the wrong count is refused, as for normals.
+        assert_eq!(t.vertex_texcoord[5..], [44, 44, 44]);
+        // The wrong count is refused, as for normals.
         let mut m = mesh(Scheme::None, None);
-        m.texcoord = Some(st(Interpolation::FaceVarying, 5));
+        m.texcoord = Some(st(Interpolation::FaceVarying, vec![[0.5, 0.5]; 5]));
         let error = tables(&m).err().unwrap();
         assert!(
             error.contains("5 st values") && error.contains("needs 7"),

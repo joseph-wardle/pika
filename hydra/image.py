@@ -72,7 +72,9 @@ What the reference encodes:
   the directions its mesh's st u and v increase in, solved from each of
   its drawn triangles' edges and st deltas in the mesh's own space and
   summed over them, a vertex being a unique point, normal and st, as Pika
-  welds them; the tangent is the u direction made orthogonal to the
+  welds them, a faceVarying st by value, so an edge whose faces agree on
+  it sums both faces' triangles and a seam keeps them apart
+  (hydra/images/bent.usda); the tangent is the u direction made orthogonal to the
   vertex's normal, and the bitangent the normal's cross with it, negated
   where the mapping is mirrored (the summed v direction is against the
   cross). Both move with the mesh's transform, not its normals' inverse
@@ -181,6 +183,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
+            "faceVarying st corners kept apart",
             "failed materials drawn clay", "base weight ignored", "emission ignored",
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "subsets ignored", "subset faces of the cage", "st indices ignored",
@@ -823,8 +826,11 @@ def triangles(stage, time, host, control=None):
         frames = {}
         if any(l.normal for l in looks):
             def key(c):
-                return (indices[c], tuple(value(normals, interpolation, c)),
-                        tuple(value(st_values, st_interpolation, c)))
+                st = tuple(value(st_values, st_interpolation, c))
+                if (control == "faceVarying st corners kept apart" and not subdivided
+                        and st_interpolation == UsdGeom.Tokens.faceVarying):
+                    st = c
+                return indices[c], tuple(value(normals, interpolation, c)), st
 
             u, v = tangent_sums(points, counts, indices, holes, key,
                                 lambda c: value(st_values, st_interpolation, c))
