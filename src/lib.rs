@@ -4,6 +4,7 @@
 
 mod abi;
 mod bake;
+mod build;
 mod cache;
 pub mod commands;
 mod cull;

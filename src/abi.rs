@@ -364,7 +364,8 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
 }
 
 /// Renders one frame into the render buffers it binds, and writes to
-/// `*converged` whether they now hold this frame rather than the one before.
+/// `*converged` whether they now hold this frame rather than the one
+/// before, with no material build still out.
 ///
 /// # Safety
 /// `renderer` must be live, `frame` valid for reads, each bound AOV's

@@ -4,6 +4,7 @@
 //! determines it, so nothing in it is ever stale, only unused.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub fn root() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("PIKA_CACHE") {
@@ -27,11 +28,22 @@ pub fn fnv1a(parts: &[&[u8]]) -> u64 {
     hash
 }
 
+/// A temporary name's suffix no other process or thread writing the cache
+/// uses, so an entry is written whole under it and renamed into place.
+pub fn unique() -> String {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "tmp{}.{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
 /// Writes `bytes` to `path` through a temporary name beside it, so another
 /// process reads the whole file or none.
 pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = path.with_file_name(format!("{name}.tmp{}", std::process::id()));
+    let tmp = path.with_file_name(format!("{name}.{}", unique()));
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))

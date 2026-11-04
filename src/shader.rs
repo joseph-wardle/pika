@@ -77,7 +77,8 @@ pub fn surface(dir: &Path) -> Result<Surface, String> {
         let path = dir.join("surface.slang");
         // Both land under temporary names and are renamed into place, the
         // SPIR-V last, so another process sees a complete pair or none.
-        let tmp = |name: &str| dir.join(format!("{key}.tmp{}.{name}", std::process::id()));
+        let unique = cache::unique();
+        let tmp = |name: &str| dir.join(format!("{key}.{unique}.{name}"));
         let (out, reflected) = (tmp("spv"), tmp("json"));
         let mut args = vec![
             path.to_str().unwrap(),

@@ -88,6 +88,11 @@ pub struct Frame<'a> {
 /// The depth AOV's clear value: OpenGL's far plane.
 const FAR: f32 = 1.0;
 
+/// How long a call with nothing else to draw waits for a material build to
+/// land: a host rendering until converged draws the clay frames at most
+/// this often, and usdview stays responsive while paused.
+const WAIT: Duration = Duration::from_millis(16);
+
 // One instance per process: plugins are never unloaded, and each render
 // delegate's device borrows it.
 static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
@@ -169,6 +174,7 @@ struct Pending {
     latent: bool,
     compiled: usize,
     baked: usize,
+    pending: usize,
 }
 
 impl Renderer {
@@ -233,7 +239,7 @@ impl Renderer {
 
     /// Draws the store's meshes into the frame's data window, and copies
     /// each bound AOV into its render buffer. Returns whether the buffers
-    /// now hold this frame.
+    /// now hold this frame, with no material build still out.
     ///
     /// While frames change, each call hands back the frame before and leaves
     /// this one on the GPU, so its work overlaps the host's until the next
@@ -241,7 +247,8 @@ impl Renderer {
     /// series with the host's own frame time. A call that changes nothing
     /// waits for the frame on the GPU and returns true. A frame drawn into
     /// buffers that do not hold the last frame is drawn and waited for at
-    /// once.
+    /// once. While a build is out, a call that changes nothing else waits
+    /// `WAIT` for it, draws if it landed and returns false.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
@@ -307,8 +314,11 @@ impl Renderer {
             self.collect(pending, &buffers, &mut aovs)?;
         }
         let placed = self.placed.as_ref();
-        if moved == Moved::default() && placed == Some(&(buffers, inputs.clone())) {
-            return Ok(true);
+        if moved == Moved::default()
+            && placed == Some(&(buffers, inputs.clone()))
+            && !self.shade.builder.wait(WAIT)?
+        {
+            return Ok(self.shade.builder.is_empty());
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
@@ -388,13 +398,14 @@ impl Renderer {
             latent,
             compiled: shading.compiled,
             baked: shading.baked,
+            pending: shading.pending,
         };
         if latent {
             self.pending = Some(pending);
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(true)
+        Ok(self.shade.builder.is_empty())
     }
 
     /// Waits for the pending frame and copies it into `aovs`, if they are
@@ -460,6 +471,7 @@ impl Renderer {
             latent: pending.latent,
             compiled: pending.compiled,
             baked: pending.baked,
+            pending: pending.pending,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

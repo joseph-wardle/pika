@@ -16,13 +16,15 @@
 # scene's .py script (if any) on husk's stage between them, and compares
 # Pika's store dump with the scene's .dump, which was written by hand. Each
 # run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
-# pass timed and the driver's memory budget read, and frame 2 must have
+# pass timed and the driver's memory budget read, frame 2 must have
 # compiled a surface and baked a texture only where the edit calls for one,
-# and a material that cannot be built must be warned of once.
+# a material must be pending while its build is out and not after, and a
+# material that cannot be built must be warned of once.
 #
-# Last it renders hydra/scenes/cube.usda through UsdImagingGL in hython on
-# the same display (hydra/engine.py), as usdview renders, and checks that the
-# host sees Pika's stats through Hydra's render stats.
+# Last it renders hydra/scenes/cube.usda and painted.usda through
+# UsdImagingGL in hython on the same display (hydra/engine.py), as usdview
+# renders, and checks that the host sees Pika's stats through Hydra's render
+# stats and clay where a material is still being built.
 #
 # Materials need the bake tool, built against Houdini 22 whichever Houdini
 # hosts the delegate (BAKE_HFS), and the shaders it generates go to a cache
@@ -77,19 +79,26 @@ store_after() {
     awk -v header="sync $1" '/^sync /{ on = ($0 == header); next } on' "$2"
 }
 
-# counts <stats>: the surfaces compiled and textures baked for frame 1, then
-# for frame 2: the frames after the second sync.
+# counts <stats> <edit>: the surfaces compiled and textures baked for frame
+# 1, then for frame 2: the frames from the edit's sync on.
 counts() {
-    awk '/^sync /{ f = ($2 == 1) ? 1 : 2; next }
+    awk -v edit="$2" '/^sync /{ f = ($2 < edit) ? 1 : 2; next }
         /^frame /{ for (i = 3; i < NF; i += 2) {
             if ($i == "compiled_surfaces") c[f] += $(i + 1)
             if ($i == "baked_textures") b[f] += $(i + 1) } }
         END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
 }
 
-# fixture <scene.usda>: frame 1 and frame 2 must each match their expected
-# store. Frame 2 must also differ from frame 1's expectation, so a store left
-# stale by the edit would fail.
+# pending <stats>: the materials pending on the first frame and on the last.
+pending() {
+    awk '/^frame /{ for (i = 3; i < NF; i += 2) if ($i == "pending_materials") {
+            if (!seen) first = $(i + 1); seen = 1; last = $(i + 1) } }
+        END { print first + 0, last + 0 }' "$1"
+}
+
+# fixture <scene.usda>: frame 1 and the edit must each match their expected
+# store. The edit must differ from frame 1's store, so a store left stale by
+# the edit would fail.
 fixture() {
     local name dir=$ROOT/hydra/fixtures script=()
     name=$(basename "$1" .usda)
@@ -104,17 +113,29 @@ fixture() {
     # between USD 25 and 26; and assets resolve under this checkout.
     sed -i -E -e 's|/UsdNiPropagatedPrototypes/[^/]+/|/UsdNiPropagatedPrototypes/#/|g' \
         -e 's/ForInstancer[0-9a-f]+/ForInstancer#/g' -e "s|$ROOT/||g" "$OUT/fixtures/$name.dump"
-    diff -u "$dir/$name.dump" <(awk '/^sync /{ on = ($2 <= 2) } on' "$OUT/fixtures/$name.dump") ||
+    # husk syncs and renders a frame again until Pika reports it delivered,
+    # which waits for its materials' builds, so the edit is the first sync
+    # whose store differs from sync 1's; the syncs before and after it must
+    # change nothing.
+    local n edit= syncs
+    syncs=$(grep -c '^sync ' "$OUT/fixtures/$name.dump")
+    for n in $(seq 2 "$syncs"); do
+        if [ "$(store_after "$n" "$OUT/fixtures/$name.dump")" != "$(store_after 1 "$OUT/fixtures/$name.dump")" ]; then
+            edit=$n
+            break
+        fi
+    done
+    if [ -z "$edit" ]; then
+        fail "$name: no sync changed the store, so frame 2 is frame 1"
+        return
+    fi
+    diff -u "$dir/$name.dump" <(printf 'sync 1\n%s\nsync 2\n%s\n' \
+        "$(store_after 1 "$OUT/fixtures/$name.dump")" "$(store_after "$edit" "$OUT/fixtures/$name.dump")") ||
         fail "$name: the store differs from $name.dump"
-    # husk renders frame 2 again until Pika reports it delivered; those
-    # renders' syncs must change nothing.
-    local n
-    for n in $(seq 3 "$(grep -c '^sync ' "$OUT/fixtures/$name.dump")"); do
-        [ "$(store_after "$n" "$OUT/fixtures/$name.dump")" = "$(store_after 2 "$OUT/fixtures/$name.dump")" ] ||
+    for n in $(seq $((edit + 1)) "$syncs"); do
+        [ "$(store_after "$n" "$OUT/fixtures/$name.dump")" = "$(store_after "$edit" "$OUT/fixtures/$name.dump")" ] ||
             fail "$name: sync $n, a render repeated for frame 2, changed the store"
     done
-    [ "$(store_after 2 "$OUT/fixtures/$name.dump")" != "$(store_after 1 "$dir/$name.dump")" ] ||
-        fail "$name: frame 2's store matches frame 1's expectation"
     python3 -I "$ROOT/hydra/stats.py" "$OUT/fixtures/$name.stats" >"$OUT/fixtures/$name.summary" ||
         fail "$name: the stats do not summarise (see $OUT/fixtures/$name.summary)"
     grep -q "^  gpu_readback " "$OUT/fixtures/$name.summary" ||
@@ -123,24 +144,31 @@ fixture() {
         fail "$name: the summary has no memory budget"
     # An edit to a value or an asset path compiles nothing; one to the
     # network's structure, the primvar a reader names included, compiles its
-    # surface; a texture is baked once per file. The scenes that edit a material are each other's control, and
-    # each must compile in one frame, so a counter that never moves fails.
-    # A material that cannot be built is warned of when it is tried, which
-    # is once, though husk renders a frame more than once; the repair
-    # compiles it, with no second warning.
-    local first=0 edit="0 0" warnings=0 compiled _ second
+    # surface; a texture is baked once per file. The scenes that edit a
+    # material are each other's control, and each must compile within its
+    # frame, so a counter that never moves fails. A material that cannot be
+    # built is warned of when its build lands, which is once, though husk
+    # renders a frame more than once; the repair compiles it, with no second
+    # warning. Every material with a surface in frame 1's expected store is
+    # built off the render thread and pending on the first frame, built or
+    # failed, and none is pending on the last; a scene without one is the
+    # control.
+    local first=0 edited="0 0" warnings=0 built compiled _ second
     case $name in
-        network) first=1 edit="0 1" ;;
-        rewired) first=1 edit="1 0" ;;
-        broken) edit="1 0" warnings=1 ;;
-        texcoord) first=1 edit="1 0" ;;
+        network) first=1 edited="0 1" ;;
+        rewired) first=1 edited="1 0" ;;
+        broken) edited="1 0" warnings=1 ;;
+        texcoord) first=1 edited="1 0" ;;
         welded) first=1 ;;
     esac
-    read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats")"
-    [ "$second" = "$edit" ] ||
-        fail "$name: frame 2 compiled and baked $second, not $edit"
+    built=$(awk '/^sync 2/{ exit } /^  surface / && $2 != "none" { n++ } END { print n + 0 }' "$dir/$name.dump")
+    read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats" "$edit")"
+    [ "$second" = "$edited" ] ||
+        fail "$name: frame 2 compiled and baked $second, not $edited"
     [ "$compiled" = "$first" ] ||
         fail "$name: frame 1 compiled $compiled surfaces, not $first"
+    [ "$(pending "$OUT/fixtures/$name.stats")" = "$built 0" ] ||
+        fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
 }
@@ -165,7 +193,7 @@ done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 # Each fixture's check reports to a file of its own; one that stops short of
 # the end exits nonzero.
-export -f fixture clean store_after counts fail
+export -f fixture clean store_after counts pending fail
 export OUT ROOT
 printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \
     'set -euo pipefail; fixture "$1" >"$OUT/fixtures/$(basename "$1" .usda).report" 2>&1' _ {} ||
@@ -180,8 +208,9 @@ first=${fixtures[0]}
 ! python3 -I "$ROOT/hydra/stats.py" <(sed '0,/^frame /s/ [a-z_]* [0-9.]*$//' "$OUT/fixtures/$(basename "$first" .usda).stats") \
     >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
 
-DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" >"$OUT/engine.log" 2>&1 ||
-    fail "the host does not see Pika's stats (see $OUT/engine.log)"
+DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" \
+    "$ROOT/hydra/scenes/painted.usda" >"$OUT/engine.log" 2>&1 ||
+    fail "the host does not see Pika's stats, or a pending material is not clay (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

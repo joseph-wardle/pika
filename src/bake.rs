@@ -88,6 +88,7 @@ pub struct Generated {
     pub manifest: Manifest,
 }
 
+#[derive(Clone)]
 pub struct Bake {
     /// The cache's `materials` directory, one entry per document and tool.
     materials: PathBuf,
@@ -144,7 +145,7 @@ impl Bake {
     /// Runs the tool into a directory beside `dir`, then moves it into
     /// place, so `dir` exists only once it is complete.
     fn run(&self, document: &Document, dir: &Path) -> Result<(), String> {
-        let tmp = dir.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = dir.with_extension(cache::unique());
         let result = run(document, &tmp).and_then(|()| match std::fs::rename(&tmp, dir) {
             Ok(()) => Ok(()),
             // Another process generated it meanwhile.
@@ -175,7 +176,7 @@ impl Bake {
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let tmp = path.with_extension(cache::unique());
         let output = Command::new(TOOL)
             .arg("texture")
             .arg(source)

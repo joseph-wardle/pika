@@ -2,20 +2,20 @@
 //! pixel stage and the vertex stage written for it, each material's
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by a
-//! headlight.
+//! headlight. A material is built off the render thread (`build`) and drawn
+//! clay until its build lands; a value edit writes its block in place.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use ash::vk;
 
 use crate::bake::{Bake, Manifest};
-use crate::cache;
+use crate::build::{self, Builder, Built};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
-use crate::material::{self, Document};
+use crate::material::{self, Source};
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
-use crate::shader;
 use crate::store::{Moved, Network, Store};
 use crate::surface::{self, Layout};
 use crate::target;
@@ -26,18 +26,18 @@ use crate::view::View;
 pub struct Shade {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
-    bake: Bake,
+    pub builder: Builder,
     textures: Textures,
     /// By document hash.
     surfaces: BTreeMap<u64, Surface>,
-    /// By the store's material id.
+    /// By the store's material id; a material whose build is out has no
+    /// entry, and is drawn clay.
     materials: BTreeMap<u64, Uniforms>,
     /// The materials that failed to build, each warned of once when it
     /// did; `update` tries one again only when its network moves or the
     /// cap changes.
     failed: BTreeSet<u64>,
-    /// The texture cap the materials' textures were baked under; 0 before
-    /// the first frame.
+    /// The texture cap of the frame; 0 before the first.
     cap: u32,
     /// `material::clay`, drawn where `materials` has no entry.
     clay: Uniforms,
@@ -64,16 +64,24 @@ struct Uniforms {
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
+    /// What the textures were baked from, in the surface's order, and under
+    /// which cap: a material edit that keeps them and the document only
+    /// rewrites the block.
+    sources: Vec<Source>,
+    cap: u32,
     /// The baked textures bound, in the surface's order.
     textures: Vec<PathBuf>,
 }
 
 /// What one frame's `update` did.
+#[derive(Default)]
 pub struct Update {
-    /// Surfaces slangc compiled now; the cache answered for the rest.
+    /// Surfaces slangc compiled; the cache answered for the rest.
     pub compiled: usize,
-    /// Textures the bake tool baked now, likewise.
+    /// Textures the bake tool baked, likewise.
     pub baked: usize,
+    /// Materials whose build is out, drawn clay.
+    pub pending: usize,
 }
 
 impl Shade {
@@ -87,7 +95,7 @@ impl Shade {
             .map_err(|e| format!("the pink material: {e}"))?;
         Ok(Self {
             device: device.raw.clone(),
-            bake,
+            builder: Builder::new(bake),
             textures,
             surfaces,
             materials: BTreeMap::new(),
@@ -98,8 +106,8 @@ impl Shade {
         })
     }
 
-    /// Builds one of Pika's own networks, which has no textures, into
-    /// `surfaces`, and its uniforms.
+    /// Builds one of Pika's own networks, which has no textures, on this
+    /// thread into `surfaces`, and its uniforms.
     fn builtin(
         bake: &Bake,
         device: &gpu::Device,
@@ -107,7 +115,11 @@ impl Shade {
         network: &Network,
     ) -> Result<Uniforms, String> {
         let document = material::document(network)?.expect("Pika's networks have a surface");
-        let (surface, _) = Shade::build(bake, device, &document)?;
+        // No textures, so no cap applies.
+        let output = build::run(bake, &document, network, 0, false)?;
+        let compiled = output.surface.expect("not held");
+        let layout = surface::layout(&compiled.reflection)?;
+        let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
         let surface = surfaces.entry(document.hash).or_insert(surface);
         let mut uniforms = Uniforms::new(device, surface, document.hash)?;
         let (manifest, layout) = (&surface.manifest, &surface.layout);
@@ -122,13 +134,14 @@ impl Shade {
         Ok(uniforms)
     }
 
-    /// Builds the surface of each material whose network changed, or of
-    /// every material when the texture cap `cap` changed, bakes and loads
-    /// its textures under the cap and writes its uniforms, then every
-    /// material's eye and headlight from `camera`. A material that cannot
-    /// be built is warned of and drawn pink; the frame goes on. Records
-    /// into `cb`, outside rendering, the uploads. No GPU work may be
-    /// pending.
+    /// Rewrites the block of each material whose network changed its
+    /// values alone, and submits a build of each whose structure, textures
+    /// or, when the texture cap `cap` changed, cap did, to be drawn clay
+    /// until it lands; installs the builds that landed, loading their
+    /// textures; then writes every material's eye and headlight from
+    /// `camera`. A material that cannot be built is warned of and drawn
+    /// pink; the frame goes on. Records into `cb`, outside rendering, the
+    /// uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -149,10 +162,8 @@ impl Shade {
         self.materials
             .retain(|id, _| store.materials().contains_key(id));
         self.failed.retain(|id| store.materials().contains_key(id));
-        let mut update = Update {
-            compiled: 0,
-            baked: 0,
-        };
+        (self.builder).retain(|id| store.materials().contains_key(id));
+        let mut update = Update::default();
         let ids: Vec<u64> = if cap == self.cap {
             moved.materials.iter().copied().collect()
         } else {
@@ -167,12 +178,24 @@ impl Shade {
                 continue;
             };
             self.failed.remove(&id);
-            if let Err(e) = self.material(device, id, network, cb, &mut update) {
+            if let Err(e) = self.material(id, network) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.materials.remove(&id);
                 self.failed.insert(id);
             }
         }
+        for built in self.builder.drain() {
+            let Some(material) = store.materials().get(&built.id) else {
+                continue;
+            };
+            let id = built.id;
+            if let Err(e) = self.install(device, built, cb, &mut update) {
+                eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
+                self.materials.remove(&id);
+                self.failed.insert(id);
+            }
+        }
+        update.pending = self.builder.len();
         let used: BTreeSet<PathBuf> = (self.materials.values())
             .flat_map(|u| u.textures.iter().cloned())
             .collect();
@@ -192,67 +215,85 @@ impl Shade {
         Ok(update)
     }
 
-    /// Builds the surface of material `id`'s `network` unless it is built,
-    /// bakes and loads its textures and writes its uniforms, counting into
-    /// `update` what was done now. A network with no surface leaves the
-    /// material drawn clay.
-    fn material(
-        &mut self,
-        device: &gpu::Device,
-        id: u64,
-        network: &Network,
-        cb: vk::CommandBuffer,
-        update: &mut Update,
-    ) -> Result<(), String> {
+    /// Rewrites material `id`'s block from `network` when it keeps its
+    /// document, textures and cap, else submits its build and drops it,
+    /// drawn clay until the build lands. A network with no surface leaves
+    /// the material drawn clay.
+    fn material(&mut self, id: u64, network: &Network) -> Result<(), String> {
         let Some(document) = material::document(network)? else {
+            self.builder.forget(id);
             self.materials.remove(&id);
             return Ok(());
         };
         // A network reading two primvars is refused: the vertex stage would
         // feed both from the mesh's one texcoord.
         material::texcoord(network)?;
-        if !self.surfaces.contains_key(&document.hash) {
-            let (surface, fresh) = Shade::build(&self.bake, device, &document)?;
-            update.compiled += usize::from(fresh);
-            self.surfaces.insert(document.hash, surface);
-        }
-        let surface = &self.surfaces[&document.hash];
-        let uniforms = match self.materials.get_mut(&id) {
-            Some(u) if u.hash == document.hash => u,
-            _ => {
-                let u = Uniforms::new(device, surface, document.hash)?;
-                self.materials.insert(id, u);
-                self.materials.get_mut(&id).unwrap()
+        if let Some(uniforms) = self.materials.get_mut(&id)
+            && uniforms.hash == document.hash
+            && uniforms.cap == self.cap
+        {
+            let surface = &self.surfaces[&document.hash];
+            if build::sources(&surface.manifest, &document, network)? == uniforms.sources {
+                self.builder.forget(id);
+                return surface::pack(
+                    &surface.manifest,
+                    &surface.layout,
+                    &document,
+                    network,
+                    uniforms.buffer.bytes(),
+                );
             }
-        };
+        }
+        self.materials.remove(&id);
+        let held = self.surfaces.contains_key(&document.hash);
+        (self.builder).submit(id, document, network.clone(), self.cap, held)
+    }
+
+    /// Installs a build that landed: its surface unless held, its uniforms
+    /// and its textures, loaded now; counts into `update` what the build
+    /// did.
+    fn install(
+        &mut self,
+        device: &gpu::Device,
+        built: Built,
+        cb: vk::CommandBuffer,
+        update: &mut Update,
+    ) -> Result<(), String> {
+        let output = built.result?;
+        let hash = built.document.hash;
+        if let Some(compiled) = output.surface
+            && !self.surfaces.contains_key(&hash)
+        {
+            update.compiled += usize::from(compiled.compiled);
+            let layout = surface::layout(&compiled.reflection)?;
+            let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
+            self.surfaces.insert(hash, surface);
+        }
+        let surface = &self.surfaces[&hash];
         let (manifest, layout) = (&surface.manifest, &surface.layout);
+        let mut uniforms = Uniforms::new(device, surface, hash)?;
         surface::pack(
             manifest,
             layout,
-            &document,
-            network,
+            &built.document,
+            &built.network,
             uniforms.buffer.bytes(),
         )?;
         let mut bindings = Vec::new();
-        uniforms.textures.clear();
-        for name in &manifest.textures {
-            let (index, input) = surface::node_input(name)?;
-            let path = (document.nodes.get(index))
-                .ok_or_else(|| format!("{name} names a node the document lacks"))?;
-            let node = &network.nodes[path];
-            let source = material::source(node, material::store_input(node, input))
-                .map_err(|e| format!("{path}'s {input} {e}"))?;
-            let file = Path::new(&source.file);
-            let (texture, fresh) =
-                (self.bake).texture(file, &source.space, source.encoding, self.cap)?;
-            update.baked += usize::from(fresh);
-            let binding = self.textures.load(device, cb, &texture, file)?;
+        for (name, baked) in manifest.textures.iter().zip(&output.textures) {
+            let (index, _) = surface::node_input(name)?;
+            update.baked += usize::from(baked.fresh);
+            let binding =
+                (self.textures).load(device, cb, &baked.path, &baked.texture, &baked.source)?;
             let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
             let sampler = self.textures.sampler(modes)?;
             bindings.push((binding, sampler));
-            uniforms.textures.push(texture);
+            uniforms.textures.push(baked.path.clone());
         }
         uniforms.bind(layout, &bindings);
+        uniforms.sources = build::sources(manifest, &built.document, &built.network)?;
+        uniforms.cap = built.cap;
+        self.materials.insert(built.id, uniforms);
         Ok(())
     }
 
@@ -306,25 +347,6 @@ impl Shade {
                 d.cmd_draw_indexed_indirect(cb, view.records(), offset, group.count, stride);
             }
         }
-    }
-
-    /// Generates, compiles and builds `document`'s surface, and whether
-    /// slangc ran for it.
-    fn build(
-        bake: &Bake,
-        device: &gpu::Device,
-        document: &Document,
-    ) -> Result<(Surface, bool), String> {
-        let generated = bake.generate(document)?;
-        let stage = surface::vertex_stage(&generated.manifest)?;
-        let path = generated.dir.join("surface.slang");
-        if std::fs::read_to_string(&path).ok().as_deref() != Some(&stage) {
-            cache::write(&path, stage.as_bytes())?;
-        }
-        let compiled = shader::surface(&generated.dir)?;
-        let layout = surface::layout(&compiled.reflection)?;
-        let surface = Surface::new(device, &compiled.shader.spirv, generated.manifest, layout)?;
-        Ok((surface, compiled.compiled))
     }
 
     pub fn memory(&self) -> gpu::Memory {
@@ -497,6 +519,8 @@ impl Uniforms {
             buffer,
             pool,
             set: vk::DescriptorSet::null(),
+            sources: Vec::new(),
+            cap: 0,
             textures: Vec::new(),
         };
         let set_layouts = [surface.set_layout];

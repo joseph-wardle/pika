@@ -319,20 +319,20 @@ impl Textures {
         self.staging.clear();
     }
 
-    /// The baked texture at `path`, loaded now unless it is. A bake
-    /// smaller than its `source` was capped, which the load warns of: once,
-    /// as the texture stays loaded while a material uses it.
+    /// The baked texture at `path`, read as `texture`, loaded now unless it
+    /// is. A bake smaller than its `source` was capped, which the load
+    /// warns of: once, as the texture stays loaded while a material uses it.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         path: &Path,
+        texture: &Texture,
         source: &Path,
     ) -> Result<Binding, String> {
         if let Some(image) = self.images.get(path) {
             return Ok(image.binding());
         }
-        let texture = read(path)?;
         if texture.source != [texture.width, texture.height] {
             eprintln!(
                 "pika: warning: texture {} is {}×{}, capped to {}×{} by pika:textureCap",
@@ -343,8 +343,8 @@ impl Textures {
                 texture.height
             );
         }
-        let (image, staging) = Image::new(device, &texture)?;
-        image.record(cb, &staging, &texture);
+        let (image, staging) = Image::new(device, texture)?;
+        image.record(cb, &staging, texture);
         self.staging.push(staging);
         let binding = image.binding();
         self.images.insert(path.to_owned(), image);

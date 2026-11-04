@@ -271,7 +271,8 @@ int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 // Pixels outside the data window are left as they are.
 // While frames change, the buffers get the frame before this one, which
 // leaves this one's GPU work running while the host works; `*converged` is
-// false until a call with nothing changed delivers it.
+// false until a call with nothing changed delivers it, and while a material
+// is still being built off the render thread, drawn clay meanwhile.
 int pika_render(const pika_renderer *renderer, const pika_frame *frame, bool *converged);
 
 #ifdef __cplusplus
