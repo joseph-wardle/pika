@@ -561,13 +561,13 @@ impl Store {
         Ok(())
     }
 
-    /// The float2 primvar mesh `id`'s material reads, the texcoord the
-    /// delegate fetches for it: none when no material is bound, the
-    /// material is not in the store or has no network, or its network
-    /// reads none. A network reading two is refused when it is built
-    /// (`shade` warns and draws it pink), so its meshes carry none.
-    /// The float2 primvar the mesh's materials read, the subsets' included,
-    /// which must agree: the mesh is drawn with one texcoord.
+    /// The float2 primvar mesh `id`'s materials read, the subsets'
+    /// included, the texcoord the delegate fetches for it: none when no
+    /// material is bound, or none bound is in the store with a network
+    /// whose surface reads one. The materials must agree on it, since the
+    /// mesh is drawn with one texcoord. A network reading two is refused
+    /// when it is built (`shade` warns and draws it pink), so its meshes
+    /// carry none.
     pub fn texcoord_name(&self, id: u64) -> Result<Option<String>, String> {
         let mesh = self.meshes.get(&id).ok_or_else(|| stale("mesh", id))?;
         let subsets = (mesh.topology.iter()).flat_map(|t| t.subsets.iter().map(|s| &s.material));

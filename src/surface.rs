@@ -150,17 +150,24 @@ pub fn pack(
         };
         let offset = *(layout.offsets.get(&uniform.name))
             .ok_or_else(|| format!("the reflection has no uniform {}", uniform.name))?;
-        let (index, input) = node_input(&uniform.name)?;
-        let path = (document.nodes.get(index))
-            .ok_or_else(|| format!("uniform {} names a node the document lacks", uniform.name))?;
-        let node = &network.nodes[path];
-        let words = match node.params.get(material::store_input(node, input)) {
-            // A text value (a wrap mode) went into the document, and the
-            // generator resolved it into the initial value.
-            Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
-            Some(value) => shape
-                .words(value)
-                .map_err(|e| format!("{path}'s {input} {e}"))?,
+        // The generator's own node for a geomprop read by default (UV0's
+        // texcoord index) is in no document: its value is the initial one.
+        let words = if uniform.name.starts_with("geomprop_") {
+            shape.initial(&uniform.initial)?
+        } else {
+            let (index, input) = node_input(&uniform.name)?;
+            let path = (document.nodes.get(index)).ok_or_else(|| {
+                format!("uniform {} names a node the document lacks", uniform.name)
+            })?;
+            let node = &network.nodes[path];
+            match node.params.get(material::store_input(node, input)) {
+                // A text value (a wrap mode) went into the document, and the
+                // generator resolved it into the initial value.
+                Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
+                Some(value) => shape
+                    .words(value)
+                    .map_err(|e| format!("{path}'s {input} {e}"))?,
+            }
         };
         for (i, word) in words.iter().enumerate() {
             bytes[offset + 4 * i..offset + 4 * i + 4].copy_from_slice(&word.to_ne_bytes());
@@ -345,6 +352,33 @@ mod tests {
         assert_eq!(address_modes(&l, &bytes, 0), [2, 2], "no texture: periodic");
         assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
         assert!(node_input("u_viewPosition").is_err());
+
+        // The generator's node for a default geomprop keeps its initial
+        // value; any other uniform is a node's input.
+        let mut extra = bake::manifest(bake::tests::FIXTURE).unwrap();
+        let mut extended = layout(REFLECTION).unwrap();
+        extended
+            .offsets
+            .insert("geomprop_UV0_index".into(), extended.size);
+        extended
+            .offsets
+            .insert("u_viewPosition".into(), extended.size + 4);
+        extended.size += 8;
+        let mut bytes = vec![0; extended.size];
+        extra.uniforms.push(bake::Uniform {
+            name: "geomprop_UV0_index".into(),
+            kind: "integer".into(),
+            initial: "7".into(),
+        });
+        pack(&extra, &extended, &document, &network, &mut bytes).unwrap();
+        assert_eq!(bytes[l.size], 7);
+        extra.uniforms.push(bake::Uniform {
+            name: "u_viewPosition".into(),
+            kind: "vector3".into(),
+            initial: "0, 0, 0".into(),
+        });
+        let error = pack(&extra, &extended, &document, &network, &mut bytes).unwrap_err();
+        assert!(error.contains("not a node's input"), "{error}");
 
         frame(&l, &mut bytes, [1.0, 2.0, 3.0], [0.0, 0.0, -1.0]);
         assert_eq!(

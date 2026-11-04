@@ -7,7 +7,8 @@
 # Pika compiles it, reflecting the layout in network.reflection.json that
 # src/surface.rs's tests pack against. A
 # document naming a nodedef the libraries lack, or reading a primvar the
-# renderer's vertices lack, must fail, naming it. The
+# renderer's vertices lack, or UV0 beside another primvar, must fail,
+# naming it. A surface reading UV0 alone reads the texcoord. The
 # libraries job must list the manifest's MaterialX version and the standard
 # library's definitions with their size and time.
 #
@@ -21,7 +22,7 @@ BAKE=$ROOT/target/bake/bake
 
 make -C "$ROOT/bake" --no-print-directory HFS="$HFS"
 rm -rf "$OUT"
-mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/textures"
+mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/uv0" "$OUT/perfuv" "$OUT/textures"
 FIXTURES=$ROOT/bake/fixtures
 
 failed=0
@@ -63,6 +64,21 @@ if "$BAKE" generate "$OUT/primvar.mtlx" "$OUT/primvar" 2> "$OUT/primvar.err"; th
     fail "primvar: a surface reading a color3 primvar generated"
 fi
 grep -q "i_geomprop_displayColor" "$OUT/primvar.err" || fail "primvar: the error does not name the varying"
+# UV0, the texcoord the nodes read by default, is the primvar st: a texture
+# whose st is unconnected reads the mesh's texcoord, and a surface reading
+# UV0 beside another primvar has no vertex stage.
+sed -e '/<input name="st" nodename="n2" \/>/d' "$ROOT/bake/fixtures/network.mtlx" > "$OUT/uv0.mtlx"
+"$BAKE" generate "$OUT/uv0.mtlx" "$OUT/uv0" || fail "uv0: a surface reading UV0 failed to generate"
+grep -q "o.texcoord_0 = p.texcoord;" "$OUT/uv0/surface.slang" ||
+    fail "uv0: the vertex stage does not feed UV0 from the texcoord"
+sed -e 's|value="st"|value="perfuv"|' \
+    -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="emissiveColor" nodename="n3" output="rgb" />|' \
+    -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_UsdUVTexture_23" />\n  <surfacematerial|' \
+    "$ROOT/bake/fixtures/network.mtlx" > "$OUT/perfuv.mtlx"
+if "$BAKE" generate "$OUT/perfuv.mtlx" "$OUT/perfuv" 2> "$OUT/perfuv.err"; then
+    fail "perfuv: a surface reading UV0 beside perfuv generated"
+fi
+grep -q "perfuv and st" "$OUT/perfuv.err" || fail "perfuv: the error does not name the primvars"
 
 texture() {
     "$BAKE" texture "$FIXTURES/$1" "$2" "$3" "$4" "" "$OUT/textures/$5.texture" || fail "$5: texture failed"

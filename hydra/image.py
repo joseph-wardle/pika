@@ -84,7 +84,10 @@ What the reference encodes:
   bound to a MaterialX surface whose
   emission is a uniform EDF of an image sampled at a primvar
   (hydra/images/textured.usda) emits the image's sample at the hit's
-  primvar, the one the material's reader names (hydra/images/primvar.usda),
+  primvar, the one the material's reader names (hydra/images/primvar.usda)
+  or st when the image's texcoord is unconnected or a texcoord node of
+  index 0: UV0, the texcoord MaterialX's nodes read by default, which
+  Storm and Karma read as st (hydra/images/uv0.usda),
   under the image node's address modes, with st (0, 0) at the image's
   bottom-left corner as USD and MaterialX read it, the channels padded
   with 0 to three. The sample is bilinear within a level, at the level the
@@ -177,7 +180,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
-            "st read whatever the name", "st seams smoothed over", "st refined bilinearly",
+            "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
             "failed materials drawn clay", "base weight ignored", "emission ignored",
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "subsets ignored", "subset faces of the cage", "st indices ignored",
@@ -476,14 +479,32 @@ def unknown(shader):
     return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
 
 
+def uv0(image):
+    """Whether the image node samples UV0, the texcoord MaterialX's nodes
+    read by default: its texcoord input unconnected, or a texcoord node of
+    index 0."""
+    if not image.GetInput("texcoord"):
+        return True
+    node = upstream(image, "texcoord")
+    if not node or node.GetShaderId() != "ND_texcoord_vector2":
+        return False
+    index = node.GetInput("index")
+    return not index or index.Get() == 0
+
+
 def sampled(image, kind, control=None):
     """The file, address modes (u, v), primvar and declared colour space
     (auto when none for a colour, raw for the rest) of an ND_image_<kind>
-    node sampled at a geompropvalue reader, or None for any other node."""
+    node sampled at UV0 (st) or a geompropvalue reader, or None for any
+    other node."""
     if not image or image.GetShaderId() != f"ND_image_{kind}":
         return None
     reader = upstream(image, "texcoord")
-    if not reader or reader.GetShaderId() != "ND_geompropvalue_vector2":
+    if uv0(image):
+        primvar = "st"
+    elif reader and reader.GetShaderId() == "ND_geompropvalue_vector2":
+        primvar = reader.GetInput("geomprop").Get()
+    else:
         return None
     modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
                   for m in ("uaddressmode", "vaddressmode"))
@@ -495,7 +516,7 @@ def sampled(image, kind, control=None):
         path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
     colour = kind == "color3" or control == "8-bit data read as sRGB"
     space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
-    return (path, modes, reader.GetInput("geomprop").Get(), space)
+    return (path, modes, primvar, space)
 
 
 def lit(surface, time, control=None):
@@ -560,13 +581,15 @@ def look(prim, host, time, control=None):
     edf = upstream(surface, "edf")
     if not edf or edf.GetShaderId() != "ND_uniform_edf" or upstream(surface, "bsdf"):
         raise refuse
-    image = upstream(edf, "color")
-    while image and image.GetShaderId().startswith("ND_convert_"):
-        image = upstream(image, "in")
-    image = (sampled(image, "vector2", control) or sampled(image, "vector3", control)
-             or sampled(image, "color3", control))
+    node = upstream(edf, "color")
+    while node and node.GetShaderId().startswith("ND_convert_"):
+        node = upstream(node, "in")
+    image = (sampled(node, "vector2", control) or sampled(node, "vector3", control)
+             or sampled(node, "color3", control))
     if not image:
         raise refuse
+    if control == "UV0 drawn pink" and uv0(node):
+        return PINK
     return Look((0.0,) * 3, (0.0,) * 3, image, None, None)
 
 

@@ -255,12 +255,16 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     }))
 }
 
-/// The float2 primvar the network's surface reads, through its
-/// UsdPrimvarReader_float2 and ND_geompropvalue_vector2 nodes: the texcoord
-/// its meshes carry. A network reading two is refused, since a mesh
-/// carries one: ALab's meshes carry `st` and `perfuv` both and each
-/// material reads one of them, so carrying every float2 primvar would
-/// double the texture coordinates for nothing.
+/// The float2 primvar the network's surface reads, the texcoord its meshes
+/// carry: the one its UsdPrimvarReader_float2 and ND_geompropvalue_vector2
+/// nodes name, else `st`, which is UV0, the texcoord MaterialX's nodes read
+/// by default (an image's texcoord, UsdUVTexture's st, the texcoord node),
+/// as Storm and Karma read it. Only the nodedefs say which inputs read UV0,
+/// so every network naming no primvar carries `st`, and the bake tool
+/// refuses a surface reading UV0 beside another name. A network naming two
+/// is refused, since a mesh carries one: ALab's meshes carry `st` and
+/// `perfuv` both and each material reads one of them, so carrying every
+/// float2 primvar would double the texture coordinates for nothing.
 pub fn texcoord(network: &Network) -> Result<Option<String>, String> {
     let Some(surface) = &network.surface else {
         return Ok(None);
@@ -280,12 +284,12 @@ pub fn texcoord(network: &Network) -> Result<Option<String>, String> {
         }
     }
     let mut names = names.into_iter();
-    let name = names.next();
-    match (&name, names.next()) {
+    match (names.next(), names.next()) {
         (Some(a), Some(b)) => Err(format!(
             "reads the primvars {a} and {b}, and a mesh is drawn with one texcoord"
         )),
-        _ => Ok(name),
+        (Some(name), None) => Ok(Some(name)),
+        (None, _) => Ok(Some("st".to_owned())),
     }
 }
 
@@ -467,7 +471,14 @@ pub mod tests {
     #[test]
     fn the_texcoord_is_the_one_primvar_read() {
         assert_eq!(texcoord(&fixture()).unwrap(), Some("st".to_owned()));
-        assert_eq!(texcoord(&clay()).unwrap(), None);
+
+        // A network naming no primvar reads UV0, which is st; one with no
+        // surface reads none.
+        let mut uv0 = fixture();
+        (uv0.nodes.get_mut("tex").unwrap().connections).remove("st");
+        assert_eq!(texcoord(&uv0).unwrap(), Some("st".to_owned()));
+        assert_eq!(texcoord(&clay()).unwrap(), Some("st".to_owned()));
+        assert_eq!(texcoord(&Network::default()).unwrap(), None);
 
         // A second reader of the same name is one texcoord; of another, two.
         let mut network = fixture();

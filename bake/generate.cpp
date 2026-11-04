@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <set>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -58,7 +59,12 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
 }
 
 // The vertex stage: pixel.slang's VertexData, filled from the vertex
-// shaders/vertex.slang pulls.
+// shaders/vertex.slang pulls. Every float2 primvar the surface reads is the
+// mesh's one texcoord: a geomprop it names, or UV0, the texcoord MaterialX's
+// nodes read by default, which is the primvar st, as Storm and Karma read
+// it. The renderer fetches st for a network naming no primvar and refuses
+// one naming two (src/material.rs); only the nodedefs say which inputs read
+// UV0, so a surface reading it beside another name is refused here.
 std::string vertex(mx::ShaderStage const &stage) {
     std::string text = "// Written by the bake tool: the vertex stage for the pixel stage beside it.\n\n"
                        "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"
@@ -67,6 +73,7 @@ std::string vertex(mx::ShaderStage const &stage) {
                        "{\n    Vertex p = pull(vertex, slot);\n    VertexData o;\n"
                        "    o.SV_Position = p.position;\n";
     mx::VariableBlock const &block = stage.getInputBlock(mx::HW::VERTEX_DATA);
+    std::set<std::string> primvars;
     for (size_t i = 0; i < block.size(); ++i) {
         mx::ShaderPort const *port = block[i];
         std::string const &name = port->getVariable();
@@ -79,17 +86,27 @@ std::string vertex(mx::ShaderStage const &stage) {
             value = "p.tangent";
         else if (name == "bitangentWorld")
             value = "p.bitangent";
-        // Every float2 geomprop reads the mesh's one texcoord; the renderer
-        // refuses a network reading two (src/material.rs) before it runs
-        // the tool.
-        else if (name.rfind("i_geomprop_", 0) == 0 && port->getType() == mx::Type::VECTOR2)
+        else if (name == "texcoord_0" && port->getType() == mx::Type::VECTOR2) {
             value = "p.texcoord";
-        else
+            primvars.insert("st");
+        } else if (name.rfind("i_geomprop_", 0) == 0 && port->getType() == mx::Type::VECTOR2) {
+            value = "p.texcoord";
+            primvars.insert(name.substr(std::string("i_geomprop_").size()));
+        } else
             throw std::runtime_error("the surface reads " + name + " as a " +
                                      port->getType().getName() +
                                      ", which Pika's vertex stage does not provide (of the "
-                                     "primvars, it provides one float2, the texcoord)");
+                                     "primvars, it provides one float2: the texcoord, UV0 or "
+                                     "a float2 geomprop)");
         text += "    o." + name + " = " + value + ";\n";
+    }
+    if (primvars.size() > 1) {
+        std::string names;
+        for (std::string const &primvar : primvars)
+            names += (names.empty() ? "" : " and ") + primvar;
+        throw std::runtime_error("the surface reads the primvars " + names +
+                                 " (UV0, the texcoord its nodes read by default, is st), and a "
+                                 "mesh is drawn with one texcoord");
     }
     return text + "    return o;\n}\n";
 }
