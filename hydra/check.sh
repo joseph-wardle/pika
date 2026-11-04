@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # The delegate's check, run on a GPU host with Houdini (not in CI).
 #
-# Builds the delegate and runs hydra/image.py, which renders each scene in
-# hydra/images/ in husk (color as HdFormatFloat32Vec4, depth and normal) and
-# in usdrecord (HdFormatFloat16Vec4 color), and compares the images with a ray
-# cast from USD. usdrecord draws on a private Xvnc display, started here. The
-# validation layer must be on and report nothing from Pika.
+# Builds the delegate for HFS into a directory of its own under
+# target/hydra/check, named after the Houdini, where everything else the run
+# writes goes too, so the check of one Houdini runs beside the other's and
+# neither touches the delegate target/hydra holds for usdview. Then it runs
+# hydra/image.py, which renders each scene in hydra/images/ in husk (color as
+# HdFormatFloat32Vec4, depth and normal) and in usdrecord (HdFormatFloat16Vec4
+# color), and compares the images with a ray cast from USD. usdrecord draws on
+# a private Xvnc display, started here. The validation layer must be on and
+# report nothing from Pika.
 #
-# Then it syncs each scene in hydra/fixtures/ for two frames, running the
+# Then it syncs each scene in hydra/fixtures/ for two frames, RENDERS at a
+# time as hydra/image.py renders, running the
 # scene's .py script (if any) on husk's stage between them, and compares
 # Pika's store dump with the scene's .dump, which was written by hand. Each
 # run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
@@ -24,16 +29,19 @@
 # of this run's own.
 #
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
+#   HFS=/opt/hfs22.0 VULKAN_SDK=... hydra/check.sh   # the other Houdini, at the same time
 set -euo pipefail
 
 HFS=${HFS:-/opt/hfs21.0}
 BAKE_HFS=${BAKE_HFS:-/opt/hfs22.0}
 SDK=${VULKAN_SDK:?set VULKAN_SDK to the SDK\'s x86_64 directory, for its validation layer}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-OUT=$ROOT/target/hydra/check
+OUT=$ROOT/target/hydra/check/$(basename "$HFS")
+RENDERS=8
 
-make -C "$ROOT/hydra" --no-print-directory
-make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
+make -C "$ROOT/hydra" --no-print-directory HFS="$HFS" OUT="$OUT/plugin"
+# Both Houdinis' checks share the bake tool.
+flock "$ROOT/target/bake.lock" make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
 rm -rf "$OUT/cache"
 mkdir -p "$OUT/images" "$OUT/fixtures"
 export PIKA_CACHE=$OUT/cache
@@ -42,7 +50,7 @@ export PIKA_CACHE=$OUT/cache
 set +u
 cd "$HFS" && source ./houdini_setup_bash >/dev/null && cd "$ROOT"
 set -u
-export PXR_PLUGINPATH_NAME=$ROOT/target/hydra
+export PXR_PLUGINPATH_NAME=$OUT/plugin
 export LD_LIBRARY_PATH=$SDK/lib:${LD_LIBRARY_PATH:-}
 export VK_ADD_LAYER_PATH=$SDK/share/vulkan/explicit_layer.d
 
@@ -155,8 +163,16 @@ for log in "$OUT"/images/*.log; do
     clean "$(basename "$log" .log)" "$log"
 done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
+# Each fixture's check reports to a file of its own; one that stops short of
+# the end exits nonzero.
+export -f fixture clean store_after counts fail
+export OUT ROOT
+printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \
+    'set -euo pipefail; fixture "$1" >"$OUT/fixtures/$(basename "$1" .usda).report" 2>&1' _ {} ||
+    fail "a fixture's check stopped short (see $OUT/fixtures/*.report)"
 for f in "${fixtures[@]}"; do
-    fixture "$f"
+    cat "$OUT/fixtures/$(basename "$f" .usda).report"
+    grep -q "^FAIL: " "$OUT/fixtures/$(basename "$f" .usda).report" && failed=1
 done
 echo "fixtures: checked ${#fixtures[@]} scenes"
 # The stats reader's control: a first frame line cut short must fail it.

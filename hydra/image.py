@@ -7,7 +7,8 @@ never Pika's store, so the two cannot share a mistake.
 
 Run it from a shell set up as hydra/check.sh sets one up. With `usdrecord`,
 it also renders each scene's color through usdrecord (usdview's engine),
-which needs an X display in DISPLAY.
+which needs an X display in DISPLAY. The renders run RENDERS at a time and
+the references on every core; the results print in the scenes' order.
 
 What the reference encodes:
 - The camera is the RenderSettings camera's frustum, conformed to the
@@ -144,6 +145,7 @@ and host whose reference it changes, and must change at least one scene's.
 """
 
 import collections
+import concurrent.futures
 import math
 import os
 import subprocess
@@ -162,6 +164,8 @@ CAP = 1024
 # The scenes whose texture the cap shrinks, which husk must warn of once.
 CAPPED = {"capped": 1}
 FRAMES = (1, 2)
+# Each render is a Houdini process of about 1 GB with a few busy threads.
+RENDERS = 8
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
@@ -1094,8 +1098,10 @@ def usdrecord(scene, out, width):
     return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
 
 
-def references(stage, width, height, host):
-    """The reference and each control's, for each frame."""
+def references(scene, width, height, host):
+    """The reference and each control's, for each frame, of the scene at
+    `scene`: a path, which a process pool can be handed."""
+    stage = Usd.Stage.Open(scene)
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
     return {t: {c: reference(stage, t, width, height, host, c) for c in controls} for t in FRAMES}
 
@@ -1146,29 +1152,37 @@ def main():
     record = sys.argv[2:] == ["usdrecord"]
     os.makedirs(out, exist_ok=True)
     scenes = sorted(os.path.join(SCENES, s) for s in os.listdir(SCENES) if s != "settings.usda")
-    failures = []
-    changed = set()
-    for scene in scenes:
-        name = os.path.splitext(os.path.basename(scene))[0]
-        stage = Usd.Stage.Open(scene)
-        width, height = UsdRender.Settings(stage.GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get()
-        refs = references(stage, width, height, HUSK)
-        renders, log = husk(scene, out)
-        print(f"{name} in husk ({log}):")
-        f, c = check(name, renders, refs, ["color", "depth", "normal"])
-        failures += f + warned(log, name, CAPPED.get(name, 0))
-        changed |= c
-        if not record:
-            continue
-        # usdrecord takes the image's height from the camera's aspect.
-        renders, log = usdrecord(scene, out, width)
-        shape = renders[FRAMES[0]]["color"].shape
-        host = usdrecord_host()
-        if shape[:2] != (height, width) or differs(stage, host):
-            refs = references(stage, shape[1], shape[0], host)
-        print(f"{name} in usdrecord ({log}):")
-        failures += check(f"{name} (usdrecord)", renders, refs, ["color"])[0]
-        failures += warned(log, f"{name} (usdrecord)", 0)
+    stages = {s: Usd.Stage.Open(s) for s in scenes}
+    sizes = {s: tuple(UsdRender.Settings(stages[s].GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get())
+             for s in scenes}
+    with (concurrent.futures.ProcessPoolExecutor() as compute,
+          concurrent.futures.ThreadPoolExecutor(RENDERS) as render):
+        # The pool forks before the render threads start.
+        refs = {s: compute.submit(references, s, *sizes[s], HUSK) for s in scenes}
+        husks = {s: render.submit(husk, s, out) for s in scenes}
+        records = {s: render.submit(usdrecord, s, out, sizes[s][0]) for s in scenes} if record else {}
+        recorded = {}
+        for s, job in records.items():
+            # usdrecord takes the image's height from the camera's aspect.
+            shape = job.result()[0][FRAMES[0]]["color"].shape
+            host = usdrecord_host()
+            if shape[:2] != sizes[s][::-1] or differs(stages[s], host):
+                recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
+        failures = []
+        changed = set()
+        for s in scenes:
+            name = os.path.splitext(os.path.basename(s))[0]
+            renders, log = husks[s].result()
+            print(f"{name} in husk ({log}):")
+            f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
+            failures += f + warned(log, name, CAPPED.get(name, 0))
+            changed |= c
+            if s not in records:
+                continue
+            renders, log = records[s].result()
+            print(f"{name} in usdrecord ({log}):")
+            failures += check(f"{name} (usdrecord)", renders, recorded.get(s, refs[s]).result(), ["color"])[0]
+            failures += warned(log, f"{name} (usdrecord)", 0)
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")
