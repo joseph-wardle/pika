@@ -92,9 +92,15 @@ What the reference encodes:
   step from the pixel's centre to the next pixel's, right and down, on the
   hit's plane; the longer step, in texels of level 0, is 2^λ, and levels
   ⌊λ⌋ and ⌈λ⌉ are blended by λ's fraction, level 0 alone where the image is
-  magnified. The levels are the file's stored ones; the reference refuses
-  a level the file lacks. The step is the GPU's own on a surface facing the
-  camera, where st is affine on screen; no scene minifies any other kind.
+  magnified. The levels are the file's stored ones from the first within
+  the texture cap, the render setting pika:textureCap, 1024 unless the
+  render settings prim authors it (hydra/images/capped.usda); the
+  reference refuses a level the file lacks and a cap no stored level fits.
+  Pika warns, once per texture it loads, of a source the cap shrank. husk
+  reads the setting off the prim; usdrecord passes no render settings, so
+  it draws under the default, and the reference knows. The step is the
+  GPU's own on a surface facing the camera, where st is affine on screen;
+  no scene minifies any other kind.
   A file naming <UDIM> is a set of
   tiles (hydra/images/udim.usda): the hit samples tile 1001 + ⌊u⌋ + 10 ⌊v⌋
   at (u − ⌊u⌋, v − ⌊v⌋), under the same modes within the tile, 0 where the
@@ -151,6 +157,10 @@ from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdRender, UsdSh
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
+# The delegate's default texture cap (hydra/plugin.cpp).
+CAP = 1024
+# The scenes whose texture the cap shrinks, which husk must warn of once.
+CAPPED = {"capped": 1}
 FRAMES = (1, 2)
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
@@ -168,7 +178,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sRGB read as raw", "8-bit auto read as raw", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
-            "frame 1's reference"]
+            "the cap ignored", "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 # ACEScg to linear Rec.709 (see the module's doc).
@@ -195,16 +205,17 @@ LIT = {
     "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
                                           "specular", "normal", None),
 }
-# What a host hands Pika: the purposes it draws, and whether a material
-# whose surface shader the shader registry does not know arrives with its
-# network (see the module's doc).
-Host = collections.namedtuple("Host", "purposes delivers_unknown")
-HUSK = Host(("default", "render"), True)
+# What a host hands Pika: the purposes it draws, whether a material whose
+# surface shader the shader registry does not know arrives with its network,
+# and whether the render settings prim's Pika settings arrive (see the
+# module's doc).
+Host = collections.namedtuple("Host", "purposes delivers_unknown settings")
+HUSK = Host(("default", "render"), True, True)
 
 
 def usdrecord_host():
     scene_index = Tf.GetEnvSetting("USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX")
-    return Host(("default", "proxy"), scene_index)
+    return Host(("default", "proxy"), scene_index, False)
 
 
 def meshes(stage, time, purposes, control=None):
@@ -600,13 +611,14 @@ def bilinear(texels, st, modes, control=None):
             (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
 
 
-def sample(path, st, step, modes, space, control=None):
+def sample(path, st, step, modes, space, cap, control=None):
     """The trilinear sample of the image at `path`, or of the tile of the
     UDIM set `path` names, at each st (an (n, 2) array), rows from the
     bottom as USD reads st, under the address modes (u, v), in the working
     space; the channels padded with 0 to three. `step`, (n, 2, 2), is the
     st from each sample's pixel to the next one right and down, which picks
-    the level (see the module's doc)."""
+    the level among the file's from the first within `cap` texels a side
+    (see the module's doc)."""
     if "<UDIM>" in path:
         tile = np.floor(st)
         if control == "UDIM tiles read as one image":
@@ -620,28 +632,39 @@ def sample(path, st, step, modes, space, control=None):
                 file = path.replace("<UDIM>", "1001")
             if os.path.isfile(file):
                 on = number == n
-                out[on] = sample(file, (st - tile)[on], step[on], modes, space, control)
+                out[on] = sample(file, (st - tile)[on], step[on], modes, space, cap, control)
         return out
     if control == "st wrapped, not clamped":
         modes = ("periodic", "periodic")
+    if control == "the cap ignored":
+        cap = float("inf")
+    sizes = []
+    file = oiio.ImageInput.open(path)
+    while file.seek_subimage(0, len(sizes)):
+        sizes.append((file.spec().width, file.spec().height))
+    file.close()
+    first = next((m for m, (w, h) in enumerate(sizes) if w <= cap and h <= cap), None)
+    if first is None:
+        raise ValueError(f"{path}: the reference uses a stored level within the cap, and none of its {len(sizes)} is within {cap}")
     level0 = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
 
     def level(m):
-        """Level m's texels in the working space, rows from the bottom."""
-        if m and control == "levels filtered from level 0":
+        """Level m's texels, the file's level first + m, in the working
+        space, rows from the bottom."""
+        if first + m and control == "levels filtered from level 0":
             image = level0
-            for _ in range(m):
+            for _ in range(first + m):
                 image = halve(image)
         else:
-            image = oiio.ImageBuf(path, 0, m).get_pixels(oiio.FLOAT)
+            image = oiio.ImageBuf(path, 0, first + m).get_pixels(oiio.FLOAT)
             if image.size == 0:
-                raise ValueError(f"{path}: the reference reads the levels the file stores, which stop before level {m}")
+                raise ValueError(f"{path}: the reference reads the levels the file stores, which stop before level {first + m}")
         texels = np.zeros(image.shape[:2] + (3,))
         texels[..., :min(3, image.shape[2])] = image[..., :3]
         texels = working(texels, path, space, control)
         return texels if control == "st origin at the top" else texels[::-1]
 
-    h, w = level0.shape[:2]
+    w, h = sizes[first]
     with np.errstate(divide="ignore"):
         lod = np.clip(np.log2(np.hypot(step[..., 0] * w, step[..., 1] * h).max(1)), 0, None)
     if control == "level 0 whatever the footprint":
@@ -815,6 +838,8 @@ def reference(stage, time, width, height, host, control=None):
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
+    authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
+    cap = authored.Get() if host.settings and authored else CAP
     eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)
@@ -872,7 +897,7 @@ def reference(stage, time, width, height, host, control=None):
             st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
             at = np.einsum("nc,ncj->nj", bary[on], st)
             step = np.einsum("nkc,ncj->nkj", around[on], st) - at[:, None]
-            out[on] = sample(path, at, step, modes, space, control)
+            out[on] = sample(path, at, step, modes, space, cap, control)
         return out, which >= 0
 
     # A normal map perturbs the normal before it is turned toward the eye.
@@ -1077,11 +1102,20 @@ def references(stage, width, height, host):
 
 def differs(stage, host):
     """Whether `host`'s reference can differ from husk's at the same size:
-    by a purpose authored, or a material it does not deliver."""
+    by a purpose authored, a Pika render setting it does not pass, or a
+    material it does not deliver."""
     prims = list(stage.Traverse())
     purposed = any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue() for p in prims)
+    settings = any(a.GetName().startswith("pika:") for a in stage.GetPrimAtPath(SETTINGS).GetAttributes())
     dropped = any(p.IsA(UsdShade.Shader) and unknown(UsdShade.Shader(p)) for p in prims)
-    return purposed or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
+    return purposed or (settings and not host.settings) or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
+
+
+def warned(log, name, expected):
+    """A failure unless `log` holds `expected` texture warnings."""
+    with open(log) as f:
+        count = sum(line.startswith("pika: warning: texture ") for line in f)
+    return [] if count == expected else [f"{name}: {count} texture warnings, not {expected}"]
 
 
 def check(name, renders, references, aovs):
@@ -1122,7 +1156,7 @@ def main():
         renders, log = husk(scene, out)
         print(f"{name} in husk ({log}):")
         f, c = check(name, renders, refs, ["color", "depth", "normal"])
-        failures += f
+        failures += f + warned(log, name, CAPPED.get(name, 0))
         changed |= c
         if not record:
             continue
@@ -1134,6 +1168,7 @@ def main():
             refs = references(stage, shape[1], shape[0], host)
         print(f"{name} in usdrecord ({log}):")
         failures += check(f"{name} (usdrecord)", renders, refs, ["color"])[0]
+        failures += warned(log, f"{name} (usdrecord)", 0)
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")

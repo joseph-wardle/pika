@@ -23,10 +23,6 @@ use crate::texture::{Binding, Textures};
 use crate::transform::Camera;
 use crate::view::View;
 
-/// The texels a texture's longest side is capped at, until the cap is a
-/// render setting.
-const CAP: u32 = 4096;
-
 pub struct Shade {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
@@ -37,8 +33,12 @@ pub struct Shade {
     /// By the store's material id.
     materials: BTreeMap<u64, Uniforms>,
     /// The materials that failed to build, each warned of once when it
-    /// did; `update` tries one again only when its network moves.
+    /// did; `update` tries one again only when its network moves or the
+    /// cap changes.
     failed: BTreeSet<u64>,
+    /// The texture cap the materials' textures were baked under; 0 before
+    /// the first frame.
+    cap: u32,
     /// `material::clay`, drawn where `materials` has no entry.
     clay: Uniforms,
     /// `material::pink`, drawn for `failed`.
@@ -92,6 +92,7 @@ impl Shade {
             surfaces,
             materials: BTreeMap::new(),
             failed: BTreeSet::new(),
+            cap: 0,
             clay,
             pink,
         })
@@ -121,8 +122,9 @@ impl Shade {
         Ok(uniforms)
     }
 
-    /// Builds the surface of each material whose network changed, bakes
-    /// and loads its textures and writes its uniforms, then every
+    /// Builds the surface of each material whose network changed, or of
+    /// every material when the texture cap `cap` changed, bakes and loads
+    /// its textures under the cap and writes its uniforms, then every
     /// material's eye and headlight from `camera`. A material that cannot
     /// be built is warned of and drawn pink; the frame goes on. Records
     /// into `cb`, outside rendering, the uploads. No GPU work may be
@@ -132,9 +134,17 @@ impl Shade {
         device: &gpu::Device,
         store: &Store,
         moved: &Moved,
+        cap: u32,
         camera: &Camera,
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
+        if cap == 0 {
+            return Err(
+                "the texture cap is 0: set pika:textureCap to the texels a texture's \
+                        longest side is capped at"
+                    .into(),
+            );
+        }
         self.textures.begin();
         self.materials
             .retain(|id, _| store.materials().contains_key(id));
@@ -143,18 +153,24 @@ impl Shade {
             compiled: 0,
             baked: 0,
         };
-        for id in &moved.materials {
-            let Some(material) = store.materials().get(id) else {
+        let ids: Vec<u64> = if cap == self.cap {
+            moved.materials.iter().copied().collect()
+        } else {
+            store.materials().keys().copied().collect()
+        };
+        self.cap = cap;
+        for id in ids {
+            let Some(material) = store.materials().get(&id) else {
                 continue;
             };
             let Some(network) = &material.network else {
                 continue;
             };
-            self.failed.remove(id);
-            if let Err(e) = self.material(device, *id, network, cb, &mut update) {
+            self.failed.remove(&id);
+            if let Err(e) = self.material(device, id, network, cb, &mut update) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
-                self.materials.remove(id);
-                self.failed.insert(*id);
+                self.materials.remove(&id);
+                self.failed.insert(id);
             }
         }
         let used: BTreeSet<PathBuf> = (self.materials.values())
@@ -228,9 +244,9 @@ impl Shade {
                 .map_err(|e| format!("{path}'s {input} {e}"))?;
             let file = Path::new(&source.file);
             let (texture, fresh) =
-                (self.bake).texture(file, &source.space, source.encoding, CAP)?;
+                (self.bake).texture(file, &source.space, source.encoding, self.cap)?;
             update.baked += usize::from(fresh);
-            let binding = self.textures.load(device, cb, &texture)?;
+            let binding = self.textures.load(device, cb, &texture, file)?;
             let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
             let sampler = self.textures.sampler(modes)?;
             bindings.push((binding, sampler));

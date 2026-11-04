@@ -173,6 +173,7 @@ pub struct CFrame {
     normal: CAov,
     render_tags: *const *const c_char,
     render_tag_count: usize,
+    texture_cap: u32,
 }
 
 thread_local! {
@@ -408,6 +409,7 @@ pub unsafe extern "C" fn pika_render(
             depth: aov(&f.depth, "depth")?,
             normal: aov(&f.normal, "normal")?,
             render_tags,
+            texture_cap: f.texture_cap,
         };
         let done = lock(handle)?.render(frame)?;
         // SAFETY: the caller guarantees one write.

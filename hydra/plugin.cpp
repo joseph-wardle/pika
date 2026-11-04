@@ -10,6 +10,7 @@
 #include "prims.h"
 #include "report.h"
 
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
@@ -29,6 +30,11 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
+
+// Pika's render settings: husk reads them off the render settings prim's
+// attributes of these names, usdview offers them in its Renderer Settings
+// dialog, usdrecord passes none.
+TF_DEFINE_PRIVATE_TOKENS(_tokens, ((textureCap, "pika:textureCap")));
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -52,6 +58,11 @@ protected:
         }
         pika_frame frame = {};
         std::copy_n(state->GetWorldToViewMatrix().data(), 16, frame.world_to_view);
+        // A host may author the cap as any number; one that is none is
+        // passed as 0, which Pika refuses.
+        HdRenderDelegate const *delegate = GetRenderIndex()->GetRenderDelegate();
+        int cap = delegate->GetRenderSetting<int>(_tokens->textureCap, 0);
+        frame.texture_cap = uint32_t(std::max(cap, 0));
         std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
         GfVec4f clear(0.0f);
         PikaRenderBuffer *first = nullptr;
@@ -133,9 +144,15 @@ private:
 
 class PikaRenderDelegate final : public HdRenderDelegate {
 public:
-    PikaRenderDelegate() = default;
+    PikaRenderDelegate() { _PopulateDefaultSettings(_settings); }
     explicit PikaRenderDelegate(HdRenderSettingsMap const &settings)
-        : HdRenderDelegate(settings) {}
+        : HdRenderDelegate(settings) {
+        _PopulateDefaultSettings(_settings);
+    }
+
+    HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override {
+        return _settings;
+    }
 
     // Supporting a type changes what Hydra hands over, so the counted types
     // leave out the implicit surfaces (cube, sphere...), which Hydra
@@ -257,6 +274,10 @@ private:
     Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
+    // The texels a texture's longest side is capped at. ALab's textures are
+    // 145 GB at BC7 uncapped, 9.1 GB at 1024 and 2.3 GB at 512 (design.md).
+    HdRenderSettingDescriptorList _settings = {
+        {"Texture cap (texels a side)", _tokens->textureCap, VtValue(1024)}};
 };
 
 } // namespace

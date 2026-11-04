@@ -81,6 +81,8 @@ pub struct Frame<'a> {
     pub normal: Option<Aov<'a>>,
     /// The render tags the pass draws; none means every tag.
     pub render_tags: Vec<String>,
+    /// The texels a texture's longest side is capped at (`pika:textureCap`).
+    pub texture_cap: u32,
 }
 
 /// The depth AOV's clear value: OpenGL's far plane.
@@ -122,6 +124,7 @@ struct Inputs {
     projection: [f64; 16],
     clear_color: [f32; 4],
     render_tags: Vec<String>,
+    texture_cap: u32,
 }
 
 /// The render buffers a frame is placed into, known only by size, data
@@ -295,6 +298,7 @@ impl Renderer {
             projection: frame.projection,
             clear_color: frame.clear_color,
             render_tags: frame.render_tags.clone(),
+            texture_cap: frame.texture_cap,
         };
         let mut aovs = [frame.color, frame.depth, frame.normal];
 
@@ -321,7 +325,14 @@ impl Renderer {
         let update =
             self.geometry
                 .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
-        let shading = (self.shade).update(&self.device, &self.store, &moved, &camera, cb)?;
+        let shading = (self.shade).update(
+            &self.device,
+            &self.store,
+            &moved,
+            inputs.texture_cap,
+            &camera,
+            cb,
+        )?;
         self.commands.mark("update")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {

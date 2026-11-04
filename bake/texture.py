@@ -31,20 +31,21 @@ def fail(what):
 
 
 def header(path):
-    """The header's five numbers, the tile table and the levels' bytes."""
+    """The header's five numbers, the source's size, the tile table and the
+    levels' bytes."""
     with open(path, "rb") as f:
         bytes = f.read()
-    magic, width, height, layers, levels, fmt, entries = struct.unpack("<4s6I", bytes[:28])
+    magic, width, height, layers, levels, fmt, *source, entries = struct.unpack("<4s8I", bytes[:36])
     if magic != b"pika":
         raise ValueError(f"{path} is not a texture file")
-    table = struct.unpack(f"<{entries}I", bytes[28:28 + 4 * entries])
-    return width, height, layers, levels, fmt, table, bytes[28 + 4 * entries:]
+    table = struct.unpack(f"<{entries}I", bytes[36:36 + 4 * entries])
+    return width, height, layers, levels, fmt, tuple(source), table, bytes[36 + 4 * entries:]
 
 
 def decode(path):
     """Each level as an array of shape (height, width, channels), or for a
     float texture of several layers (layers, height, width, channels)."""
-    width, height, layers, levels, fmt, _, data = header(path)
+    width, height, layers, levels, fmt, _, _, data = header(path)
     if fmt in FLOAT:
         out, offset, w, h = [], 0, width, height
         for _ in range(levels):
@@ -97,11 +98,12 @@ def check(out):
     fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
     swatch = np.asarray(oiio.ImageBuf(os.path.join(fixtures, "swatch.png")).get_pixels(oiio.UINT8))
 
-    def baked(name, want, table=(0,)):
+    def baked(name, want, source=None, table=(0,)):
         path = os.path.join(out, name + ".texture")
-        got = header(path)[:6]
-        if got != want + (table,):
-            fail(f"{name}: the header says {got}, not {want + (table,)}")
+        got = header(path)[:7]
+        want = want + (source or want[:2], table)
+        if got != want:
+            fail(f"{name}: the header says {got}, not {want}")
         return decode(path)
 
     # Floats pass through; the levels below the source are box filtered.
@@ -136,7 +138,7 @@ def check(out):
     # 1001 + i to its layer, the tiles the set lacks past the end.
     table = [2 ** 32 - 1] * 100
     table[0], table[11] = 0, 1
-    levels = baked("udim", (8, 8, 2, 4, 103), tuple(table))
+    levels = baked("udim", (8, 8, 2, 4, 103), table=tuple(table))
     expect("udim level 0 tile 1001", levels[0][0], textures.ramp_pixels(1.0), 0)
     expect("udim level 0 tile 1012", levels[0][1], textures.ramp_pixels(0.5), 0)
     expect("udim level 3 tile 1012", levels[3][1], [[(0.25, 0.25)]], 0)
@@ -145,7 +147,7 @@ def check(out):
     # aligned: the ramp's texels then hold their own centres again, but for
     # the outer half texel, which clamps to the edge.
     table[1], table[11] = 1, 2 ** 32 - 1
-    levels = baked("mixed", (8, 8, 2, 4, 103), tuple(table))
+    levels = baked("mixed", (8, 8, 2, 4, 103), table=tuple(table))
     expect("mixed level 0 tile 1001", levels[0][0], textures.ramp_pixels(1.0), 0)
     centre = (np.clip((np.arange(8) + 0.5) / 2 - 0.5, 0, 3) + 0.5) / 4
     want = np.stack(np.meshgrid(centre, centre), -1)
@@ -154,9 +156,10 @@ def check(out):
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)
 
-    # The stored levels are used from the first within the cap; those a
-    # filter would produce differ from them by construction (textures.py).
-    levels = baked("mips", (4, 4, 1, 3, 145))
+    # The stored levels are used from the first within the cap, the header
+    # keeping the source's size; those a filter would produce differ from
+    # them by construction (textures.py).
+    levels = baked("mips", (4, 4, 1, 3, 145), source=(8, 8))
     for i, (level, grey) in enumerate(zip(levels, (128, 64, 32))):
         expect(f"mips level {i}", level[..., :3], np.full(level.shape[:2] + (3,), grey), 1)
     levels = baked("mips8", (8, 8, 1, 4, 145))

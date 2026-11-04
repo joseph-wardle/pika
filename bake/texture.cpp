@@ -16,7 +16,8 @@
 // one array (bake/libraries/stdlib/genslang/lib/mx_texture.slang).
 //
 // The file is a header of little-endian u32: "pika", width, height, layers,
-// levels, the VkFormat, then the tile table's length and the table: one
+// levels, the VkFormat, the source's width and height before the cap (a
+// set's largest tile's), then the tile table's length and the table: one
 // entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
 // or 0xFFFFFFFF where the set lacks it. Then each level in order, every
 // layer within it. src/texture.rs reads it.
@@ -92,8 +93,10 @@ std::vector<Tile> tiles(std::string const &source) {
 }
 
 // The size the source's first stored level at or below the cap (or its
-// smallest) takes once halved to fit the cap: the size it bakes at.
-void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &height) {
+// smallest) takes once halved to fit the cap: the size it bakes at. And
+// the source's own, its level 0's, before the cap.
+void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &height,
+            unsigned &source_width, unsigned &source_height) {
     std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
     if (!in)
         throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
@@ -101,6 +104,10 @@ void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &he
     for (int m = 0; in->seek_subimage(0, m); ++m) {
         w = in->spec().width;
         h = in->spec().height;
+        if (m == 0) {
+            source_width = std::max(source_width, w);
+            source_height = std::max(source_height, h);
+        }
         if (w <= cap && h <= cap)
             break;
     }
@@ -370,9 +377,9 @@ void texture(std::string const &source, std::string const &space, std::string co
     if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
         throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
     std::vector<Tile> set = tiles(source);
-    unsigned width = 0, height = 0;
+    unsigned width = 0, height = 0, source_width = 0, source_height = 0;
     for (Tile const &tile : set)
-        extent(tile.path, cap, width, height);
+        extent(tile.path, cap, width, height, source_width, source_height);
 
     // One tile at a time, keeping only its encoded bytes: a 4K tile is 256
     // MB of floats, and ALab's sets reach 34 tiles. The first tile's
@@ -417,6 +424,8 @@ void texture(std::string const &source, std::string const &space, std::string co
     put(file, uint32_t(set.size()));
     put(file, uint32_t(layers.front().size()));
     put(file, format);
+    put(file, source_width);
+    put(file, source_height);
     put(file, uint32_t(table.size()));
     for (uint32_t entry : table)
         put(file, entry);

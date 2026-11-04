@@ -161,6 +161,9 @@ typedef struct pika_frame {
     // The render tags the pass draws; none means every tag.
     const char *const *render_tags;
     size_t render_tag_count;
+    // The texels a texture's longest side is capped at, the host's
+    // pika:textureCap; Pika refuses 0.
+    uint32_t texture_cap;
 } pika_frame;
 
 // One stat for the host: a key as PIKA_STATS writes it and its value. A key

@@ -2,8 +2,9 @@
 //! set under the cache (`bake/texture.cpp`), as the renderer reads it, the
 //! image it is uploaded to, and the set of them loaded for the materials
 //! drawn, with the samplers they are read through. The file is a header,
-//! `pika` and five little-endian u32 (width, height, layers, levels, the
-//! VkFormat), the tile table's length and the table (the layer of each
+//! `pika` and seven little-endian u32 (width, height, layers, levels, the
+//! VkFormat, the source's width and height before the cap: a set's
+//! largest tile's), the tile table's length and the table (the layer of each
 //! UDIM tile from 1001, or past the layers where the set lacks it; one
 //! entry for a plain image), then every mip level in order, each layer
 //! within it, so an upload is one copy per level.
@@ -21,6 +22,8 @@ pub struct Texture {
     pub height: u32,
     pub layers: u32,
     pub format: vk::Format,
+    /// The source's width and height before the cap, a set's largest tile's.
+    pub source: [u32; 2],
     /// The layer of each tile, which the shader reads (`mx_texture.slang`).
     pub tiles: Vec<u32>,
     /// Each level's bytes within `file`, all its layers, finest first.
@@ -34,19 +37,20 @@ pub fn read(path: &Path) -> Result<Texture, String> {
 }
 
 pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
-    if file.len() < 28 || &file[..4] != b"pika" {
+    if file.len() < 36 || &file[..4] != b"pika" {
         return Err("is not a baked texture".into());
     }
     let word = |i: usize| u32::from_le_bytes(file[4 + 4 * i..8 + 4 * i].try_into().unwrap());
     let (width, height, layers, levels) = (word(0), word(1), word(2), word(3));
     let format = vk::Format::from_raw(word(4) as i32);
-    let entries = word(5) as usize;
-    if entries != 1 && entries != 100 || file.len() < 28 + 4 * entries {
+    let source = [word(5), word(6)];
+    let entries = word(7) as usize;
+    if entries != 1 && entries != 100 || file.len() < 36 + 4 * entries {
         return Err(format!(
             "has a tile table of {entries} entries, not 1 or 100"
         ));
     }
-    let tiles: Vec<u32> = (0..entries).map(|i| word(6 + i)).collect();
+    let tiles: Vec<u32> = (0..entries).map(|i| word(8 + i)).collect();
     if tiles
         .iter()
         .any(|&layer| layer != u32::MAX && layer >= layers)
@@ -61,6 +65,12 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
     if width == 0 || height == 0 || layers == 0 {
         return Err(format!("is {width}×{height} with {layers} layers"));
     }
+    if source[0] < width || source[1] < height {
+        return Err(format!(
+            "is {width}×{height} from a source of {}×{}",
+            source[0], source[1]
+        ));
+    }
     let chain = 32 - width.max(height).leading_zeros();
     if levels != chain {
         return Err(format!(
@@ -68,7 +78,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         ));
     }
     let mut ranges = Vec::new();
-    let (mut offset, mut w, mut h) = (28 + 4 * entries, width, height);
+    let (mut offset, mut w, mut h) = (36 + 4 * entries, width, height);
     for _ in 0..levels {
         let size = level_size(format, w, h).unwrap() * layers as usize;
         ranges.push(offset..offset + size);
@@ -88,6 +98,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         height,
         layers,
         format,
+        source,
         tiles,
         levels: ranges,
         file,
@@ -308,17 +319,30 @@ impl Textures {
         self.staging.clear();
     }
 
-    /// The baked texture at `path`, loaded now unless it is.
+    /// The baked texture at `path`, loaded now unless it is. A bake
+    /// smaller than its `source` was capped, which the load warns of: once,
+    /// as the texture stays loaded while a material uses it.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         path: &Path,
+        source: &Path,
     ) -> Result<Binding, String> {
         if let Some(image) = self.images.get(path) {
             return Ok(image.binding());
         }
         let texture = read(path)?;
+        if texture.source != [texture.width, texture.height] {
+            eprintln!(
+                "pika: warning: texture {} is {}×{}, capped to {}×{} by pika:textureCap",
+                source.display(),
+                texture.source[0],
+                texture.source[1],
+                texture.width,
+                texture.height
+            );
+        }
         let (image, staging) = Image::new(device, &texture)?;
         image.record(cb, &staging, &texture);
         self.staging.push(staging);
@@ -408,9 +432,10 @@ mod tests {
         let t = parse(RAMP.to_vec()).unwrap();
         assert_eq!((t.width, t.height, t.layers), (8, 8, 1));
         assert_eq!(t.format, vk::Format::R32G32_SFLOAT);
+        assert_eq!(t.source, [8, 8]);
         assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
-        assert_eq!(t.levels[0].start, 32);
+        assert_eq!(t.levels[0].start, 40);
         let texel = |level: usize, x: usize, y: usize| {
             let at = t.levels[level].start + (y * (8 >> level) + x) * 8;
             let f = |i: usize| f32::from_le_bytes(t.file[at + i..at + i + 4].try_into().unwrap());
@@ -431,10 +456,13 @@ mod tests {
         bad[20] = 0;
         assert!(parse(bad).is_err(), "an unknown format");
         let mut bad = RAMP.to_vec();
-        bad[24] = 2;
+        bad[24] = 4;
+        assert!(parse(bad).is_err(), "a source smaller than the bake");
+        let mut bad = RAMP.to_vec();
+        bad[32] = 2;
         assert!(parse(bad).is_err(), "a table of two entries");
         let mut bad = RAMP.to_vec();
-        bad[28] = 1;
+        bad[36] = 1;
         assert!(parse(bad).is_err(), "a tile past the layers");
     }
 
@@ -442,7 +470,7 @@ mod tests {
     fn reads_a_set_of_tiles() {
         // Two 1×1 R32_SFLOAT layers, tiles 1001 and 1012.
         let mut file = b"pika".to_vec();
-        for word in [1u32, 1, 2, 1, 100, 100] {
+        for word in [1u32, 1, 2, 1, 100, 1, 1, 100] {
             file.extend_from_slice(&word.to_le_bytes());
         }
         let mut table = [u32::MAX; 100];
@@ -455,7 +483,7 @@ mod tests {
         let t = parse(file.clone()).unwrap();
         assert_eq!((t.layers, t.tiles.len()), (2, 100));
         assert_eq!((t.tiles[0], t.tiles[11], t.tiles[1]), (0, 1, u32::MAX));
-        assert_eq!(t.levels, vec![428..436]);
+        assert_eq!(t.levels, vec![436..444]);
         file.truncate(file.len() - 4);
         assert!(parse(file).is_err(), "a layer missing");
     }
