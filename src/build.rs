@@ -8,19 +8,18 @@
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::abi;
-use crate::bake::{Bake, Manifest};
+use crate::bake::{Bake, Baked, Manifest};
 use crate::cache;
 use crate::material::{self, Document, Source};
 use crate::shader;
 use crate::store::Network;
 use crate::surface;
-use crate::texture::{self, Texture};
 
 // slangc takes one core for a third of a second, and the bake tool spreads
 // a texture over every core, so a few jobs at a time keep the cores busy
@@ -54,14 +53,6 @@ pub struct Output {
     pub surface: Option<shader::Surface>,
     /// The textures in the manifest's order.
     pub textures: Vec<Baked>,
-}
-
-pub struct Baked {
-    pub path: PathBuf,
-    pub source: PathBuf,
-    pub texture: Texture,
-    /// Whether the bake tool ran now rather than the cache answering.
-    pub fresh: bool,
 }
 
 pub struct Builder {
@@ -239,13 +230,7 @@ pub fn run(
     let mut textures = Vec::new();
     for source in sources(&generated.manifest, document, network)? {
         let file = Path::new(&source.file);
-        let (path, fresh) = bake.texture(file, &source.space, source.encoding, cap)?;
-        textures.push(Baked {
-            texture: texture::read(&path)?,
-            path,
-            source: file.to_owned(),
-            fresh,
-        });
+        textures.push(bake.texture(file, &source.space, source.encoding, cap)?);
     }
     Ok(Output {
         manifest: generated.manifest,

@@ -10,6 +10,7 @@ use std::time::UNIX_EPOCH;
 
 use crate::cache;
 use crate::material::Document;
+use crate::texture::{self, Texture};
 
 // Built by `make -C bake` from the checkout, like the shaders.
 const TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/bake");
@@ -88,6 +89,16 @@ pub struct Generated {
     pub manifest: Manifest,
 }
 
+/// A texture as the renderer uploads it, read from the cache.
+pub struct Baked {
+    pub path: PathBuf,
+    /// The image, or UDIM pattern, it was baked from.
+    pub source: PathBuf,
+    pub texture: Texture,
+    /// Whether the bake tool ran now rather than the cache answering.
+    pub fresh: bool,
+}
+
 #[derive(Clone)]
 pub struct Bake {
     /// The cache's `materials` directory, one entry per document and tool.
@@ -131,15 +142,20 @@ impl Bake {
     pub fn generate(&self, document: &Document) -> Result<Generated, String> {
         let key = cache::fnv1a(&[document.text.as_bytes(), &self.tool.to_le_bytes()]);
         let dir = self.materials.join(format!("{key:016x}"));
-        if !dir.join("manifest").is_file() {
-            self.run(document, &dir)?;
-        }
-        let text = std::fs::read_to_string(dir.join("manifest"))
-            .map_err(|e| format!("cannot read {}/manifest: {e}", dir.display()))?;
-        Ok(Generated {
-            manifest: manifest(&text)?,
-            dir,
-        })
+        let manifest = match generated(&dir) {
+            Ok(manifest) => manifest,
+            Err(why) => {
+                // Absent, or left partial by a run that never finished:
+                // either way the tool runs, into a directory with nothing
+                // left of the old.
+                if dir.exists() {
+                    cache::discard(&dir, &why)?;
+                }
+                self.run(document, &dir)?;
+                generated(&dir)?
+            }
+        };
+        Ok(Generated { manifest, dir })
     }
 
     /// Runs the tool into a directory beside `dir`, then moves it into
@@ -161,17 +177,27 @@ impl Bake {
     /// Bakes the image `source`, or the UDIM set its `<UDIM>` pattern
     /// names, declared in the colour space `space`, with the levels above
     /// `cap` texels dropped, in one of the tool's encodings, unless the
-    /// cache holds it; returns the baked file and whether it was baked now.
+    /// cache holds it, and reads it.
     pub fn texture(
         &self,
         source: &Path,
         space: &str,
         encoding: &str,
         cap: u32,
-    ) -> Result<(PathBuf, bool), String> {
+    ) -> Result<Baked, String> {
         let path = self.texture_path(source, space, encoding, cap)?;
         if path.is_file() {
-            return Ok((path, false));
+            match texture::read(&path) {
+                Ok(texture) => {
+                    return Ok(Baked {
+                        path,
+                        source: source.to_owned(),
+                        texture,
+                        fresh: false,
+                    });
+                }
+                Err(why) => cache::discard(&path, &why)?,
+            }
         }
         let dir = path.parent().unwrap();
         std::fs::create_dir_all(dir)
@@ -191,7 +217,12 @@ impl Bake {
         }
         std::fs::rename(&tmp, &path)
             .map_err(|e| format!("cannot move {} into place: {e}", tmp.display()))?;
-        Ok((path, true))
+        Ok(Baked {
+            texture: texture::read(&path)?,
+            path,
+            source: source.to_owned(),
+            fresh: true,
+        })
     }
 
     /// Where `source`'s bake lives: under `textures`, mirroring the source's
@@ -283,6 +314,17 @@ pub fn tiles(source: &Path) -> Result<Vec<PathBuf>, String> {
         ));
     }
     Ok(set)
+}
+
+/// What the entry `dir` holds: its manifest, with the pixel stage beside it.
+fn generated(dir: &Path) -> Result<Manifest, String> {
+    let path = dir.join("manifest");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if !dir.join("pixel.slang").is_file() {
+        return Err(format!("{} has no pixel.slang", dir.display()));
+    }
+    manifest(&text)
 }
 
 fn run(document: &Document, dir: &Path) -> Result<(), String> {

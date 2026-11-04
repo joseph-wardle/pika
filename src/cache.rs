@@ -1,7 +1,8 @@
 //! Pika's cache directory, where generated shaders and their SPIR-V live
 //! between runs: `PIKA_CACHE`, else `$XDG_CACHE_HOME/pika`, else
 //! `~/.cache/pika`. Each entry is keyed by a hash of everything that
-//! determines it, so nothing in it is ever stale, only unused.
+//! determines it, so nothing in it is ever stale, only unused; one a crash
+//! left unreadable is rebuilt as if it were absent (`discard`).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,6 +48,25 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, path))
         .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Removes the entry `path`, a file or a directory, that cannot be read
+/// (`why`), so its owner rebuilds it as if it were absent.
+pub fn discard(path: &Path, why: &str) -> Result<(), String> {
+    eprintln!(
+        "pika: warning: the cache entry {} is unreadable ({why}); rebuilding it",
+        path.display()
+    );
+    let removed = if path.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match removed {
+        // Another process discarded it meanwhile.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(|e| format!("cannot remove {}: {e}", path.display())),
+    }
 }
 
 #[cfg(test)]
