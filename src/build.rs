@@ -7,11 +7,13 @@
 //! replaces a newer edit's.
 
 use std::collections::BTreeMap;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::abi;
 use crate::bake::{Bake, Manifest};
 use crate::cache;
 use crate::material::{self, Document, Source};
@@ -188,7 +190,17 @@ fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &Sender<Built>) {
         let Ok(job) = job else {
             return;
         };
-        let result = run(bake, &job.document, &job.network, job.cap, job.held);
+        // A panic here would leave the material pending for good, with no
+        // frame to report it: it is the build's failure, warned of like one.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            run(bake, &job.document, &job.network, job.cap, job.held)
+        }))
+        .unwrap_or_else(|payload| {
+            Err(format!(
+                "its build panicked: {}",
+                abi::panic_message(payload.as_ref())
+            ))
+        });
         let built = Built {
             id: job.id,
             generation: job.generation,

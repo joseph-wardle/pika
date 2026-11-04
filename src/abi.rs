@@ -6,6 +6,7 @@
 //! call on it fails, so the delegate stops calling and renders nothing rather
 //! than a frame from half-updated state.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
@@ -186,24 +187,27 @@ fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
     let (status, message) = match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => return OK,
         Ok(Err(message)) => (ERROR, message),
-        Err(payload) => {
-            let what = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown payload".into());
-            (
-                PANIC,
-                format!(
-                    "Pika panicked ({what}); it renders nothing until the delegate is recreated"
-                ),
-            )
-        }
+        Err(payload) => (
+            PANIC,
+            format!(
+                "Pika panicked ({}); it renders nothing until the delegate is recreated",
+                panic_message(payload.as_ref())
+            ),
+        ),
     };
     // Messages are Rust strings, which may hold a NUL; C would cut them there.
     let message = CString::new(message.replace('\0', " ")).unwrap_or_default();
     LAST_ERROR.with(|e| *e.borrow_mut() = message);
     status
+}
+
+/// What a caught panic said: its payload as text.
+pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown payload".into())
 }
 
 /// Borrows `len` values at `ptr`. Empty Hydra arrays may pass a null pointer,
@@ -980,6 +984,17 @@ pub unsafe extern "C" fn pika_stats(
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn a_panic_says_what_it_said() {
+        let payloads: [Box<dyn Any + Send>; 3] = [
+            Box::new("a str"),
+            Box::new(String::from("a string")),
+            Box::new(7u8),
+        ];
+        let messages: Vec<String> = payloads.iter().map(|p| panic_message(p.as_ref())).collect();
+        assert_eq!(messages, ["a str", "a string", "unknown payload"]);
+    }
 
     fn last_error() -> String {
         // SAFETY: the pointer is valid until the next failing call on this thread.
