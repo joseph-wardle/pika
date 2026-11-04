@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = "Four tilted quads under one normal map, bake/fixtures/normal.exr, whose every texel is the same tangent-space normal, so each quad is lit by the tangent frame its st gives it: st along x and y, mirrored at frame 2; st turned a quarter, on a subdivided quad; st mirrored; and, near facing, an OpenPBR quad with the map on its geometry normal. The rest are Standard Surfaces."
+    doc = "Four tilted quads under one normal map, bake/fixtures/normal.exr, or for the last its 8-bit copy normal.png, read as it is and not as sRGB, whose every texel is the same tangent-space normal, so each quad is lit by the tangent frame its st gives it: st along x and y, mirrored at frame 2; st turned a quarter, on a subdivided quad; st mirrored; and, near facing, an OpenPBR quad with the 8-bit map on its geometry normal. The rest are Standard Surfaces."
     subLayers = [@settings.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -141,7 +141,7 @@ def Material "openpbr"
     def Shader "image"
     {
         uniform token info:id = "ND_image_vector3"
-        asset inputs:file = @../../bake/fixtures/normal.exr@
+        asset inputs:file = @../../bake/fixtures/normal.png@
         float2 inputs:texcoord.connect = </openpbr/st.outputs:out>
         float3 outputs:out
     }

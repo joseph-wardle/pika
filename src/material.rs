@@ -28,25 +28,29 @@ pub struct Source {
 /// its space is raw; a float as BC4; a vector3 or vector4 as BC7; a
 /// vector2 stays float, so a coordinate map stays exact (the oracles' uv
 /// ramp). The space is the asset's `colorSpace` metadata, else
-/// UsdUVTexture's `sourceColorSpace`, else `auto`, in OpenColorIO's names.
+/// UsdUVTexture's `sourceColorSpace`, in OpenColorIO's names, else `auto`
+/// for a colour and raw for the rest.
 pub fn source(node: &Node, input: &str) -> Result<Source, String> {
     let file = match node.params.get(input) {
         Some(Value::Asset(path)) => path.clone(),
         Some(_) => return Err(format!("{input} is not an asset")),
         None => return Err(format!("{input} has no asset")),
     };
-    let declared = (node.params.get(&format!("colorSpace:{input}")))
-        .or_else(|| node.params.get("sourceColorSpace"));
-    let space = match declared {
-        Some(Value::Text(space)) if space == "sRGB" => "srgb_texture".to_owned(),
-        Some(Value::Text(space)) => space.clone(),
-        _ => "auto".to_owned(),
-    };
     let kind = match node.node_type.as_str() {
         "UsdUVTexture" => "color4",
         name => (name.strip_prefix("ND_image_"))
             .or_else(|| name.strip_prefix("ND_tiledimage_"))
             .ok_or_else(|| format!("{name} reads a texture Pika does not know how to bake"))?,
+    };
+    let declared = (node.params.get(&format!("colorSpace:{input}")))
+        .or_else(|| node.params.get("sourceColorSpace"));
+    let space = match declared {
+        Some(Value::Text(space)) if space == "sRGB" => "srgb_texture".to_owned(),
+        Some(Value::Text(space)) => space.clone(),
+        // USD's auto, sRGB at 8 bits, is a rule for colour: a normal or
+        // roughness map at 8 bits is read as it is, as Karma reads it.
+        _ if kind == "color3" || kind == "color4" => "auto".to_owned(),
+        _ => "raw".to_owned(),
     };
     let encoding = match kind {
         "color3" | "color4" if space == "raw" => "data",
@@ -635,16 +639,18 @@ pub mod tests {
         srgb.params.remove("sourceColorSpace");
         assert_eq!(source(&srgb, "file").unwrap().space, "auto");
 
+        // Declaring nothing, a colour is sRGB when 8-bit, the rest raw.
         let image = |kind: &str| {
             let mut node = tex.clone();
             node.node_type = format!("ND_image_{kind}");
             node.params.remove("colorSpace:file");
-            source(&node, "file").map(|s| s.encoding)
+            node.params.remove("sourceColorSpace");
+            source(&node, "file").map(|s| (s.space, s.encoding))
         };
-        assert_eq!(image("vector2"), Ok("float"));
-        assert_eq!(image("float"), Ok("single"));
-        assert_eq!(image("vector3"), Ok("data"));
-        assert_eq!(image("color3"), Ok("color"));
+        assert_eq!(image("vector2"), Ok(("raw".into(), "float")));
+        assert_eq!(image("float"), Ok(("raw".into(), "single")));
+        assert_eq!(image("vector3"), Ok(("raw".into(), "data")));
+        assert_eq!(image("color3"), Ok(("auto".into(), "color")));
         assert!(image("matrix33").is_err());
         let mut other = tex.clone();
         other.node_type = "ND_triplanarprojection_color3".into();

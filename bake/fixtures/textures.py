@@ -18,6 +18,9 @@ normal.exr  4×4, three float channels, every texel the same tangent-space
             normal, (0.2, 0.6, 0.898) encoded as (153, 204, 242) / 255, so
             Pika's 8-bit bake of it is exact and a sample anywhere, at any
             level, returns it (hydra/images/normalmap.usda).
+normal.png  The same at 8 bits, (153, 204, 242), as a painting tool exports
+            a normal map: a vector3 image declaring no colour space is read
+            as it is, not as sRGB (hydra/images/normalmap.usda).
 greys.jpg   128×8 RGB JPEG at quality 100, sixteen flat 8×8 blocks of grey
             in a row, 0, 17, 34 … 255. A flat grey block is one DC
             coefficient with centred chroma, so the JPEG decodes exactly,
@@ -156,10 +159,14 @@ def mips():
 
 
 def normal():
-    texels = np.broadcast_to(np.array([153, 204, 242], np.float32) / 255, (4, 4, 3))
+    codes = np.broadcast_to(np.array([153, 204, 242], np.uint8), (4, 4, 3))
     out = oiio.ImageOutput.create("normal.exr")
     out.open(os.path.join(HERE, "normal.exr"), oiio.ImageSpec(4, 4, 3, oiio.FLOAT))
-    out.write_image(np.ascontiguousarray(texels))
+    out.write_image(np.ascontiguousarray(codes.astype(np.float32) / 255))
+    out.close()
+    out = oiio.ImageOutput.create("normal.png")
+    out.open(os.path.join(HERE, "normal.png"), oiio.ImageSpec(4, 4, 3, oiio.UINT8))
+    out.write_image(np.ascontiguousarray(codes))
     out.close()
 
 

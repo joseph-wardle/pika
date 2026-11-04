@@ -113,7 +113,9 @@ What the reference encodes:
   XYZ, with a Bradford adaptation from the ACES white to D65, to Rec.709,
   as the ACES configs define it, raw as read, and none (auto, USD's
   default) as sRGB for an 8-bit source and as read for a float one, the
-  texels converted before they are filtered. Other spaces are refused. On a subdivided mesh the primvar is
+  texels converted before they are filtered. A vector2, vector3 or float
+  image declaring none is read as it is whatever its depth, as Karma reads
+  it: the auto rule is for colour. Other spaces are refused. On a subdivided mesh the primvar is
   refined with the points (hydra/images/subdivided.usda): a vertex primvar
   by the points' rules, a faceVarying one by the same rules over its own
   values, welded by point and value first, so it is smooth across an edge
@@ -179,7 +181,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "failed materials drawn clay", "base weight ignored", "emission ignored",
             "normal map ignored", "tangent from the first axis", "bitangent from the winding",
             "subsets ignored", "subset faces of the cage", "st indices ignored",
-            "sRGB read as raw", "8-bit auto read as raw", "ACEScg primaries kept",
+            "sRGB read as raw", "8-bit auto read as raw", "8-bit data read as sRGB", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
             "the cap ignored", "frame 1's reference"]
@@ -474,10 +476,10 @@ def unknown(shader):
     return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
 
 
-def sampled(image, kind):
+def sampled(image, kind, control=None):
     """The file, address modes (u, v), primvar and declared colour space
-    (auto when none) of an ND_image_<kind> node sampled at a geompropvalue
-    reader, or None for any other node."""
+    (auto when none for a colour, raw for the rest) of an ND_image_<kind>
+    node sampled at a geompropvalue reader, or None for any other node."""
     if not image or image.GetShaderId() != f"ND_image_{kind}":
         return None
     reader = upstream(image, "texcoord")
@@ -491,7 +493,9 @@ def sampled(image, kind):
     path = file.Get().resolvedPath
     if "<UDIM>" in file.Get().path:
         path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
-    return (path, modes, reader.GetInput("geomprop").Get(), file.GetAttr().GetColorSpace() or "auto")
+    colour = kind == "color3" or control == "8-bit data read as sRGB"
+    space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
+    return (path, modes, reader.GetInput("geomprop").Get(), space)
 
 
 def lit(surface, time, control=None):
@@ -511,7 +515,7 @@ def lit(surface, time, control=None):
         node = upstream(surface, bump)
         chain = node and node.GetShaderId() == "ND_normalmap_float" and (
             [i.GetBaseName() for i in node.GetInputs()] == ["in"])
-        normal = sampled(upstream(node, "in"), "vector3") if chain else None
+        normal = sampled(upstream(node, "in"), "vector3", control) if chain else None
         if not normal:
             raise ValueError(f"{path}: the reference perturbs a normal only by a normalmap of an "
                              "image's vector3 sample at a primvar")
@@ -559,7 +563,8 @@ def look(prim, host, time, control=None):
     image = upstream(edf, "color")
     while image and image.GetShaderId().startswith("ND_convert_"):
         image = upstream(image, "in")
-    image = sampled(image, "vector2") or sampled(image, "vector3") or sampled(image, "color3")
+    image = (sampled(image, "vector2", control) or sampled(image, "vector3", control)
+             or sampled(image, "color3", control))
     if not image:
         raise refuse
     return Look((0.0,) * 3, (0.0,) * 3, image, None, None)

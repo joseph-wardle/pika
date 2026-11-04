@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = "Four strips facing the camera, each emitting a color3 image sampled at its st, which shifts at frame 2 and clamps: the sixteen greys of bake/fixtures/greys.jpg declared srgb_texture, declared nothing (auto: sRGB for 8 bits) and declared raw, and bake/fixtures/acescg.exr, eight colours stored in ACEScg primaries, declared acescg. The first two strips show one ramp of greys, the third a lighter one, the fourth the colours in Rec.709."
+    doc = "Five strips facing the camera, each emitting an image sampled at its st, which shifts at frame 2 and clamps: the sixteen greys of bake/fixtures/greys.jpg as a color3 declared srgb_texture, declared nothing (auto: sRGB for 8 bits) and declared raw, then as a vector3 declared nothing (read as it is: the auto rule is for colour), and bake/fixtures/acescg.exr, eight colours stored in ACEScg primaries, declared acescg. The first two strips show one ramp of greys, the third and fourth a lighter one, the fifth the colours in Rec.709."
     subLayers = [@settings.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -21,7 +21,7 @@ def Mesh "jpeg_srgb" (prepend apiSchemas = ["MaterialBindingAPI"])
     uniform token subdivisionScheme = "none"
     int[] faceVertexCounts = [4]
     int[] faceVertexIndices = [0, 1, 2, 3]
-    point3f[] points = [(-1.7, 0.625, -5), (1.7, 0.625, -5), (1.7, 0.875, -5), (-1.7, 0.875, -5)]
+    point3f[] points = [(-1.7, 0.675, -5), (1.7, 0.675, -5), (1.7, 0.925, -5), (-1.7, 0.925, -5)]
     texCoord2f[] primvars:st (
         interpolation = "vertex"
     )
@@ -73,7 +73,7 @@ def Mesh "jpeg_auto" (prepend apiSchemas = ["MaterialBindingAPI"])
     uniform token subdivisionScheme = "none"
     int[] faceVertexCounts = [4]
     int[] faceVertexIndices = [0, 1, 2, 3]
-    point3f[] points = [(-1.7, 0.125, -5), (1.7, 0.125, -5), (1.7, 0.375, -5), (-1.7, 0.375, -5)]
+    point3f[] points = [(-1.7, 0.275, -5), (1.7, 0.275, -5), (1.7, 0.525, -5), (-1.7, 0.525, -5)]
     texCoord2f[] primvars:st (
         interpolation = "vertex"
     )
@@ -125,7 +125,7 @@ def Mesh "jpeg_raw" (prepend apiSchemas = ["MaterialBindingAPI"])
     uniform token subdivisionScheme = "none"
     int[] faceVertexCounts = [4]
     int[] faceVertexIndices = [0, 1, 2, 3]
-    point3f[] points = [(-1.7, -0.375, -5), (1.7, -0.375, -5), (1.7, -0.125, -5), (-1.7, -0.125, -5)]
+    point3f[] points = [(-1.7, -0.125, -5), (1.7, -0.125, -5), (1.7, 0.125, -5), (-1.7, 0.125, -5)]
     texCoord2f[] primvars:st (
         interpolation = "vertex"
     )
@@ -172,12 +172,71 @@ def Material "raw"
     }
 }
 
+def Mesh "jpeg_vector3" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, -0.525, -5), (1.7, -0.525, -5), (1.7, -0.275, -5), (-1.7, -0.275, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(0.1, 0.1), (1.1, 0.1), (1.1, 1.1), (0.1, 1.1)],
+    }
+    rel material:binding = </vector3>
+}
+
+def Material "vector3"
+{
+    token outputs:surface.connect = </vector3/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </vector3/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </vector3/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </vector3/image.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector3"
+        asset inputs:file = @../../bake/fixtures/greys.jpg@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </vector3/st.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
 def Mesh "exr_acescg" (prepend apiSchemas = ["MaterialBindingAPI"])
 {
     uniform token subdivisionScheme = "none"
     int[] faceVertexCounts = [4]
     int[] faceVertexIndices = [0, 1, 2, 3]
-    point3f[] points = [(-1.7, -0.875, -5), (1.7, -0.875, -5), (1.7, -0.625, -5), (-1.7, -0.625, -5)]
+    point3f[] points = [(-1.7, -0.925, -5), (1.7, -0.925, -5), (1.7, -0.675, -5), (-1.7, -0.675, -5)]
     texCoord2f[] primvars:st (
         interpolation = "vertex"
     )

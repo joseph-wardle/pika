@@ -44,7 +44,7 @@ RENDERS=8
 make -C "$ROOT/hydra" --no-print-directory HFS="$HFS" OUT="$OUT/plugin"
 # Both Houdinis' checks share the bake tool.
 flock "$ROOT/target/bake.lock" make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
-rm -rf "$OUT/cache"
+rm -rf "$OUT/cache" "$OUT/fixtures"
 mkdir -p "$OUT/images" "$OUT/fixtures"
 export PIKA_CACHE=$OUT/cache
 
@@ -103,7 +103,10 @@ fixture() {
     local name dir=$ROOT/hydra/fixtures script=()
     name=$(basename "$1" .usda)
     [ -f "$dir/$name.py" ] && script=(--postframe-script "$dir/$name.py")
-    PIKA_STORE_DUMP=$OUT/fixtures/$name.dump PIKA_STATS=$OUT/fixtures/$name.stats \
+    # A cache of its own, so the compile and bake counts below are its own
+    # misses, not what the image scenes left behind.
+    PIKA_CACHE=$OUT/fixtures/$name.cache \
+        PIKA_STORE_DUMP=$OUT/fixtures/$name.dump PIKA_STATS=$OUT/fixtures/$name.stats \
         husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
         "${script[@]}" -o "$OUT/fixtures/$name.\$F4.exr" "$1" >"$OUT/fixtures/$name.log" 2>&1 ||
         fail "$name: husk exited $? (see $OUT/fixtures/$name.log)"
