@@ -37,6 +37,9 @@ pub struct Shade {
     /// did; `update` tries one again only when its network moves or the
     /// cap changes.
     failed: BTreeSet<u64>,
+    /// Whether a material came or went since the textures no material
+    /// uses were last dropped.
+    stale: bool,
     /// The texture cap of the frame; 0 before the first.
     cap: u32,
     /// `material::clay`, drawn where `materials` has no entry.
@@ -100,6 +103,7 @@ impl Shade {
             surfaces,
             materials: BTreeMap::new(),
             failed: BTreeSet::new(),
+            stale: false,
             cap: 0,
             clay,
             pink,
@@ -159,10 +163,24 @@ impl Shade {
             );
         }
         self.textures.begin();
+        let before = self.materials.len();
         self.materials
             .retain(|id, _| store.materials().contains_key(id));
+        self.stale |= self.materials.len() != before;
         self.failed.retain(|id| store.materials().contains_key(id));
         (self.builder).retain(|id| store.materials().contains_key(id));
+        // Before any load: a material whose install fails this frame
+        // keeps the textures it loaded until the next, when the uploads
+        // recorded into `cb` have run. Collecting the used paths costs
+        // milliseconds on a large scene, so only a material coming or
+        // going asks for it.
+        if self.stale {
+            let used: BTreeSet<PathBuf> = (self.materials.values())
+                .flat_map(|u| u.textures.iter().cloned())
+                .collect();
+            self.textures.retain(&used);
+            self.stale = false;
+        }
         let mut update = Update::default();
         let ids: Vec<u64> = if cap == self.cap {
             moved.materials.iter().copied().collect()
@@ -178,6 +196,7 @@ impl Shade {
                 continue;
             };
             self.failed.remove(&id);
+            self.stale = true;
             if let Err(e) = self.material(id, network) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.materials.remove(&id);
@@ -189,6 +208,7 @@ impl Shade {
                 continue;
             };
             let id = built.id;
+            self.stale = true;
             if let Err(e) = self.install(device, built, cb, &mut update) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.materials.remove(&id);
@@ -196,10 +216,6 @@ impl Shade {
             }
         }
         update.pending = self.builder.len();
-        let used: BTreeSet<PathBuf> = (self.materials.values())
-            .flat_map(|u| u.textures.iter().cloned())
-            .collect();
-        self.textures.retain(&used);
 
         let [x, y, z, w] = camera.eye;
         // An orthographic camera's eye is the direction toward the viewer:
