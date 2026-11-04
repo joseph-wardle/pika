@@ -82,11 +82,20 @@ What the reference encodes:
   so the fixture's values are multiples of 1/255. A mesh
   bound to a MaterialX surface whose
   emission is a uniform EDF of an image sampled at a primvar
-  (hydra/images/textured.usda) emits the image's bilinear sample, level 0,
-  at the hit's primvar, the one the material's reader names
-  (hydra/images/primvar.usda), under the image node's address modes, with
-  st (0, 0) at the image's bottom-left corner as USD and MaterialX read it,
-  the channels padded with 0 to three. A file naming <UDIM> is a set of
+  (hydra/images/textured.usda) emits the image's sample at the hit's
+  primvar, the one the material's reader names (hydra/images/primvar.usda),
+  under the image node's address modes, with st (0, 0) at the image's
+  bottom-left corner as USD and MaterialX read it, the channels padded
+  with 0 to three. The sample is bilinear within a level, at the level the
+  hit's footprint picks as a Vulkan sampler with linear mip filtering and
+  no anisotropy picks it (hydra/images/mips.usda): the footprint is the st
+  step from the pixel's centre to the next pixel's, right and down, on the
+  hit's plane; the longer step, in texels of level 0, is 2^λ, and levels
+  ⌊λ⌋ and ⌈λ⌉ are blended by λ's fraction, level 0 alone where the image is
+  magnified. The levels are the file's stored ones; the reference refuses
+  a level the file lacks. The step is the GPU's own on a surface facing the
+  camera, where st is affine on screen; no scene minifies any other kind.
+  A file naming <UDIM> is a set of
   tiles (hydra/images/udim.usda): the hit samples tile 1001 + ⌊u⌋ + 10 ⌊v⌋
   at (u − ⌊u⌋, v − ⌊v⌋), under the same modes within the tile, 0 where the
   set has no such file, as USD numbers tiles and Storm and Karma read
@@ -158,6 +167,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "subsets ignored", "subset faces of the cage", "st indices ignored",
             "sRGB read as raw", "8-bit auto read as raw", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
+            "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -512,8 +522,9 @@ def look(prim, host, time, control=None):
     `host` delivers it; a lit surface's; or the image file, its address
     modes (u, v), the primvar it is sampled at and its colour space, for a
     MaterialX surface whose emission is a uniform EDF of an image node's
-    vector2 sample through converts (hydra/images/textured.usda) or of its
-    color3 sample (hydra/images/colorspace.usda)."""
+    vector2 or vector3 sample through converts (hydra/images/textured.usda,
+    hydra/images/mips.usda) or of its color3 sample
+    (hydra/images/colorspace.usda)."""
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
     if not material:
         return CLAY
@@ -533,7 +544,7 @@ def look(prim, host, time, control=None):
     image = upstream(edf, "color")
     while image and image.GetShaderId().startswith("ND_convert_"):
         image = upstream(image, "in")
-    image = sampled(image, "vector2") or sampled(image, "color3")
+    image = sampled(image, "vector2") or sampled(image, "vector3") or sampled(image, "color3")
     if not image:
         raise refuse
     return Look((0.0,) * 3, (0.0,) * 3, image, None, None)
@@ -558,35 +569,18 @@ def working(texels, path, space, control=None):
     return texels
 
 
-def sample(path, st, modes, space, control=None):
-    """The bilinear sample of level 0 of the image at `path`, or of the tile
-    of the UDIM set `path` names, at each st (an (n, 2) array), rows from
-    the bottom as USD reads st, under the address modes (u, v), in the
-    working space; the channels padded with 0 to three."""
-    if "<UDIM>" in path:
-        tile = np.floor(st)
-        if control == "UDIM tiles read as one image":
-            tile[:] = 0
-        width = 1 if control == "UDIM rows one tile wide" else 10
-        number = 1001 + tile[:, 0].astype(int) + width * tile[:, 1].astype(int)
-        out = np.zeros((len(st), 3))
-        for n in np.unique(number):
-            file = path.replace("<UDIM>", str(n))
-            if not os.path.isfile(file) and control == "missing UDIM tiles read as 1001":
-                file = path.replace("<UDIM>", "1001")
-            if os.path.isfile(file):
-                on = number == n
-                out[on] = sample(file, (st - tile)[on], modes, space, control)
-        return out
-    image = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
-    h, w = image.shape[:2]
-    texels = np.zeros((h, w, 3))
-    texels[..., :min(3, image.shape[2])] = image[..., :3]
-    texels = working(texels, path, space, control)
-    if control != "st origin at the top":
-        texels = texels[::-1]
-    if control == "st wrapped, not clamped":
-        modes = ("periodic", "periodic")
+def halve(texels):
+    """A 2×2 box of the texels (rows, columns, channels), the last row or
+    column repeated where a side is odd, as the bake tool builds a level."""
+    h, w = texels.shape[:2]
+    padded = texels[np.minimum(np.arange(h + h % 2), h - 1)][:, np.minimum(np.arange(w + w % 2), w - 1)]
+    return padded.reshape((h + 1) // 2, 2, (w + 1) // 2, 2, -1).mean((1, 3))
+
+
+def bilinear(texels, st, modes, control=None):
+    """The bilinear sample of one level's texels, rows from the bottom, at
+    each st (an (n, 2) array), under the address modes (u, v)."""
+    h, w = texels.shape[:2]
     f = st * [w, h] - 0.5
     if control == "nearest texel":
         f = np.floor(st * [w, h])
@@ -604,6 +598,64 @@ def sample(path, st, modes, space, control=None):
     y0, y1 = address(i0[:, 1], h, modes[1]), address(i0[:, 1] + 1, h, modes[1])
     return ((texels[y0, x0] * (1 - fx) + texels[y0, x1] * fx) * (1 - fy) +
             (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
+
+
+def sample(path, st, step, modes, space, control=None):
+    """The trilinear sample of the image at `path`, or of the tile of the
+    UDIM set `path` names, at each st (an (n, 2) array), rows from the
+    bottom as USD reads st, under the address modes (u, v), in the working
+    space; the channels padded with 0 to three. `step`, (n, 2, 2), is the
+    st from each sample's pixel to the next one right and down, which picks
+    the level (see the module's doc)."""
+    if "<UDIM>" in path:
+        tile = np.floor(st)
+        if control == "UDIM tiles read as one image":
+            tile[:] = 0
+        width = 1 if control == "UDIM rows one tile wide" else 10
+        number = 1001 + tile[:, 0].astype(int) + width * tile[:, 1].astype(int)
+        out = np.zeros((len(st), 3))
+        for n in np.unique(number):
+            file = path.replace("<UDIM>", str(n))
+            if not os.path.isfile(file) and control == "missing UDIM tiles read as 1001":
+                file = path.replace("<UDIM>", "1001")
+            if os.path.isfile(file):
+                on = number == n
+                out[on] = sample(file, (st - tile)[on], step[on], modes, space, control)
+        return out
+    if control == "st wrapped, not clamped":
+        modes = ("periodic", "periodic")
+    level0 = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
+
+    def level(m):
+        """Level m's texels in the working space, rows from the bottom."""
+        if m and control == "levels filtered from level 0":
+            image = level0
+            for _ in range(m):
+                image = halve(image)
+        else:
+            image = oiio.ImageBuf(path, 0, m).get_pixels(oiio.FLOAT)
+            if image.size == 0:
+                raise ValueError(f"{path}: the reference reads the levels the file stores, which stop before level {m}")
+        texels = np.zeros(image.shape[:2] + (3,))
+        texels[..., :min(3, image.shape[2])] = image[..., :3]
+        texels = working(texels, path, space, control)
+        return texels if control == "st origin at the top" else texels[::-1]
+
+    h, w = level0.shape[:2]
+    with np.errstate(divide="ignore"):
+        lod = np.clip(np.log2(np.hypot(step[..., 0] * w, step[..., 1] * h).max(1)), 0, None)
+    if control == "level 0 whatever the footprint":
+        lod[:] = 0
+    if control == "the nearest level, not a blend":
+        lod = np.floor(lod + 0.5)
+    lower = np.floor(lod).astype(int)
+    f = lod - lower
+    out = np.zeros((len(st), 3))
+    for m in np.unique(np.r_[lower, lower[f > 0] + 1]):
+        weight = np.where(lower == m, 1 - f, np.where(lower + 1 == m, f, 0))
+        on = weight > 0
+        out[on] += weight[on, None] * bilinear(level(m), st[on], modes, control)
+    return out
 
 
 def tangent_sums(points, counts, indices, holes, key, st):
@@ -785,6 +837,7 @@ def reference(stage, time, width, height, host, control=None):
         return image
     world = np.array([[list(v) for v in t["points"]] for t in tris])
     nearest, p, bary = cast(to_clip, width, height, shift, world)
+    around = footprint(to_clip, width, height, shift, world, nearest)
     hit = nearest >= 0
     i = nearest[hit]
     p, bary = p[hit], bary[hit]
@@ -817,7 +870,9 @@ def reference(stage, time, width, height, host, control=None):
         for k, (path, modes, _, space) in enumerate(images):
             on = which == k
             st = np.array([t["st"] or [[0, 0]] * 3 for t in tris])[i][on]
-            out[on] = sample(path, np.einsum("nc,ncj->nj", bary[on], st), modes, space, control)
+            at = np.einsum("nc,ncj->nj", bary[on], st)
+            step = np.einsum("nkc,ncj->nkj", around[on], st) - at[:, None]
+            out[on] = sample(path, at, step, modes, space, control)
         return out, which >= 0
 
     # A normal map perturbs the normal before it is turned toward the eye.
@@ -862,6 +917,32 @@ def reference(stage, time, width, height, host, control=None):
     return image
 
 
+def rays(unproject, width, height, x, y):
+    """The ray through the image position (x, y), in pixels, rows down: its
+    start on the near plane and the vector from there to the far plane."""
+    ndc = np.c_[2 * x / width - 1, 1 - 2 * y / height]
+    near = np.c_[ndc, -np.ones(len(x)), np.ones(len(x))] @ unproject
+    far = np.c_[ndc, np.ones(len(x)), np.ones(len(x))] @ unproject
+    o = near[:, :3] / near[:, 3:]
+    return o, far[:, :3] / far[:, 3:] - o
+
+
+def intersect(o, d, v0, e1, e2):
+    """Moller-Trumbore: where the ray from `o` along `d` meets the plane of
+    the triangle (v0, v0 + e1, v0 + e2): the point's barycentric u and v,
+    its distance along the ray, and the determinant, 0 where the ray is
+    parallel to the plane."""
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pv = np.cross(d, e2)
+        det = dot(e1, pv)
+        s = o - v0
+        u = dot(s, pv) / det
+        qv = np.cross(s, e1)
+        v = dot(d, qv) / det
+        t = dot(e2, qv) / det
+    return u, v, t, det
+
+
 def cast(to_clip, width, height, shift, tris):
     """Casts a ray through each pixel centre at the triangles (world points,
     (count, 3, 3)): the nearest triangle's index or -1, the hit point and
@@ -877,23 +958,12 @@ def cast(to_clip, width, height, shift, tris):
     v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
     unproject = np.linalg.inv(np.array(to_clip))
     columns = np.arange(width)
-    ndc_x = 2 * (columns + 0.5 + shift) / width - 1
-    # A row at a time: Moller-Trumbore over every (pixel, triangle) pair.
+    # A row at a time: every (pixel, triangle) pair.
     for y in range(height):
-        ndc_y = np.full(width, 1 - 2 * (y + 0.5) / height)
-        near = np.c_[ndc_x, ndc_y, -np.ones(width), np.ones(width)] @ unproject
-        far = np.c_[ndc_x, ndc_y, np.ones(width), np.ones(width)] @ unproject
-        o = (near[:, :3] / near[:, 3:])[:, None]
-        d = (far[:, :3] / far[:, 3:])[:, None] - o
-        with np.errstate(divide="ignore", invalid="ignore"):
-            pv = np.cross(d, e2)
-            det = dot(e1, pv)
-            s = o - v0
-            u = dot(s, pv) / det
-            qv = np.cross(s, e1)
-            v = dot(d, qv) / det
-            t = dot(e2, qv) / det
-            hit = (det != 0) & (u >= -EDGE) & (v >= -EDGE) & (u + v <= 1 + EDGE) & (t >= 0)
+        o, d = rays(unproject, width, height, columns + 0.5 + shift, np.full(width, y + 0.5))
+        o, d = o[:, None], d[:, None]
+        u, v, t, det = intersect(o, d, v0, e1, e2)
+        hit = (det != 0) & (u >= -EDGE) & (v >= -EDGE) & (u + v <= 1 + EDGE) & (t >= 0)
         i = np.where(hit, t, np.inf).argmin(axis=1)
         seen = hit[columns, i]
         x, i = columns[seen], i[seen]
@@ -901,6 +971,24 @@ def cast(to_clip, width, height, shift, tris):
         point[y, x] = o[x, 0] + t[x, i, None] * d[x, 0]
         bary[y, x] = np.c_[1 - u[x, i] - v[x, i], u[x, i], v[x, i]]
     return nearest, point, bary
+
+
+def footprint(to_clip, width, height, shift, tris, nearest):
+    """For each pixel `cast` hit, in image order: the barycentric
+    coordinates, on its own triangle's plane, of the ray through the next
+    pixel's centre to the right and of the one below, (hits, 2, 3). A
+    texture's level follows from the st between a pixel and its neighbours,
+    as the GPU differences its interpolated st across a pixel quad (see
+    the module's doc)."""
+    y, x = np.nonzero(nearest >= 0)
+    i = nearest[y, x]
+    unproject = np.linalg.inv(np.array(to_clip))
+    out = np.zeros((len(x), 2, 3))
+    for k, (dx, dy) in enumerate(((1, 0), (0, 1))):
+        o, d = rays(unproject, width, height, x + 0.5 + shift + dx, y + 0.5 + dy)
+        u, v, _, _ = intersect(o, d, tris[i, 0], tris[i, 1] - tris[i, 0], tris[i, 2] - tris[i, 0])
+        out[:, k] = np.c_[1 - u - v, u, v]
+    return out
 
 
 def dot(a, b):

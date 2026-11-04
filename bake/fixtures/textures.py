@@ -10,9 +10,10 @@ swatch.png  8×8 RGB at 8 bits, four flat 4×4 blocks: red, green, blue and
             bytes back.
 mips.exr    8×8 RGB half, tiled with stored mip levels, as maketx writes
             them: level 0 is the swatch, the coarser levels are flat greys of
-            0.5, 0.25 and 0.125, which no filter of level 0 produces, so a
+            128, 64 and 32 of 255, which no filter of level 0 produces, so a
             bake that reuses the stored levels is told from one that rebuilt
-            them.
+            them, and which are exact at 8 bits, so a render shows which
+            levels the GPU read (hydra/images/mips.usda).
 normal.exr  4×4, three float channels, every texel the same tangent-space
             normal, (0.2, 0.6, 0.898) encoded as (153, 204, 242) / 255, so
             Pika's 8-bit bake of it is exact and a sample anywhere, at any
@@ -139,8 +140,8 @@ def acescg():
 
 def mips():
     levels = [swatch_pixels().astype(np.float32) / 255]
-    for size, grey in ((4, 0.5), (2, 0.25), (1, 0.125)):
-        levels.append(np.full((size, size, 3), grey, np.float32))
+    for size, grey in ((4, 128), (2, 64), (1, 32)):
+        levels.append(np.full((size, size, 3), grey / 255, np.float32))
     out = oiio.ImageOutput.create("mips.exr")
     path = os.path.join(HERE, "mips.exr")
     for i, level in enumerate(levels):
