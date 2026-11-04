@@ -41,4 +41,4 @@ export PXR_PLUGINPATH_NAME=$PWD/target/hydra
 husk -R Pika -c /world/camera -o out.exr hydra/scenes/cube.usda
 ```
 
-`make -C bake` builds the bake tool into `target/bake`; `bake/check.sh` is its check. `hydra/check.sh` is the delegate's check, `hydra/gate.sh` the timing run on ALab, and `PIKA_STATS` with `hydra/stats.py` measure any run. Each script's header says what it does and how to run it.
+`make -C bake` builds the bake tool into `target/bake`; `bake/check.sh` is its check. `hydra/check.sh` is the delegate's check, `hydra/gate.sh` the timing run on ALab, and `PIKA_STATS` with `hydra/stats.py` measure any run. Each script's header says what it does and how to run it. `NOTICE` lists the third-party code Pika ships and its licences.

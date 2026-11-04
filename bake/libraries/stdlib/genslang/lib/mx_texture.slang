@@ -1,3 +1,6 @@
+// Modified from MaterialX 1.39.5's libraries/stdlib/genslang/lib/mx_texture.slang
+// (Academy Software Foundation, Apache License 2.0: bake/libraries/NOTICE).
+//
 // Pika's textures are 2D arrays: one layer for a plain image, and for a
 // UDIM set one layer per tile the set has, found through `tiles`, which
 // maps tile 1001 + i to its layer, or past the layers for a tile the set
