@@ -2,7 +2,7 @@
 //! pixel stage and the vertex stage written for it, each material's
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by a
-//! headlight. A material is built off the render thread (`build`) and drawn
+//! headlight. A material is built off the render thread (`bake`) and drawn
 //! clay until its first build lands, and as it was until an edit's does; a
 //! value edit writes its block in place and rebinds its samplers.
 
@@ -11,17 +11,16 @@ use std::path::PathBuf;
 
 use ash::vk;
 
-use crate::bake::{Bake, Manifest};
-use crate::build::{self, Builder, Built};
+use crate::bake::{self, Bake, Builder, Built, Manifest};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Source};
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::store::{Moved, Network, Store};
-use crate::surface::{self, Layout};
 use crate::target;
 use crate::texture::{Binding, Textures};
 use crate::transform::Camera;
+use crate::uniforms::{self, Layout};
 use crate::view::View;
 
 pub struct Shade {
@@ -211,7 +210,7 @@ impl Shade {
         let [a, b, c, _] = camera.forward;
         for u in (self.materials.values_mut()).chain([&mut self.clay, &mut self.pink]) {
             let layout = &self.surfaces[&u.hash].layout;
-            surface::frame(layout, u.buffer.bytes(), eye, [a, b, c]);
+            uniforms::frame(layout, u.buffer.bytes(), eye, [a, b, c]);
         }
         Ok(update)
     }
@@ -231,9 +230,9 @@ impl Shade {
             && uniforms.cap == self.cap
         {
             let surface = &self.surfaces[&document.hash];
-            if build::sources(&surface.manifest, &document, network)? == uniforms.sources {
+            if bake::sources(&surface.manifest, &document, network)? == uniforms.sources {
                 self.builder.forget(id);
-                surface::pack(
+                uniforms::pack(
                     &surface.manifest,
                     &surface.layout,
                     &document,
@@ -262,18 +261,18 @@ impl Shade {
     ) -> Result<Uniforms, String> {
         let output = built.result?;
         let hash = built.document.hash;
-        if let Some(compiled) = output.surface
+        if let Some(compiled) = output.compiled
             && !surfaces.contains_key(&hash)
         {
-            update.compiled += usize::from(compiled.compiled);
-            let layout = surface::layout(&compiled.reflection)?;
+            update.compiled += usize::from(compiled.fresh);
+            let layout = uniforms::layout(&compiled.reflection)?;
             let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
             surfaces.insert(hash, surface);
         }
         let surface = &surfaces[&hash];
         let (manifest, layout) = (&surface.manifest, &surface.layout);
         let mut uniforms = Uniforms::new(device, surface, hash)?;
-        surface::pack(
+        uniforms::pack(
             manifest,
             layout,
             &built.document,
@@ -529,7 +528,7 @@ impl Uniforms {
     /// Writes the set: the block, and each of `self.textures`, in the
     /// surface's order, through a sampler of the address modes its node
     /// in `network`, by `document`'s node order, and its file say
-    /// (`surface::address_modes`). The GPU must not be reading the set.
+    /// (`uniforms::address_modes`). The GPU must not be reading the set.
     fn bind(
         &self,
         textures: &mut Textures,
@@ -541,10 +540,10 @@ impl Uniforms {
         assert_eq!(self.textures.len(), layout.textures.len());
         let mut bindings: Vec<(Binding, vk::Sampler)> = Vec::new();
         for (name, path) in surface.manifest.textures.iter().zip(&self.textures) {
-            let (index, _) = surface::node_input(name)?;
+            let (index, _) = uniforms::node_input(name)?;
             let node = &network.nodes[&document.nodes[index]];
             let binding = textures.binding(path)?;
-            let modes = surface::address_modes(node, binding.wrap)
+            let modes = uniforms::address_modes(node, binding.wrap)
                 .map_err(|e| format!("{}'s {e}", document.nodes[index]))?;
             bindings.push((binding, textures.sampler(modes)?));
         }

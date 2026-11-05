@@ -2,7 +2,7 @@
 // src/geometry.rs's buffers by address, each instance through the view's
 // visible list (shaders/cull.slang), so only the index buffer and the
 // view's draw records are bound. mesh.slang uses it, and so does the vertex
-// stage src/surface.rs writes for each material.
+// stage the bake tool writes for each material (bake/generate.cpp).
 
 #include "view.slang"
 

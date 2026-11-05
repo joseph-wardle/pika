@@ -48,7 +48,7 @@ What the reference encodes:
   with alpha 1: the albedo times the normal against the direction toward
   the eye, clamped, the normal turned toward the eye first as MaterialX's
   BSDFs turn it, under a headlight of π along the camera's axis, as
-  src/surface.rs sets it, so a facing surface shows its albedo. A mesh
+  src/uniforms.rs sets it, so a facing surface shows its albedo. A mesh
   with no material bound is clay: albedo 18 % grey, no emission. An
   OpenPBR surface (hydra/images/pbr.usda) has albedo base_weight ×
   base_color and emission emission_luminance × emission_color, a Standard

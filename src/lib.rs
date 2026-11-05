@@ -4,7 +4,6 @@
 
 mod abi;
 mod bake;
-mod build;
 mod cache;
 pub mod commands;
 mod cull;
@@ -20,9 +19,9 @@ mod smooth;
 mod stats;
 mod store;
 mod subdiv;
-mod surface;
 mod tangent;
 pub mod target;
 mod texture;
 mod transform;
+mod uniforms;
 mod view;

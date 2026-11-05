@@ -91,8 +91,8 @@ pub struct Document {
 /// and an image node's. The generator compiles a text input in, but these
 /// land as integer uniforms the generated code never reads, since the
 /// sampler addresses the texture, so they are values: left out of the
-/// document, packed from their tokens (`surface::pack`) and read into the
-/// sampler (`surface::address_modes`), and an edit to one compiles nothing.
+/// document, packed from their tokens (`uniforms::pack`) and read into the
+/// sampler (`uniforms::address_modes`), and an edit to one compiles nothing.
 pub const ADDRESS_MODES: [&str; 4] = ["wrapS", "wrapT", "uaddressmode", "vaddressmode"];
 
 /// A USD shader id and the MaterialX nodedef that implements it, with the

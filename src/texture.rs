@@ -1,14 +1,7 @@
 //! Baked textures: the file `bake texture` writes for one image or UDIM
-//! set under the cache (`bake/texture.cpp`), as the renderer reads it, the
-//! image it is uploaded to, and the set of them loaded for the materials
-//! drawn, with the samplers they are read through. The file is a header,
-//! `pika` and nine little-endian u32 (width, height, layers, levels, the
-//! VkFormat, the source's width and height before the cap: a set's
-//! largest tile's, and the wrap modes the source states, u then v), the
-//! tile table's length and the table (the layer of each UDIM tile from
-//! 1001, or past the layers where the set lacks it; one entry for a plain
-//! image), then every mip level in order, each layer within it, so an
-//! upload is one copy per level.
+//! set under the cache, laid out as bake/texture.cpp says, as the renderer
+//! reads it, the image it is uploaded to, and the set of them loaded for
+//! the materials drawn, with the samplers they are read through.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -28,7 +21,7 @@ pub struct Texture {
     /// The wrap modes the source's metadata states, u then v, in the image
     /// nodedefs' enumeration (black, clamp, periodic, mirror), black where
     /// it states none: what a UsdUVTexture's useMetadata reads
-    /// (`surface::address_modes`).
+    /// (`uniforms::address_modes`).
     pub wrap: [u32; 2],
     /// The layer of each tile, which the shader reads (`mx_texture.slang`).
     pub tiles: Vec<u32>,
@@ -150,7 +143,7 @@ struct Image {
 /// whose range is the table's own length, which the shader reads to tell a
 /// plain image from a set (a buffer itself is at least 16 bytes), and the
 /// wrap modes its file states (`Texture::wrap`), which choose its sampler
-/// with its node's (`surface::address_modes`).
+/// with its node's (`uniforms::address_modes`).
 #[derive(Clone, Copy)]
 pub struct Binding {
     pub view: vk::ImageView,
@@ -318,7 +311,7 @@ fn range(texture: &Texture) -> vk::ImageSubresourceRange {
 pub struct Textures {
     device: ash::Device,
     images: BTreeMap<PathBuf, Image>,
-    /// By address modes, u then v (`surface::address_modes`).
+    /// By address modes, u then v (`uniforms::address_modes`).
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
     staging: Vec<Buffer>,
 }

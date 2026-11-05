@@ -1,6 +1,7 @@
-//! What a material's surface shader asks of the renderer, read from the
-//! bake tool's manifest and slangc's reflection: the byte layout of its
-//! uniform block, and each material's values packed into that block.
+//! A material's uniform block, what its surface shader asks of the
+//! renderer: its byte layout and its textures' bindings, read from the bake
+//! tool's manifest and slangc's reflection, and each material's values
+//! packed into the block.
 
 use std::collections::BTreeMap;
 
@@ -18,12 +19,12 @@ pub struct Layout {
     pub block: u32,
     /// Each uniform's byte offset, nested ones as `u_lightData[0].direction`.
     pub offsets: BTreeMap<String, usize>,
-    pub textures: Vec<Texture>,
+    pub textures: Vec<Bindings>,
 }
 
 /// A texture's bindings: its image, sampler and tile table.
 #[derive(Debug, PartialEq)]
-pub struct Texture {
+pub struct Bindings {
     pub name: String,
     pub image: u32,
     pub sampler: u32,
@@ -66,7 +67,7 @@ pub fn layout(reflection: &str) -> Result<Layout, String> {
                         .ok_or(format!("texture {name} has no {member}"))?;
                     Ok(base + index(found, "binding", "index")?)
                 };
-                l.textures.push(Texture {
+                l.textures.push(Bindings {
                     name: name.to_owned(),
                     image: slot("tex")?,
                     sampler: slot("sampler")?,
@@ -347,7 +348,7 @@ mod tests {
         assert_eq!(l.offsets["backsurfaceshader.transparency"], 32);
         assert_eq!(
             l.textures,
-            [Texture {
+            [Bindings {
                 name: "n1_file".into(),
                 image: 1,
                 sampler: 2,

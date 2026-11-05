@@ -274,8 +274,8 @@ private:
     Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
-    // The texels a texture's longest side is capped at. ALab's textures are
-    // 145 GB at BC7 uncapped, 9.1 GB at 1024 and 2.3 GB at 512 (design.md).
+    // The texels a texture's longest side is capped at, so a show's textures
+    // fit beside its geometry; design.md weighs the default.
     HdRenderSettingDescriptorList _settings = {
         {"Texture cap (texels a side)", _tokens->textureCap, VtValue(1024)}};
 };

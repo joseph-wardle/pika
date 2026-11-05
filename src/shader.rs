@@ -43,19 +43,20 @@ pub fn compile(name: &str) -> Result<Shader, String> {
     })
 }
 
-/// A material's surface: its SPIR-V and the layout slangc reflected.
-pub struct Surface {
+/// A material's surface as compiled: its SPIR-V and the layout slangc
+/// reflected.
+pub struct Compiled {
     pub shader: Shader,
     pub reflection: String,
     /// Whether slangc ran now rather than the cache answering.
-    pub compiled: bool,
+    pub fresh: bool,
 }
 
 /// Compiles `<dir>/surface.slang`, the vertex stage the tool wrote beside
 /// the pixel stage it includes, unless `dir` holds the SPIR-V for these
 /// sources, flags and slangc: the key hashes everything the SPIR-V depends
 /// on, so a stale entry is impossible.
-pub fn surface(dir: &Path) -> Result<Surface, String> {
+pub fn surface(dir: &Path) -> Result<Compiled, String> {
     let read = |name: &str| {
         std::fs::read(dir.join(name))
             .map_err(|e| format!("cannot read {}/{name}: {e}", dir.display()))
@@ -88,13 +89,13 @@ pub fn surface(dir: &Path) -> Result<Surface, String> {
             compiled(&spv, &json)?
         }
     };
-    Ok(Surface {
+    Ok(Compiled {
         shader: Shader {
             slangc_version: version.to_owned(),
             spirv,
         },
         reflection,
-        compiled: fresh,
+        fresh,
     })
 }
 
