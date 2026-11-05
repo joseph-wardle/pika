@@ -202,7 +202,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sRGB read as raw", "8-bit auto read as raw", "8-bit data read as sRGB", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
-            "the cap ignored", "frame 1's reference"]
+            "the cap ignored", "missing file's fallback ignored", "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 # ACEScg to linear Rec.709 (see the module's doc).
@@ -534,13 +534,16 @@ def sampled(image, kind, time, control=None):
     path = file.Get().resolvedPath
     if "<UDIM>" in file.Get().path:
         path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
+    colour = usd or kind == "color3" or control == "8-bit data read as sRGB"
+    space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
+    if not path:
+        # A file that does not resolve is sampled nowhere (`preview`).
+        return (path, (), primvar, space)
     if usd:
         modes = tuple(wrap(image, name, path, time, control) for name in ("wrapS", "wrapT"))
     else:
         modes = tuple(image.GetInput(m).Get(time) if image.GetInput(m) else "periodic"
                       for m in ("uaddressmode", "vaddressmode"))
-    colour = usd or kind == "color3" or control == "8-bit data read as sRGB"
-    space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
     return (path, modes, primvar, space)
 
 
@@ -610,10 +613,11 @@ def lit(surface, time, control=None):
 def preview(surface, time, control=None):
     """The Look of a UsdPreviewSurface (hydra/images/wrapped.usda): albedo
     diffuseColor, emission emissiveColor, a value or the rgb a UsdUVTexture
-    samples, under the specular workflow with a black specularColor, since
-    the rest has no closed form. MaterialX layers a Schlick lobe with F90
-    white over the diffuse, which only grazing angles show, so the form
-    holds within 30° of facing."""
+    samples, or its fallback when its file does not resolve, as Storm draws
+    it (hydra/images/fallback.usda), under the specular workflow with a
+    black specularColor, since the rest has no closed form. MaterialX layers
+    a Schlick lobe with F90 white over the diffuse, which only grazing
+    angles show, so the form holds within 30° of facing."""
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
     extra = sorted(set(authored) - {"diffuseColor", "emissiveColor", "useSpecularWorkflow", "specularColor"})
@@ -634,11 +638,17 @@ def preview(surface, time, control=None):
                          "set useSpecularWorkflow to 1 and specularColor to black")
     image, emission = None, value("emissiveColor")
     if "emissiveColor" in authored and authored["emissiveColor"].HasConnectedSource():
-        image = sampled(upstream(surface, "emissiveColor"), "rgb", time, control)
+        node = upstream(surface, "emissiveColor")
+        image = sampled(node, "rgb", time, control)
         if not image:
             raise ValueError(f"{path}: the reference emits a UsdUVTexture's rgb sampled at a primvar, "
                              "nothing else connected")
         emission = (0.0,) * 3
+        if not image[0]:
+            fallback = node.GetInput("fallback")
+            if fallback and control != "missing file's fallback ignored":
+                emission = tuple(fallback.Get(time))[:3]
+            image = None
     return Look(value("diffuseColor"), emission, image, None, 30)
 
 

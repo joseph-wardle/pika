@@ -14,7 +14,7 @@
 # compiles: 1 then 1
 # bakes: 1 then 0
 # warnings: 1
-# warned: /world/mtl/skin: its textures, 112 B baked, do not fit the device's memory budget: set or lower pika:textureCap
+# warned: /world/mtl/skin: its textures, 112 B baked, do not fit the device's memory budget: set or lower pika:textureCap; drawn pink
 # budget: 1
 def Xform "world"
 {

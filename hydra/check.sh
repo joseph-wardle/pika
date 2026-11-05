@@ -167,11 +167,12 @@ fixture() {
     # scene's header states its counts: "# compiles: A then B" and
     # "# bakes: A then B" are the surfaces compiled and textures baked for
     # frame 1 and for the edit, 0 when absent, and "# warnings: N" the
-    # warnings of materials that cannot be built, each warned of once when
-    # its build lands, though husk renders a frame more than once, and
-    # compiled again by its repair with no second warning; "# warned: M" is
-    # one warning's message, after the material's path, which must name
-    # what to fix; "# budget: B" renders with B bytes standing in for the
+    # material warnings, a material that cannot be built or a texture file
+    # that is missing, each warned of once when its build lands, though
+    # husk renders a frame more than once, and built again by its repair
+    # with no second warning; "# warned: M" is one warning's message, after
+    # the material's path, which must name what to fix and say what is
+    # drawn; "# budget: B" renders with B bytes standing in for the
     # device's memory budget (PIKA_BUDGET). The scenes that
     # edit a material are each other's control, and each must compile within
     # its frame, so a counter that never moves fails. Every material with a
@@ -198,8 +199,8 @@ fixture() {
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
-    [ -z "$warned" ] || grep -qF "pika: warning: material $warned; drawn pink" "$OUT/fixtures/$name.log" ||
-        fail "$name: no warning reads \"material $warned; drawn pink\" (see $OUT/fixtures/$name.log)"
+    [ -z "$warned" ] || grep -qF "pika: warning: material $warned" "$OUT/fixtures/$name.log" ||
+        fail "$name: no warning reads \"material $warned\" (see $OUT/fixtures/$name.log)"
     [ -z "$redundant" ] || [ "$(redundant "$OUT/fixtures/$name.stats" "$edit")" = "$redundant" ] ||
         fail "$name: the edit handed over $(redundant "$OUT/fixtures/$name.stats" "$edit") redundant mesh bytes, not $redundant"
 }

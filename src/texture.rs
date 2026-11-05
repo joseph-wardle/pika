@@ -42,6 +42,23 @@ impl Texture {
     }
 }
 
+/// A 1×1 texture of `texel`: what an image whose file is missing is drawn
+/// as (`bake::build`). Periodic, so a node reading the file's wrap modes
+/// samples the texel everywhere.
+pub fn solid(texel: [f32; 4]) -> Texture {
+    Texture {
+        width: 1,
+        height: 1,
+        layers: 1,
+        format: vk::Format::R32G32B32A32_SFLOAT,
+        source: [1, 1],
+        wrap: [2, 2],
+        tiles: vec![0],
+        levels: std::iter::once(0..16).collect(),
+        file: texel.iter().flat_map(|v| v.to_le_bytes()).collect(),
+    }
+}
+
 pub fn read(path: &Path) -> Result<Texture, String> {
     let file = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     parse(file).map_err(|e| format!("{} {e}", path.display()))
@@ -445,6 +462,16 @@ impl Drop for Textures {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn a_solid_texture_is_one_float_texel() {
+        let t = solid([0.2, 0.4, 0.6, 1.0]);
+        assert_eq!((t.width, t.height, t.layers, t.levels.len()), (1, 1, 1, 1));
+        assert_eq!(t.bytes(), 16);
+        assert!(!t.capped());
+        assert_eq!(level_size(t.format, 1, 1), Some(16));
+        assert_eq!(f32::from_le_bytes(t.file[4..8].try_into().unwrap()), 0.4);
+    }
 
     /// The bake tool wrote this for bake/fixtures/ramp.exr, whose texels
     /// hold their own centres.

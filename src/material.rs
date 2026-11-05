@@ -15,12 +15,18 @@ use crate::cache;
 use crate::store::{Connection, Network, Node, Value};
 
 /// A texture as a node's input declares it: the file, the colour space the
-/// file is in, and the encoding the bake tool stores it with.
+/// file is in, the encoding the bake tool stores it with, and, when the
+/// file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
 pub struct Source {
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
+    /// A UsdUVTexture's `fallback` or an image node's `default`, its
+    /// nodedef's when unauthored, for a file that is empty; empty itself
+    /// for a file that resolves, so an edit to a drawn fallback, and no
+    /// other, makes a new source.
+    pub default: Vec<f32>,
 }
 
 /// The texture `node`'s input `input` reads. The encoding follows the
@@ -60,10 +66,21 @@ pub fn source(node: &Node, input: &str) -> Result<Source, String> {
         "vector3" | "vector4" => "data",
         _ => return Err(format!("{} reads a texture of type {kind}", node.node_type)),
     };
+    // The delegate hands over the path as it resolved, so a file that does
+    // not exist arrives empty, as one never authored does, and the node's
+    // fallback is drawn, as Storm draws it.
+    let usd = node.node_type == "UsdUVTexture";
+    let default = match node.params.get(if usd { "fallback" } else { "default" }) {
+        _ if !file.is_empty() => Vec::new(),
+        Some(Value::Float(v)) => v.clone(),
+        _ if usd => vec![0.0, 0.0, 0.0, 1.0],
+        _ => vec![0.0; 4],
+    };
     Ok(Source {
         file,
         space,
         encoding,
+        default,
     })
 }
 
@@ -633,8 +650,29 @@ pub mod tests {
                 file: "bake/fixtures/swatch.png".into(),
                 space: "raw".into(),
                 encoding: "data",
+                default: vec![],
             }
         );
+        // A missing file carries the fallback the node draws instead.
+        let mut missing = tex.clone();
+        missing
+            .params
+            .insert("file".into(), Value::Asset(String::new()));
+        assert_eq!(
+            source(&missing, "file").unwrap().default,
+            [0.0, 0.0, 0.0, 1.0]
+        );
+        (missing.params).insert("fallback".into(), Value::Float(vec![0.2, 0.4, 0.6, 1.0]));
+        assert_eq!(
+            source(&missing, "file").unwrap().default,
+            [0.2, 0.4, 0.6, 1.0]
+        );
+        missing.node_type = "ND_image_float".into();
+        assert_eq!(source(&missing, "file").unwrap().default, [0.0; 4]);
+        missing
+            .params
+            .insert("default".into(), Value::Float(vec![0.5]));
+        assert_eq!(source(&missing, "file").unwrap().default, [0.5]);
         let mut srgb = tex.clone();
         srgb.params.remove("colorSpace:file");
         srgb.params

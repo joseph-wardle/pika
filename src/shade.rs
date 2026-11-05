@@ -142,8 +142,9 @@ impl Shade {
     /// as it was until it lands; installs the builds that landed, `INSTALL`
     /// bytes of textures a frame, within the device's memory budget. A
     /// material that cannot be built or installed is warned of and drawn
-    /// pink; the frame goes on. Records into `cb`, outside rendering, the
-    /// uploads. No GPU work may be pending.
+    /// pink, and a texture whose file is missing is warned of and drawn as
+    /// its node's fallback; the frame goes on. Records into `cb`, outside
+    /// rendering, the uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -202,9 +203,16 @@ impl Shade {
             };
             let id = built.id;
             self.stale = true;
+            let missing = built.missing().to_vec();
             let (surfaces, textures) = (&mut self.surfaces, &mut self.textures);
             match Shade::install(device, surfaces, textures, built, cb, &mut update) {
                 Ok(uniforms) => {
+                    for input in &missing {
+                        eprintln!(
+                            "pika: warning: material {}: {input}; drawn with its fallback",
+                            material.path
+                        );
+                    }
                     self.materials.insert(id, uniforms);
                 }
                 Err(e) => {

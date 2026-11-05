@@ -91,8 +91,11 @@ pub struct Generated {
     pub manifest: Manifest,
 }
 
-/// A texture as the renderer uploads it, read from the cache.
+/// A texture as the renderer uploads it, read from the cache, or the texel
+/// a missing file's node draws instead (`fallback`).
 pub struct Baked {
+    /// Its file under the cache, or `fallback` and its texel: what the
+    /// renderer keys the loaded textures by.
     pub path: PathBuf,
     pub texture: Texture,
     /// Whether the bake tool ran now rather than the cache answering.
@@ -408,6 +411,14 @@ impl Built {
         }
     }
 
+    /// The texture inputs whose file is missing, to warn of when it installs.
+    pub fn missing(&self) -> &[String] {
+        match &self.result {
+            Ok(output) => &output.missing,
+            Err(_) => &[],
+        }
+    }
+
     /// `network`'s build, run now on this thread: Pika's own networks are
     /// built before the first frame, with no textures and so no cap.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
@@ -431,6 +442,9 @@ pub struct Output {
     /// manifest's order.
     pub sources: Vec<Source>,
     pub textures: Vec<Baked>,
+    /// The texture inputs whose file is missing, each as a warning names it,
+    /// drawn as their nodes' fallback.
+    pub missing: Vec<String>,
 }
 
 pub struct Builder {
@@ -652,11 +666,19 @@ fn build(
     let generated = bake.generate(document)?;
     let sources = sources(&generated.manifest, document, network)?;
     let mut textures = Vec::new();
+    let mut missing = Vec::new();
     for (name, source) in generated.manifest.textures.iter().zip(&sources) {
         if !wanted() {
             return Err("its build was superseded".into());
         }
         let (path, _, input) = reader(name, document, network)?;
+        if source.file.is_empty() {
+            missing.push(format!(
+                "{path}'s {input}: its path is empty or did not resolve"
+            ));
+            textures.push(fallback(&source.default));
+            continue;
+        }
         let file = Path::new(&source.file);
         let baked = bake
             .texture(file, &source.space, source.encoding, cap)
@@ -673,7 +695,24 @@ fn build(
         compiled,
         sources,
         textures,
+        missing,
     })
+}
+
+/// What an image whose file is missing is drawn as: a texel of `default`,
+/// the node's fallback, zero past its channels, bound in place of the
+/// texture as MaterialX's render library binds one for a file it cannot
+/// load, since the image node's own default input goes unread by the Slang
+/// implementation it shares with GLSL. Materials of one fallback share it.
+fn fallback(default: &[f32]) -> Baked {
+    let mut texel = [0.0; 4];
+    let n = default.len().min(4);
+    texel[..n].copy_from_slice(&default[..n]);
+    Baked {
+        path: PathBuf::from(format!("fallback {texel:?}")),
+        texture: texture::solid(texel),
+        fresh: false,
+    }
 }
 
 /// The texture each of `manifest`'s textures reads, from the node and
@@ -918,6 +957,7 @@ pub mod tests {
                         texture,
                         fresh: false,
                     }],
+                    missing: Vec::new(),
                 }),
             });
         };

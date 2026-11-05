@@ -11,7 +11,7 @@
 #
 # compiles: 0 then 1
 # warnings: 1
-# warned: /world/mtl/glow: the bake tool failed: bake: error: node n0 names the nodedef ND_surfac, which Houdini's MaterialX libraries do not define
+# warned: /world/mtl/glow: the bake tool failed: bake: error: node n0 names the nodedef ND_surfac, which Houdini's MaterialX libraries do not define; drawn pink
 def Xform "world"
 {
     def Camera "camera" {}
