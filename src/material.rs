@@ -67,7 +67,8 @@ pub fn source(node: &Node, input: &str) -> Result<Source, String> {
     })
 }
 
-/// A network's MaterialX document and its key.
+/// A network's MaterialX document, its key, and the texcoord its meshes
+/// carry.
 #[derive(Debug)]
 pub struct Document {
     pub text: String,
@@ -75,6 +76,15 @@ pub struct Document {
     pub hash: u64,
     /// The store's node paths in document order: node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
+    /// The float2 primvar the surface reads: the one its
+    /// UsdPrimvarReader_float2 and ND_geompropvalue_vector2 nodes name,
+    /// else `st`, which is UV0, the texcoord MaterialX's nodes read by
+    /// default (an image's texcoord, UsdUVTexture's st, the texcoord
+    /// node), as Storm and Karma read it. Only the nodedefs say which
+    /// inputs read UV0, so every network naming no primvar carries `st`,
+    /// and the bake tool refuses a surface reading UV0 beside another
+    /// name.
+    pub texcoord: String,
 }
 
 /// A USD shader id and the MaterialX nodedef that implements it, with the
@@ -196,6 +206,10 @@ pub fn pink() -> Network {
 }
 
 /// The document for a network, or none when the network has no surface.
+/// A network naming two primvars is refused, since a mesh is drawn with
+/// one texcoord: ALab's meshes carry `st` and `perfuv` both and each
+/// material reads one of them, so carrying every float2 primvar would
+/// double the texture coordinates for nothing.
 pub fn document(network: &Network) -> Result<Option<Document>, String> {
     let Some(surface) = &network.surface else {
         return Ok(None);
@@ -207,9 +221,15 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     // The library version the generator links. MaterialX upgrades older
     // documents on reading.
     let mut text = String::from("<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n");
+    let mut primvars = BTreeSet::new();
     for (i, path) in order.iter().enumerate() {
         let node = &network.nodes[*path];
         let (nodedef, rename) = resolve(path, node)?;
+        if nodedef == "ND_geompropvalue_vector2"
+            && let Some(Value::Text(name)) = node.params.get(store_input(node, "geomprop"))
+        {
+            primvars.insert(name.clone());
+        }
         // The element's category and type are the nodedef's to say and Pika
         // has no MaterialX library; the generator resolves the `nodedef`
         // attribute without them.
@@ -249,49 +269,22 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
          name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
          </surfacematerial>\n</materialx>\n",
     );
+    let mut primvars = primvars.into_iter();
+    let texcoord = match (primvars.next(), primvars.next()) {
+        (Some(a), Some(b)) => {
+            return Err(format!(
+                "reads the primvars {a} and {b}, and a mesh is drawn with one texcoord"
+            ));
+        }
+        (Some(name), None) => name,
+        (None, _) => "st".to_owned(),
+    };
     Ok(Some(Document {
         hash: cache::fnv1a(&[text.as_bytes()]),
         nodes: order.iter().map(|p| (*p).to_owned()).collect(),
         text,
+        texcoord,
     }))
-}
-
-/// The float2 primvar the network's surface reads, the texcoord its meshes
-/// carry: the one its UsdPrimvarReader_float2 and ND_geompropvalue_vector2
-/// nodes name, else `st`, which is UV0, the texcoord MaterialX's nodes read
-/// by default (an image's texcoord, UsdUVTexture's st, the texcoord node),
-/// as Storm and Karma read it. Only the nodedefs say which inputs read UV0,
-/// so every network naming no primvar carries `st`, and the bake tool
-/// refuses a surface reading UV0 beside another name. A network naming two
-/// is refused, since a mesh carries one: ALab's meshes carry `st` and
-/// `perfuv` both and each material reads one of them, so carrying every
-/// float2 primvar would double the texture coordinates for nothing.
-pub fn texcoord(network: &Network) -> Result<Option<String>, String> {
-    let Some(surface) = &network.surface else {
-        return Ok(None);
-    };
-    let mut order = Vec::new();
-    visit(network, surface, &mut order)?;
-    let mut names = BTreeSet::new();
-    for path in order {
-        let node = &network.nodes[path];
-        if node.node_type != "UsdPrimvarReader_float2"
-            && node.node_type != "ND_geompropvalue_vector2"
-        {
-            continue;
-        }
-        if let Some(Value::Text(name)) = node.params.get(store_input(node, "geomprop")) {
-            names.insert(name.clone());
-        }
-    }
-    let mut names = names.into_iter();
-    match (names.next(), names.next()) {
-        (Some(a), Some(b)) => Err(format!(
-            "reads the primvars {a} and {b}, and a mesh is drawn with one texcoord"
-        )),
-        (Some(name), None) => Ok(Some(name)),
-        (None, _) => Ok(Some("st".to_owned())),
-    }
 }
 
 /// Lists the nodes upstream of `path` in document order: each node before
@@ -419,6 +412,10 @@ pub mod tests {
 
     fn hash(network: &Network) -> u64 {
         document(network).unwrap().unwrap().hash
+    }
+
+    fn texcoord(network: &Network) -> Result<Option<String>, String> {
+        document(network).map(|d| d.map(|d| d.texcoord))
     }
 
     // Houdini 22's MaterialX 1.39.5 generates this document; bake/check.sh

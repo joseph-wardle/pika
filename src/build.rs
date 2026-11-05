@@ -50,7 +50,9 @@ pub struct Output {
     pub manifest: Manifest,
     /// The surface's SPIR-V and reflection, unless the renderer holds it.
     pub surface: Option<shader::Surface>,
-    /// The textures in the manifest's order.
+    /// What the textures were baked from, and the textures, in the
+    /// manifest's order.
+    pub sources: Vec<Source>,
     pub textures: Vec<Baked>,
 }
 
@@ -221,14 +223,16 @@ pub fn run(
     } else {
         Some(shader::surface(&generated.dir)?)
     };
+    let sources = sources(&generated.manifest, document, network)?;
     let mut textures = Vec::new();
-    for source in sources(&generated.manifest, document, network)? {
+    for source in &sources {
         let file = Path::new(&source.file);
         textures.push(bake.texture(file, &source.space, source.encoding, cap)?);
     }
     Ok(Output {
         manifest: generated.manifest,
         surface,
+        sources,
         textures,
     })
 }

@@ -8,8 +8,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 
-use crate::material;
-
 pub struct Store {
     /// Ids are never reused, so a stale id is an error rather than a write to
     /// a newer prim.
@@ -17,6 +15,8 @@ pub struct Store {
     meshes: BTreeMap<u64, Mesh>,
     instancers: BTreeMap<u64, Instancer>,
     materials: BTreeMap<u64, Material>,
+    /// Material ids by path, which is how a mesh's bindings name them.
+    material_ids: BTreeMap<String, u64>,
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
     /// Each mesh's triangles, its cage's then as drawn, counted when its
@@ -90,6 +90,10 @@ pub struct InstancePrimvars {
 pub struct Material {
     pub path: String,
     pub network: Option<Network>,
+    /// The float2 primvar the network's surface reads, the texcoord its
+    /// meshes carry (`material::Document::texcoord`): none without a
+    /// surface, or when the network cannot be built.
+    pub texcoord: Option<String>,
 }
 
 /// `HdMaterialNetwork2`: shader nodes by path, and the node whose output is
@@ -414,6 +418,7 @@ impl Store {
             meshes: BTreeMap::new(),
             instancers: BTreeMap::new(),
             materials: BTreeMap::new(),
+            material_ids: BTreeMap::new(),
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
             triangles: HashMap::new(),
@@ -567,17 +572,14 @@ impl Store {
     /// included, the texcoord the delegate fetches for it: none when no
     /// material is bound, or none bound is in the store with a network
     /// whose surface reads one. The materials must agree on it, since the
-    /// mesh is drawn with one texcoord. A network reading two is refused
-    /// when it is built (`shade` warns and draws it pink), so its meshes
-    /// carry none.
+    /// mesh is drawn with one texcoord.
     pub fn texcoord_name(&self, id: u64) -> Result<Option<String>, String> {
         let mesh = self.meshes.get(&id).ok_or_else(|| stale("mesh", id))?;
         let subsets = (mesh.topology.iter()).flat_map(|t| t.subsets.iter().map(|s| &s.material));
-        let mut reads: Vec<(String, &str)> = Vec::new();
+        let mut reads: Vec<(&str, &str)> = Vec::new();
         for path in mesh.material.iter().chain(subsets) {
-            let network = (self.materials.values().find(|m| &m.path == path))
-                .and_then(|m| m.network.as_ref());
-            let Some(name) = network.and_then(|n| material::texcoord(n).ok().flatten()) else {
+            let material = self.material_ids.get(path).map(|id| &self.materials[id]);
+            let Some(name) = material.and_then(|m| m.texcoord.as_deref()) else {
                 continue;
             };
             if !reads.iter().any(|(n, _)| *n == name) {
@@ -586,7 +588,7 @@ impl Store {
         }
         match reads.as_slice() {
             [] => Ok(None),
-            [(name, _)] => Ok(Some(name.clone())),
+            [(name, _)] => Ok(Some((*name).to_owned())),
             [(a, pa), (b, pb), ..] => Err(format!(
                 "{pa} reads {a} and {pb} reads {b}; a mesh is drawn with one texcoord, so bind materials that read the same float2 primvar"
             )),
@@ -730,11 +732,13 @@ impl Store {
     /// draw records.
     pub fn insert_material(&mut self, path: String) -> u64 {
         let id = self.new_id();
+        self.material_ids.insert(path.clone(), id);
         self.materials.insert(
             id,
             Material {
                 path,
                 network: None,
+                texcoord: None,
             },
         );
         self.moved.draws = true;
@@ -742,26 +746,34 @@ impl Store {
     }
 
     pub fn remove_material(&mut self, id: u64) -> Result<(), String> {
-        self.materials
+        let material = self
+            .materials
             .remove(&id)
             .ok_or_else(|| stale("material", id))?;
+        self.material_ids.remove(&material.path);
         self.stats.removed += 1;
         self.moved.draws = true;
         Ok(())
     }
 
-    /// Whether the material's meshes must sync again: the network reads a
-    /// primvar the one before it did not, so their texcoord is stale. A
-    /// first network is not a change: its meshes sync after it anyway.
-    pub fn set_network(&mut self, id: u64, network: Network) -> Result<bool, String> {
+    /// Replaces the material's network, whose surface reads the float2
+    /// primvar `texcoord`, and says whether its meshes must sync again: the
+    /// network reads a primvar the one before it did not, so their texcoord
+    /// is stale. A first network is not a change: its meshes sync after it
+    /// anyway.
+    pub fn set_network(
+        &mut self,
+        id: u64,
+        network: Network,
+        texcoord: Option<String>,
+    ) -> Result<bool, String> {
         let bytes = network.bytes();
         let material = self
             .materials
             .get_mut(&id)
             .ok_or_else(|| stale("material", id))?;
-        let reads = |n: &Network| material::texcoord(n).ok().flatten();
-        let before = material.network.as_ref().map(reads);
-        let after = reads(&network);
+        let changed = material.network.is_some() && material.texcoord != texcoord;
+        material.texcoord = texcoord;
         if write(
             &mut self.stats.material,
             &mut material.network,
@@ -770,7 +782,7 @@ impl Store {
         ) {
             self.moved.materials.insert(id);
         }
-        Ok(before.is_some_and(|b| b != after))
+        Ok(changed)
     }
 
     pub fn insert_curves(&mut self, path: String) -> u64 {
@@ -1142,6 +1154,7 @@ fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::material;
 
     #[test]
     fn ids_are_never_reused() {
@@ -1203,8 +1216,8 @@ mod tests {
                 output: "rgb".into(),
             },
         );
-        store.set_network(m, network.clone()).unwrap();
-        store.set_network(m, network.clone()).unwrap();
+        store.set_network(m, network.clone(), None).unwrap();
+        store.set_network(m, network.clone(), None).unwrap();
         let stats = store.end_sync();
         let bytes = network.bytes();
         assert_eq!(
@@ -1215,7 +1228,7 @@ mod tests {
         let node = network.nodes.get_mut("/m/s").unwrap();
         node.params
             .insert("roughness".into(), Value::Float(vec![0.25]));
-        store.set_network(m, network).unwrap();
+        store.set_network(m, network, None).unwrap();
         let stats = store.end_sync();
         assert_eq!(
             (stats.material.pulled, stats.material.redundant),
@@ -1238,35 +1251,37 @@ mod tests {
         let m = store.insert_material("/mtl/paint".into());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         let network = material::tests::fixture();
+        let st = Some("st".to_owned());
         // A first network is not a change.
-        assert!(!store.set_network(m, network.clone()).unwrap());
-        assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
+        assert!(!store.set_network(m, network.clone(), st.clone()).unwrap());
+        assert_eq!(store.texcoord_name(a).unwrap(), st);
         // A value edit keeps what it reads; a new name is a change.
         let mut edited = network.clone();
         (edited.nodes.get_mut("surface").unwrap().params)
             .insert("roughness".into(), Value::Float(vec![0.75]));
-        assert!(!store.set_network(m, edited).unwrap());
+        assert!(!store.set_network(m, edited, st.clone()).unwrap());
         let mut renamed = network.clone();
         (renamed.nodes.get_mut("st").unwrap().params)
             .insert("varname".into(), Value::Text("perfuv".into()));
-        assert!(store.set_network(m, renamed).unwrap());
-        assert_eq!(store.texcoord_name(a).unwrap(), Some("perfuv".to_owned()));
-        // A network reading two gives its meshes none; the control is a stale mesh.
-        let mut two = network;
-        let mut uv = two.nodes["st"].clone();
-        uv.params
-            .insert("varname".into(), Value::Text("perfuv".into()));
-        two.nodes.insert("uv".into(), uv);
-        (two.nodes.get_mut("tex").unwrap().connections).insert(
-            "bias".into(),
-            Connection {
-                node: "uv".into(),
-                output: "result".into(),
-            },
-        );
-        assert!(store.set_network(m, two).unwrap());
+        let perfuv = Some("perfuv".to_owned());
+        assert!(store.set_network(m, renamed, perfuv.clone()).unwrap());
+        assert_eq!(store.texcoord_name(a).unwrap(), perfuv);
+        // A network that cannot be built gives its meshes none; the control
+        // is a stale mesh.
+        assert!(store.set_network(m, network, None).unwrap());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         assert!(store.texcoord_name(a + 1).is_err());
+        // A material removed is unbound; one of the same path is bound again.
+        store
+            .set_network(m, Network::default(), st.clone())
+            .unwrap();
+        store.remove_material(m).unwrap();
+        assert_eq!(store.texcoord_name(a).unwrap(), None);
+        let m = store.insert_material("/mtl/paint".into());
+        store
+            .set_network(m, Network::default(), st.clone())
+            .unwrap();
+        assert_eq!(store.texcoord_name(a).unwrap(), st);
     }
 
     #[test]
@@ -1276,11 +1291,8 @@ mod tests {
         let paint = store.insert_material("/mtl/paint".into());
         let fur = store.insert_material("/mtl/fur".into());
         let network = material::tests::fixture();
-        store.set_network(paint, network.clone()).unwrap();
-        let mut renamed = network;
-        (renamed.nodes.get_mut("st").unwrap().params)
-            .insert("varname".into(), Value::Text("perfuv".into()));
-        store.set_network(fur, renamed).unwrap();
+        (store.set_network(paint, network.clone(), Some("st".into()))).unwrap();
+        (store.set_network(fur, network, Some("perfuv".into()))).unwrap();
         let subsets = |materials: &[&str]| Topology {
             scheme: Scheme::None,
             face_vertex_counts: vec![3; materials.len()],

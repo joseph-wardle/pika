@@ -241,9 +241,6 @@ impl Shade {
             self.materials.remove(&id);
             return Ok(());
         };
-        // A network reading two primvars is refused: the vertex stage would
-        // feed both from the mesh's one texcoord.
-        material::texcoord(network)?;
         if let Some(uniforms) = self.materials.get_mut(&id)
             && uniforms.hash == document.hash
             && uniforms.cap == self.cap
@@ -314,7 +311,7 @@ impl Shade {
             uniforms.textures.push(baked.path.clone());
         }
         uniforms.bind(layout, &bindings);
-        uniforms.sources = build::sources(manifest, &built.document, &built.network)?;
+        uniforms.sources = output.sources;
         uniforms.cap = built.cap;
         self.materials.insert(built.id, uniforms);
         Ok(())
