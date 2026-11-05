@@ -191,12 +191,14 @@ fixture() {
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
 # Xvnc writes the display it chose to fd 3. It listens on no port, only on
-# a socket in $OUT.
-rm -f "$OUT/display" "$OUT/vnc"
-Xvnc -displayfd 3 -rfbport -1 -rfbunixpath "$OUT/vnc" -nolisten tcp -SecurityTypes None \
+# a socket in a directory of this run's own under the runtime directory: a
+# socket's path holds 108 bytes, which $OUT exceeds from a deep checkout.
+RUN=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/pika-check.XXXXXX")
+rm -f "$OUT/display"
+Xvnc -displayfd 3 -rfbport -1 -rfbunixpath "$RUN/vnc" -nolisten tcp -SecurityTypes None \
     -geometry 640x480 -depth 24 3>"$OUT/display" 2>"$OUT/xvnc.log" &
 xvnc=$!
-trap 'kill $xvnc' EXIT
+trap 'kill $xvnc; rm -rf "$RUN"' EXIT
 until [ -s "$OUT/display" ]; do
     kill -0 $xvnc 2>/dev/null || { echo "Xvnc did not start (see $OUT/xvnc.log)"; exit 1; }
     sleep 0.1
