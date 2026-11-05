@@ -4,13 +4,13 @@
 //
 //   bake generate <document.mtlx> <out>
 //   bake libraries
-//   bake texture <source> <space> <encoding> <cap> <config> <out>
+//   bake texture <space> <encoding> <cap> <config> <out> (<tile> <file>)...
 //
 // generate turns a material's document into Slang (generate.cpp), and
-// libraries lists what it reads beyond the document; texture turns an image
-// into the one file the renderer uploads (texture.cpp). The renderer keys
-// its cache on every argument and on that listing, so the tool decides
-// nothing.
+// libraries lists what it reads beyond the document; texture turns an
+// image, or the UDIM tiles listed after the output, into the one file the
+// renderer uploads (texture.cpp). The renderer keys its cache on every
+// argument and on that listing, so the tool decides nothing.
 
 #include "bake.h"
 
@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 int main(int argc, char **argv) {
     std::string job = argc > 1 ? argv[1] : "";
@@ -26,17 +27,25 @@ int main(int argc, char **argv) {
             generate(argv[2], argv[3]);
         } else if (job == "libraries" && argc == 2) {
             libraries();
-        } else if (job == "texture" && argc == 8) {
+        } else if (job == "texture" && argc >= 9 && argc % 2 == 1) {
             char *end = nullptr;
-            unsigned long cap = strtoul(argv[5], &end, 10);
-            if (*argv[5] == 0 || *end != 0 || cap == 0)
-                throw std::runtime_error(std::string("the cap ") + argv[5] +
+            unsigned long cap = strtoul(argv[4], &end, 10);
+            if (*argv[4] == 0 || *end != 0 || cap == 0)
+                throw std::runtime_error(std::string("the cap ") + argv[4] +
                                          " is not a positive number of texels");
-            texture(argv[2], argv[3], argv[4], cap, argv[6], argv[7]);
+            std::vector<Tile> set;
+            for (int i = 7; i < argc; i += 2) {
+                unsigned long number = strtoul(argv[i], &end, 10);
+                if (*argv[i] == 0 || *end != 0)
+                    throw std::runtime_error(std::string("the tile ") + argv[i] + " is not a number");
+                set.push_back({unsigned(number), argv[i + 1]});
+            }
+            texture(set, argv[2], argv[3], cap, argv[5], argv[6]);
         } else {
-            fprintf(stderr, "usage: bake generate <document.mtlx> <out>\n"
-                            "       bake libraries\n"
-                            "       bake texture <source> <space> <encoding> <cap> <config> <out>\n");
+            fprintf(stderr,
+                    "usage: bake generate <document.mtlx> <out>\n"
+                    "       bake libraries\n"
+                    "       bake texture <space> <encoding> <cap> <config> <out> (<tile> <file>)...\n");
             return 2;
         }
     } catch (std::exception const &e) {

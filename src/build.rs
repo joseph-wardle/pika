@@ -46,6 +46,22 @@ pub struct Built {
     pub result: Result<Output, String>,
 }
 
+impl Built {
+    /// `network`'s build, run now on this thread: Pika's own networks are
+    /// built before the first frame, with no textures and so no cap.
+    pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
+        let result = run(bake, &document, &network, 0, false);
+        Self {
+            id: 0,
+            generation: 0,
+            document,
+            network,
+            cap: 0,
+            result,
+        }
+    }
+}
+
 pub struct Output {
     pub manifest: Manifest,
     /// The surface's SPIR-V and reflection, unless the renderer holds it.
@@ -210,7 +226,7 @@ fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &Sender<Built>) {
 /// Generates `document`'s stages and, unless `held`, compiles its surface,
 /// then bakes and reads each texture `network` gives it, under the cap
 /// `cap`.
-pub fn run(
+fn run(
     bake: &Bake,
     document: &Document,
     network: &Network,

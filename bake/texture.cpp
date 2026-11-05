@@ -1,5 +1,5 @@
-// The texture job: an image as authored in, or a UDIM set as the `<UDIM>`
-// pattern naming it, the one file the renderer uploads out. OpenImageIO
+// The texture job: an image as authored in, or a UDIM set as the renderer
+// lists its tiles, the one file the renderer uploads out. OpenImageIO
 // decodes the source; its stored mip levels at or below `cap` texels on a
 // side are kept and the missing ones are built by box filtering;
 // OpenColorIO converts the declared colour space to lin_rec709, Pika's
@@ -10,10 +10,10 @@
 //   data     BC7 at linear 8 bits (normals and other vectors)
 //   single   BC4, the first channel at linear 8 bits
 //
-// A set's tiles are the files numbered 1001 to 1100 that exist, as USD
-// reads a set, each a layer in tile order, all at the largest tile's size
-// after the cap, smaller ones enlarged bilinearly, so the renderer samples
-// one array (bake/libraries/stdlib/genslang/lib/mx_texture.slang).
+// A set's tiles are numbered 1001 to 1100, each a layer in the order
+// given, all at the largest tile's size after the cap, smaller ones
+// enlarged bilinearly, so the renderer samples one array
+// (bake/libraries/stdlib/genslang/lib/mx_texture.slang).
 //
 // The file is a header of little-endian u32: "pika", width, height, layers,
 // levels, the VkFormat, the source's width and height before the cap (a
@@ -70,29 +70,6 @@ struct Level {
 unsigned half(unsigned n) { return std::max(1u, n / 2); }
 
 bool fits(Level const &level, unsigned cap) { return level.width <= cap && level.height <= cap; }
-
-struct Tile {
-    unsigned number; // 1001 to 1100, or 0 for a plain image
-    std::string path;
-};
-
-// The files `source` names: itself, or the tiles of a `<UDIM>` set that
-// exist. src/bake.rs lists them by the same rule to key the cache.
-std::vector<Tile> tiles(std::string const &source) {
-    size_t at = source.find("<UDIM>");
-    if (at == std::string::npos)
-        return {{0, source}};
-    std::vector<Tile> set;
-    for (unsigned number = 1001; number <= 1100; ++number) {
-        std::string path = source.substr(0, at) + std::to_string(number) + source.substr(at + 6);
-        if (std::ifstream(path).good())
-            set.push_back({number, path});
-    }
-    if (set.empty())
-        throw std::runtime_error("no tiles of " + source +
-                                 " exist: UDIM tiles are numbered 1001 to 1100");
-    return set;
-}
 
 // The size the source's first stored level at or below the cap (or its
 // smallest) takes once halved to fit the cap: the size it bakes at. And
@@ -398,11 +375,16 @@ std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string
 
 } // namespace
 
-void texture(std::string const &source, std::string const &space, std::string const &encoding,
+void texture(std::vector<Tile> const &set, std::string const &space, std::string const &encoding,
              unsigned cap, std::string const &config, std::string const &out) {
     if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
         throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
-    std::vector<Tile> set = tiles(source);
+    for (Tile const &tile : set) {
+        bool alone = tile.number == 0 && set.size() == 1;
+        if (!alone && (tile.number < 1001 || tile.number > 1100))
+            throw std::runtime_error("the tile " + std::to_string(tile.number) + " of " + tile.path +
+                                     " is not 1001 to 1100, or 0 for an image on its own");
+    }
     unsigned width = 0, height = 0, source_width = 0, source_height = 0;
     for (Tile const &tile : set)
         extent(tile.path, cap, width, height, source_width, source_height);

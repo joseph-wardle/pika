@@ -81,7 +81,7 @@ fi
 grep -q "perfuv and st" "$OUT/perfuv.err" || fail "perfuv: the error does not name the primvars"
 
 texture() {
-    "$BAKE" texture "$FIXTURES/$1" "$2" "$3" "$4" "" "$OUT/textures/$5.texture" || fail "$5: texture failed"
+    "$BAKE" texture "$2" "$3" "$4" "" "$OUT/textures/$5.texture" 0 "$FIXTURES/$1" || fail "$5: texture failed"
 }
 texture ramp.exr raw float 4096 ramp
 cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp.texture" || fail "ramp: the bake differs from the reference"
@@ -99,16 +99,20 @@ cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_aut
 # A JPEG reads, and a space the config knows beyond sRGB is converted.
 texture greys.jpg auto color 4096 greys
 texture acescg.exr acescg color 4096 acescg
-# A UDIM set is one array, a layer per tile, with a table from tile to layer.
-texture "udim.<UDIM>.exr" raw float 4096 udim
-texture "mixed.<UDIM>.exr" raw float 4096 mixed
-if "$BAKE" texture "$FIXTURES/none.<UDIM>.exr" raw float 4096 "" "$OUT/textures/none.texture" 2> "$OUT/textures/none.err"; then
-    fail "none: a set with no tiles baked"
+# A UDIM set, its tiles listed as the renderer lists them, is one array, a
+# layer per tile, with a table from tile to layer; a tile numbered past the
+# hundred is refused.
+"$BAKE" texture raw float 4096 "" "$OUT/textures/udim.texture" 1001 "$FIXTURES/udim.1001.exr" 1012 "$FIXTURES/udim.1012.exr" ||
+    fail "udim: texture failed"
+"$BAKE" texture raw float 4096 "" "$OUT/textures/mixed.texture" 1001 "$FIXTURES/mixed.1001.exr" 1002 "$FIXTURES/mixed.1002.exr" ||
+    fail "mixed: texture failed"
+if "$BAKE" texture raw float 4096 "" "$OUT/textures/none.texture" 1101 "$FIXTURES/udim.1001.exr" 2> "$OUT/textures/none.err"; then
+    fail "none: a tile numbered 1101 baked"
 fi
-grep -q "none.<UDIM>.exr" "$OUT/textures/none.err" || fail "none: the error does not name the pattern"
+grep -q "1101" "$OUT/textures/none.err" || fail "none: the error does not name the tile"
 ! cmp -s "$OUT/textures/swatch.texture" "$OUT/textures/swatch_raw.texture" || fail "swatch_raw: raw and sRGB bake alike, so the auto checks prove nothing"
 "$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
-if "$BAKE" texture "$FIXTURES/swatch.png" bogus color 4096 "" "$OUT/textures/bogus.texture" 2> "$OUT/textures/bogus.err"; then
+if "$BAKE" texture bogus color 4096 "" "$OUT/textures/bogus.texture" 0 "$FIXTURES/swatch.png" 2> "$OUT/textures/bogus.err"; then
     fail "bogus: a texture in an unknown colour space baked"
 fi
 grep -q "bogus" "$OUT/textures/bogus.err" || fail "bogus: the error does not name the colour space"

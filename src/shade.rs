@@ -90,12 +90,17 @@ pub struct Update {
 impl Shade {
     pub fn new(device: &gpu::Device) -> Result<Self, String> {
         let bake = Bake::new()?;
-        let textures = Textures::new(device);
+        let mut textures = Textures::new(device);
         let mut surfaces = BTreeMap::new();
-        let clay = Shade::builtin(&bake, device, &mut surfaces, &material::clay())
-            .map_err(|e| format!("the clay material: {e}"))?;
-        let pink = Shade::builtin(&bake, device, &mut surfaces, &material::pink())
-            .map_err(|e| format!("the pink material: {e}"))?;
+        let mut builtin = |network: Network| -> Result<Uniforms, String> {
+            let document = material::document(&network)?.expect("Pika's networks have a surface");
+            let built = Built::now(&bake, document, network);
+            // No textures, so nothing is recorded or counted.
+            let (cb, mut update) = (vk::CommandBuffer::null(), Update::default());
+            Shade::install(device, &mut surfaces, &mut textures, built, cb, &mut update)
+        };
+        let clay = builtin(material::clay()).map_err(|e| format!("the clay material: {e}"))?;
+        let pink = builtin(material::pink()).map_err(|e| format!("the pink material: {e}"))?;
         Ok(Self {
             device: device.raw.clone(),
             builder: Builder::new(bake),
@@ -108,34 +113,6 @@ impl Shade {
             clay,
             pink,
         })
-    }
-
-    /// Builds one of Pika's own networks, which has no textures, on this
-    /// thread into `surfaces`, and its uniforms.
-    fn builtin(
-        bake: &Bake,
-        device: &gpu::Device,
-        surfaces: &mut BTreeMap<u64, Surface>,
-        network: &Network,
-    ) -> Result<Uniforms, String> {
-        let document = material::document(network)?.expect("Pika's networks have a surface");
-        // No textures, so no cap applies.
-        let output = build::run(bake, &document, network, 0, false)?;
-        let compiled = output.surface.expect("not held");
-        let layout = surface::layout(&compiled.reflection)?;
-        let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
-        let surface = surfaces.entry(document.hash).or_insert(surface);
-        let mut uniforms = Uniforms::new(device, surface, document.hash)?;
-        let (manifest, layout) = (&surface.manifest, &surface.layout);
-        surface::pack(
-            manifest,
-            layout,
-            &document,
-            network,
-            uniforms.buffer.bytes(),
-        )?;
-        uniforms.bind(layout, &[]);
-        Ok(uniforms)
     }
 
     /// Rewrites the block of each material whose network changed its
@@ -209,10 +186,16 @@ impl Shade {
             };
             let id = built.id;
             self.stale = true;
-            if let Err(e) = self.install(device, built, cb, &mut update) {
-                eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
-                self.materials.remove(&id);
-                self.failed.insert(id);
+            let (surfaces, textures) = (&mut self.surfaces, &mut self.textures);
+            match Shade::install(device, surfaces, textures, built, cb, &mut update) {
+                Ok(uniforms) => {
+                    self.materials.insert(id, uniforms);
+                }
+                Err(e) => {
+                    eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
+                    self.materials.remove(&id);
+                    self.failed.insert(id);
+                }
             }
         }
         update.pending = self.builder.len();
@@ -262,27 +245,29 @@ impl Shade {
         (self.builder).submit(id, document, network.clone(), self.cap, held)
     }
 
-    /// Installs a build that landed: its surface unless held, its uniforms
-    /// and its textures, loaded now; counts into `update` what the build
-    /// did.
+    /// Installs a build that landed: its surface into `surfaces` unless
+    /// held, its uniforms, and its textures, loaded now into `textures`
+    /// with their uploads recorded into `cb`; counts into `update` what the
+    /// build did.
     fn install(
-        &mut self,
         device: &gpu::Device,
+        surfaces: &mut BTreeMap<u64, Surface>,
+        textures: &mut Textures,
         built: Built,
         cb: vk::CommandBuffer,
         update: &mut Update,
-    ) -> Result<(), String> {
+    ) -> Result<Uniforms, String> {
         let output = built.result?;
         let hash = built.document.hash;
         if let Some(compiled) = output.surface
-            && !self.surfaces.contains_key(&hash)
+            && !surfaces.contains_key(&hash)
         {
             update.compiled += usize::from(compiled.compiled);
             let layout = surface::layout(&compiled.reflection)?;
             let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
-            self.surfaces.insert(hash, surface);
+            surfaces.insert(hash, surface);
         }
-        let surface = &self.surfaces[&hash];
+        let surface = &surfaces[&hash];
         let (manifest, layout) = (&surface.manifest, &surface.layout);
         let mut uniforms = Uniforms::new(device, surface, hash)?;
         surface::pack(
@@ -296,8 +281,7 @@ impl Shade {
         for (name, baked) in manifest.textures.iter().zip(&output.textures) {
             let (index, _) = surface::node_input(name)?;
             update.baked += usize::from(baked.fresh);
-            let binding =
-                (self.textures).load(device, cb, &baked.path, &baked.texture, &baked.source)?;
+            let binding = textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
             let node = &built.network.nodes[&built.document.nodes[index]];
             let modes = surface::address_modes(
                 layout,
@@ -306,15 +290,14 @@ impl Shade {
                 index,
                 baked.texture.wrap,
             );
-            let sampler = self.textures.sampler(modes)?;
+            let sampler = textures.sampler(modes)?;
             bindings.push((binding, sampler));
             uniforms.textures.push(baked.path.clone());
         }
         uniforms.bind(layout, &bindings);
         uniforms.sources = output.sources;
         uniforms.cap = built.cap;
-        self.materials.insert(built.id, uniforms);
-        Ok(())
+        Ok(uniforms)
     }
 
     /// Records the draws of `view`'s `groups`, after the prepass, into `cb`,

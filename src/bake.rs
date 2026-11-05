@@ -137,36 +137,43 @@ impl Bake {
     pub fn generate(&self, document: &Document) -> Result<Generated, String> {
         let key = cache::fnv1a(&[document.text.as_bytes(), &self.tool.to_le_bytes()]);
         let dir = self.materials.join(format!("{key:016x}"));
-        let manifest = match generated(&dir) {
-            Ok(manifest) => manifest,
-            Err(why) => {
-                // Absent, or left partial by a run that never finished:
-                // either way the tool runs, into a directory with nothing
-                // left of the old.
-                if dir.exists() {
-                    cache::discard(&dir, &why)?;
-                }
-                self.run(document, &dir)?;
-                generated(&dir)?
+        match generated(&dir) {
+            Ok(manifest) => return Ok(Generated { manifest, dir }),
+            // Left partial by a run that never finished: the tool runs into
+            // a directory with nothing left of the old.
+            Err(why) if dir.exists() => cache::discard(&dir, &why)?,
+            Err(_) => {}
+        }
+        // The tool runs into a directory beside `dir`, moved into place
+        // once complete, so `dir` exists only whole; a run that fails, or
+        // that another process beat to it, leaves nothing behind.
+        let tmp = dir.with_extension(cache::unique());
+        let path = tmp.join("document.mtlx");
+        let run = || -> Result<(), String> {
+            std::fs::create_dir_all(&tmp)
+                .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+            std::fs::write(&path, &document.text)
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+            let output = (tool().arg("generate").arg(&path).arg(&tmp).output())
+                .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
+            if !output.status.success() {
+                return Err(failed(&output));
+            }
+            match std::fs::rename(&tmp, &dir) {
+                Ok(()) => Ok(()),
+                Err(_) if dir.join("manifest").is_file() => Ok(()),
+                Err(e) => Err(format!("cannot move {} into place: {e}", tmp.display())),
             }
         };
-        Ok(Generated { manifest, dir })
-    }
-
-    /// Runs the tool into a directory beside `dir`, then moves it into
-    /// place, so `dir` exists only once it is complete.
-    fn run(&self, document: &Document, dir: &Path) -> Result<(), String> {
-        let tmp = dir.with_extension(cache::unique());
-        let result = run(document, &tmp).and_then(|()| match std::fs::rename(&tmp, dir) {
-            Ok(()) => Ok(()),
-            // Another process generated it meanwhile.
-            Err(_) if dir.join("manifest").is_file() => Ok(()),
-            Err(e) => Err(format!("cannot move {} into place: {e}", tmp.display())),
-        });
+        let result = run();
         if result.is_err() || tmp.is_dir() {
             let _ = std::fs::remove_dir_all(&tmp);
         }
-        result
+        result?;
+        Ok(Generated {
+            manifest: generated(&dir)?,
+            dir,
+        })
     }
 
     /// Bakes the image `source`, or the UDIM set its `<UDIM>` pattern
@@ -180,7 +187,8 @@ impl Bake {
         encoding: &str,
         cap: u32,
     ) -> Result<Baked, String> {
-        let path = self.texture_path(source, space, encoding, cap)?;
+        let set = tiles(source)?;
+        let path = self.texture_path(source, &set, space, encoding, cap)?;
         if path.is_file() {
             match texture::read(&path) {
                 Ok(texture) => {
@@ -198,13 +206,16 @@ impl Bake {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let tmp = path.with_extension(cache::unique());
-        let output = tool()
+        let mut command = tool();
+        command
             .arg("texture")
-            .arg(source)
             .args([space, encoding, &cap.to_string(), &self.config])
-            .arg(&tmp)
-            .output()
-            .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
+            .arg(&tmp);
+        for (number, tile) in &set {
+            command.arg(number.to_string()).arg(tile);
+        }
+        let output =
+            (command.output()).map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
         if !output.status.success() {
             let _ = std::fs::remove_file(&tmp);
             return Err(failed(&output));
@@ -219,21 +230,22 @@ impl Bake {
         })
     }
 
-    /// Where `source`'s bake lives: under `textures`, mirroring the source's
-    /// own path so one asset's bakes can be found and deleted, named by a
-    /// hash of each of its files' name, size and modification time, the
-    /// parameters, the config and the tool, so an edited source, a tile
-    /// added or a changed setting misses.
+    /// Where `source`'s bake lives, its files being `set` (`tiles`): under
+    /// `textures`, mirroring the source's own path so one asset's bakes can
+    /// be found and deleted, named by a hash of each file's name, size and
+    /// modification time, the parameters, the config and the tool, so an
+    /// edited source, a tile added or a changed setting misses.
     pub fn texture_path(
         &self,
         source: &Path,
+        set: &[(u32, PathBuf)],
         space: &str,
         encoding: &str,
         cap: u32,
     ) -> Result<PathBuf, String> {
         let mut state = Vec::new();
-        for file in tiles(source)? {
-            let meta = std::fs::metadata(&file)
+        for (_, file) in set {
+            let meta = std::fs::metadata(file)
                 .map_err(|e| format!("cannot read {}: {e}", file.display()))?;
             let modified = meta
                 .modified()
@@ -287,20 +299,21 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
-/// The files `source` names: itself, or for a `<UDIM>` pattern the tiles
-/// 1001 to 1100 that exist, as USD reads a set. The tool lists them by the
-/// same rule (`bake/texture.cpp`); the key here is what makes a bake miss.
-pub fn tiles(source: &Path) -> Result<Vec<PathBuf>, String> {
+/// The files `source` names, each with its tile number: itself, numbered
+/// 0, or for a `<UDIM>` pattern the tiles 1001 to 1100 that exist, as USD
+/// reads a set. The tool bakes what it is given; the key here is what
+/// makes a bake miss.
+pub fn tiles(source: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
     let text = source.to_string_lossy();
     let Some((before, after)) = text.split_once("<UDIM>") else {
         if !source.is_file() {
             return Err(format!("cannot find the texture {text}"));
         }
-        return Ok(vec![source.to_owned()]);
+        return Ok(vec![(0, source.to_owned())]);
     };
-    let set: Vec<PathBuf> = (1001..=1100)
-        .map(|number| PathBuf::from(format!("{before}{number}{after}")))
-        .filter(|tile| tile.is_file())
+    let set: Vec<(u32, PathBuf)> = (1001..=1100)
+        .map(|number| (number, PathBuf::from(format!("{before}{number}{after}"))))
+        .filter(|(_, tile)| tile.is_file())
         .collect();
     if set.is_empty() {
         return Err(format!(
@@ -321,23 +334,6 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
         }
     }
     manifest(&text)
-}
-
-fn run(document: &Document, dir: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let path = dir.join("document.mtlx");
-    std::fs::write(&path, &document.text)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-    let output = tool()
-        .arg("generate")
-        .arg(&path)
-        .arg(dir)
-        .output()
-        .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
-    if !output.status.success() {
-        return Err(failed(&output));
-    }
-    Ok(())
 }
 
 /// The tool, ready for its job's arguments.
@@ -405,6 +401,16 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    fn key(
+        bake: &Bake,
+        source: &Path,
+        space: &str,
+        encoding: &str,
+        cap: u32,
+    ) -> Result<PathBuf, String> {
+        bake.texture_path(source, &tiles(source)?, space, encoding, cap)
+    }
+
     #[test]
     fn texture_paths_mirror_the_source_and_key_its_state() {
         let dir = std::env::temp_dir().join(format!("pika_bake_{}", std::process::id()));
@@ -417,9 +423,7 @@ pub mod tests {
             config: config.into(),
             tool,
         };
-        let path = bake("", 1)
-            .texture_path(&source, "srgb_texture", "color", 4096)
-            .unwrap();
+        let path = key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap();
         // temp_dir may be a symlink; the mirror follows the real path.
         let real = std::fs::canonicalize(&source).unwrap();
         assert_eq!(
@@ -429,9 +433,7 @@ pub mod tests {
         assert_eq!(path.file_name().unwrap().len(), 16);
         assert_eq!(
             path,
-            bake("", 1)
-                .texture_path(&source, "srgb_texture", "color", 4096)
-                .unwrap()
+            key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap()
         );
         for (space, encoding, cap, config, tool) in [
             ("raw", "color", 4096, "", 1),
@@ -442,9 +444,7 @@ pub mod tests {
         ] {
             assert_ne!(
                 path,
-                bake(config, tool)
-                    .texture_path(&source, space, encoding, cap)
-                    .unwrap()
+                key(&bake(config, tool), &source, space, encoding, cap).unwrap()
             );
         }
 
@@ -454,14 +454,17 @@ pub mod tests {
             .unwrap();
         assert_ne!(
             path,
-            bake("", 1)
-                .texture_path(&source, "srgb_texture", "color", 4096)
-                .unwrap()
+            key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap()
         );
         assert!(
-            bake("", 1)
-                .texture_path(Path::new("/nowhere/rock.png"), "raw", "data", 4096)
-                .is_err()
+            key(
+                &bake("", 1),
+                Path::new("/nowhere/rock.png"),
+                "raw",
+                "data",
+                4096
+            )
+            .is_err()
         );
 
         // A set is keyed on its tiles: one added or saved again misses.
@@ -474,13 +477,12 @@ pub mod tests {
         assert_eq!(
             tiles(&pattern).unwrap(),
             [
-                dir.join("assets/wall.1001.png"),
-                dir.join("assets/wall.1012.png")
+                (1001, dir.join("assets/wall.1001.png")),
+                (1012, dir.join("assets/wall.1012.png"))
             ]
         );
-        let set = bake("", 1)
-            .texture_path(&pattern, "raw", "data", 4096)
-            .unwrap();
+        assert_eq!(tiles(&source).unwrap(), [(0, source.clone())]);
+        let set = key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap();
         assert_eq!(
             set.parent().unwrap(),
             dir.join("textures")
@@ -488,9 +490,7 @@ pub mod tests {
                 .join("wall.<UDIM>.png")
         );
         std::fs::write(dir.join("assets/wall.1002.png"), b"png").unwrap();
-        let added = bake("", 1)
-            .texture_path(&pattern, "raw", "data", 4096)
-            .unwrap();
+        let added = key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap();
         assert_ne!(set, added);
         let file = std::fs::File::options()
             .write(true)
@@ -500,9 +500,7 @@ pub mod tests {
             .unwrap();
         assert_ne!(
             added,
-            bake("", 1)
-                .texture_path(&pattern, "raw", "data", 4096)
-                .unwrap()
+            key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap()
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
