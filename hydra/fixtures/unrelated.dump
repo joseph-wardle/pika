@@ -1,0 +1,76 @@
+sync 1
+material /world/mtl/paint
+  surface surface
+  node surface UsdPreviewSurface
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    typeName:file text "asset"
+    st from uv result
+  node uv UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology catmullClark rightHanded
+    face_vertex_counts 4
+    face_vertex_indices 0 1 2 3
+    refined faces 4 points 9
+  points 4
+    0 0 0
+    1 0 0
+    1 1 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 4 refined values 9
+    0 0
+    1 0
+    1 1
+    0 1
+sync 2
+material /world/mtl/paint
+  surface surface
+  node surface UsdPreviewSurface
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    typeName:file text "asset"
+    st from uv result
+  node uv UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+mesh /world/quad
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology catmullClark rightHanded
+    face_vertex_counts 4
+    face_vertex_indices 0 1 2 3
+    refined faces 4 points 9
+  points 4
+    0 0 0
+    2 0 0
+    2 2 0
+    0 2 0
+  normals none
+  texcoord st faceVarying 4 refined values 9
+    0 0
+    1 0
+    1 1
+    0 1

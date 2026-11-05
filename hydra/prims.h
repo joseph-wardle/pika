@@ -10,6 +10,8 @@
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/sprim.h>
 
+#include <optional>
+
 PXR_NAMESPACE_OPEN_SCOPE
 
 class PikaMesh final : public HdMesh {
@@ -23,9 +25,10 @@ public:
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
     // Fetches the float2 primvar the mesh's materials read, which Pika
-    // names from the networks. Sync calls it; so does a material's, when
-    // its network reads another primvar (PikaMaterial::Sync).
-    void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) const;
+    // names from the networks, and hands it over when it is not the one
+    // handed over last. Sync calls it; so does a material's, when its
+    // network reads another primvar (PikaMaterial::Sync).
+    void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer);
     // Whether the mesh or one of its GeomSubsets is bound to the material.
     bool Binds(SdfPath const &material) const;
 
@@ -47,6 +50,16 @@ private:
     Pika &_pika;
     // The materials the GeomSubsets bind, from the last topology.
     std::vector<SdfPath> _subset_materials;
+    // The texcoord handed over last, as fetched (an empty name: none), so
+    // a primvar change that left it as it was, an animated primvar no
+    // material reads, neither refines it again nor hands it over. Reset
+    // with the topology, which the refinement follows.
+    struct Texcoord {
+        std::string name;
+        HdInterpolation interpolation = HdInterpolationConstant;
+        VtVec2fArray values;
+    };
+    std::optional<Texcoord> _texcoord;
     uint64_t _id = 0;
 };
 

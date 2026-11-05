@@ -268,6 +268,7 @@ void PikaMesh::UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderP
 void PikaMesh::_SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer) {
     HdMeshTopology topology = GetMeshTopology(delegate);
     std::string const &path = GetId().GetString();
+    _texcoord.reset();
     Refined refined;
     pika_refined r = {};
     if (topology.GetScheme() != PxOsdOpenSubdivTokens->none) {
@@ -367,23 +368,35 @@ void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) 
 }
 
 // Materials sync before meshes, so the name is there on the first frame.
-void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) const {
+void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) {
     std::string const &path = GetId().GetString();
     char name[256];
     if (!_pika.report(pika_mesh_texcoord_name(renderer, _id, name, sizeof name),
                       path + " texcoord"))
         return;
-    HdInterpolation interpolation;
-    if (!name[0] || !_FindPrimvar(delegate, TfToken(name), interpolation)) {
+    Texcoord fetched;
+    if (name[0] && _FindPrimvar(delegate, TfToken(name), fetched.interpolation)) {
+        VtValue value = GetPrimvar(delegate, TfToken(name));
+        if (!value.IsHolding<VtVec2fArray>()) {
+            fail(path + ": " + name + " is " + value.GetTypeName() +
+                 "; its material reads a float2");
+            return;
+        }
+        fetched.name = name;
+        fetched.values = value.UncheckedGet<VtVec2fArray>();
+    }
+    // Hydra's one dirty bit covers every primvar, so this is where an
+    // animated primvar the materials do not read is told from the texcoord.
+    if (_texcoord && _texcoord->name == fetched.name &&
+        _texcoord->interpolation == fetched.interpolation && _texcoord->values == fetched.values)
+        return;
+    _texcoord = fetched;
+    if (fetched.name.empty()) {
         _pika.report(pika_mesh_no_texcoord(renderer, _id), path + " texcoord");
         return;
     }
-    VtValue value = GetPrimvar(delegate, TfToken(name));
-    if (!value.IsHolding<VtVec2fArray>()) {
-        fail(path + ": " + name + " is " + value.GetTypeName() + "; its material reads a float2");
-        return;
-    }
-    VtVec2fArray const &values = value.UncheckedGet<VtVec2fArray>();
+    HdInterpolation interpolation = fetched.interpolation;
+    VtVec2fArray const &values = fetched.values;
     std::string token = TfEnum::GetDisplayName(interpolation);
     HdMeshTopology topology = GetMeshTopology(delegate);
     if (topology.GetScheme() == PxOsdOpenSubdivTokens->none) {
@@ -640,7 +653,8 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
         return;
     HdRenderIndex &index = delegate->GetRenderIndex();
     for (SdfPath const &id : index.GetRprimIds()) {
-        auto mesh = dynamic_cast<PikaMesh const *>(index.GetRprim(id));
+        // The index hands out its rprims const; the mesh's sync is Pika's own.
+        auto mesh = const_cast<PikaMesh *>(dynamic_cast<PikaMesh const *>(index.GetRprim(id)));
         if (mesh && mesh->Binds(GetId()))
             mesh->SyncTexcoord(delegate, renderer);
     }

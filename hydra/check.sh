@@ -89,6 +89,13 @@ counts() {
         END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
 }
 
+# redundant <stats> <edit>: the mesh bytes the edit's sync handed over that
+# the store held already.
+redundant() {
+    awk -v edit="$2" '$1 == "sync" && $2 == edit { for (i = 3; i < NF; i += 2)
+        if ($i == "mesh_redundant_bytes") print $(i + 1) }' "$1"
+}
+
 # pending <stats>: the materials pending on the first frame and on the last.
 pending() {
     awk '/^frame /{ for (i = 3; i < NF; i += 2) if ($i == "pending_materials") {
@@ -155,13 +162,17 @@ fixture() {
     # warning. Every material with a surface in frame 1's expected store is
     # built off the render thread and pending on the first frame, built or
     # failed, and none is pending on the last; a scene without one is the
-    # control.
-    local first=0 edited="0 0" warnings=0 built compiled _ second
+    # control. An edit that touches a primvar the materials do not read
+    # hands over no mesh bytes the store holds already (`redundant`); the
+    # other edits are not held to a count, since Hydra resends what a
+    # changed topology or instancing covers.
+    local first=0 edited="0 0" warnings=0 redundant= built compiled _ second
     case $name in
         network) first=1 edited="0 1" ;;
         rewired) first=1 edited="1 0" ;;
         broken) edited="1 0" warnings=1 ;;
         texcoord) first=1 edited="1 0" ;;
+        unrelated) first=1 redundant=0 ;;
         welded) first=1 ;;
     esac
     built=$(awk '/^sync 2/{ exit } /^  surface / && $2 != "none" { n++ } END { print n + 0 }' "$dir/$name.dump")
@@ -174,6 +185,8 @@ fixture() {
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
+    [ -z "$redundant" ] || [ "$(redundant "$OUT/fixtures/$name.stats" "$edit")" = "$redundant" ] ||
+        fail "$name: the edit handed over $(redundant "$OUT/fixtures/$name.stats" "$edit") redundant mesh bytes, not $redundant"
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
@@ -196,7 +209,7 @@ done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 # Each fixture's check reports to a file of its own; one that stops short of
 # the end exits nonzero.
-export -f fixture clean store_after counts pending fail
+export -f fixture clean store_after counts pending redundant fail
 export OUT ROOT
 printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \
     'set -euo pipefail; fixture "$1" >"$OUT/fixtures/$(basename "$1" .usda).report" 2>&1' _ {} ||

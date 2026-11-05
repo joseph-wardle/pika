@@ -1,0 +1,63 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A primvar change leaves a mesh's texcoord alone unless it changed: the
+# subdivided quad's st is read by its material and refined with it, and its
+# displayColor, which no material reads, is animated, as are its points, the
+# edit. The second frame's sync hands over the points and nothing twice: no
+# mesh bytes are redundant, and the texcoord is not refined again.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points.timeSamples = {
+            1: [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)],
+            2: [(0, 0, 0), (2, 0, 0), (2, 2, 0), (0, 2, 0)],
+        }
+        color3f[] primvars:displayColor.timeSamples = {
+            1: [(1, 0, 0)],
+            2: [(0, 1, 0)],
+        }
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "catmullClark"
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </world/mtl/paint/tex.outputs:rgb>
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
+                float2 inputs:st.connect = </world/mtl/paint/uv.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "uv"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+}
