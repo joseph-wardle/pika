@@ -161,8 +161,17 @@ pub fn pack(
             })?;
             let node = &network.nodes[path];
             match node.params.get(material::store_input(node, input)) {
-                // A text value (a wrap mode) went into the document, and the
-                // generator resolved it into the initial value.
+                // An address mode's token is its integer; useMetadata, the
+                // file's own, leaves the nodedef's (the sampler reads the
+                // file: `address_modes`).
+                Some(Value::Text(token)) if material::ADDRESS_MODES.contains(&input) => {
+                    match address_mode(token).map_err(|e| format!("{path}'s {input} {e}"))? {
+                        Some(mode) => vec![mode],
+                        None => shape.initial(&uniform.initial)?,
+                    }
+                }
+                // Any other text value (a geomprop name) went into the
+                // document, and the generator resolved it into the initial.
                 Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
                 Some(value) => shape
                     .words(value)
@@ -185,48 +194,50 @@ pub fn node_input(name: &str) -> Result<(usize, &str), String> {
         .ok_or_else(|| format!("uniform {name} is not a node's input"))
 }
 
-/// The address modes of `node`, the document's node `index`, u then v,
-/// as packed in `bytes`: the UsdUVTexture `wrapS`/`wrapT` or the image
-/// `uaddressmode`/`vaddressmode` integers, whose nodedefs share one
-/// enumeration (black or constant, clamp, periodic, mirror); periodic
-/// when the node has neither. A UsdUVTexture's `useMetadata`, USD's
-/// default when none is authored, asks for the `file`'s own, as the bake
-/// read them (`texture::Texture::wrap`).
-pub fn address_modes(
-    layout: &Layout,
-    bytes: &[u8],
-    node: &Node,
-    index: usize,
-    file: [u32; 2],
-) -> [u32; 2] {
-    let read = |names: [&str; 2]| {
-        names.iter().find_map(|name| {
-            let offset = *layout.offsets.get(&format!("n{index}_{name}"))?;
-            Some(u32::from_ne_bytes(
-                bytes[offset..offset + 4].try_into().unwrap(),
-            ))
-        })
-    };
-    let metadata = |name: &str| {
-        node.node_type == "UsdUVTexture"
-            && match node.params.get(name) {
-                None => true,
-                Some(Value::Text(token)) => token == "useMetadata",
-                Some(_) => false,
+/// The address modes `node` samples its texture through, u then v, in the
+/// image nodedefs' enumeration: its UsdUVTexture `wrapS`/`wrapT` or image
+/// `uaddressmode`/`vaddressmode` tokens. A UsdUVTexture's `useMetadata`,
+/// USD's default when none is authored, asks for the `file`'s own, as the
+/// bake read them (`texture::Texture::wrap`); an image node authoring none
+/// is periodic, its nodedef's initial value.
+pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
+    let usd = node.node_type == "UsdUVTexture";
+    let mode = |names: [&str; 2], axis: usize| -> Result<u32, String> {
+        let authored = names.iter().find_map(|name| match node.params.get(*name) {
+            Some(Value::Text(token)) => Some((name, token)),
+            _ => None,
+        });
+        match authored {
+            Some((name, token)) => {
+                let mode = address_mode(token).map_err(|e| format!("{name} {e}"))?;
+                Ok(mode.unwrap_or(file[axis]))
             }
+            None if usd => Ok(file[axis]),
+            None => Ok(2),
+        }
     };
-    [
-        if metadata("wrapS") {
-            file[0]
-        } else {
-            read(["wrapS", "uaddressmode"]).unwrap_or(2)
-        },
-        if metadata("wrapT") {
-            file[1]
-        } else {
-            read(["wrapT", "vaddressmode"]).unwrap_or(2)
-        },
-    ]
+    Ok([
+        mode(["wrapS", "uaddressmode"], 0)?,
+        mode(["wrapT", "vaddressmode"], 1)?,
+    ])
+}
+
+/// The integer the image nodedefs' enumeration gives the address mode
+/// `token`, USD's names included (black is constant, repeat periodic), or
+/// none for `useMetadata`, which asks for the file's own.
+pub fn address_mode(token: &str) -> Result<Option<u32>, String> {
+    Ok(Some(match token {
+        "black" | "constant" => 0,
+        "clamp" => 1,
+        "repeat" | "periodic" => 2,
+        "mirror" => 3,
+        "useMetadata" => return Ok(None),
+        _ => {
+            return Err(format!(
+                "is {token}, not black (constant), clamp, repeat (periodic), mirror or useMetadata"
+            ));
+        }
+    }))
 }
 
 /// Writes what the generated light loop reads: the eye, and the headlight,
@@ -370,17 +381,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // The wrap token was compiled in as the nodedef's integer; wrapT,
-        // unauthored, is useMetadata: the file's, as is a wrapS saying so.
+        // The wrap token is packed as the nodedef's integer, and read into
+        // the sampler; wrapT, unauthored, is useMetadata: the file's, as
+        // is a wrapS saying so, the block keeping the initial value.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 1);
+        assert_eq!(bytes[l.offsets["n1_wrapT"]], 2);
         let tex = &network.nodes["tex"];
-        assert_eq!(address_modes(&l, &bytes, tex, 1, [3, 0]), [1, 0]);
+        assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
         let mut metadata = tex.clone();
         (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
-        assert_eq!(address_modes(&l, &bytes, &metadata, 1, [3, 0]), [3, 0]);
+        assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
+        let mut edited = network.clone();
+        let wrap_s = |network: &mut Network, token: &str| {
+            let tex = network.nodes.get_mut("tex").unwrap();
+            tex.params.insert("wrapS".into(), Value::Text(token.into()));
+        };
+        wrap_s(&mut edited, "mirror");
+        pack(&manifest, &l, &document, &edited, &mut bytes).unwrap();
+        assert_eq!(bytes[l.offsets["n1_wrapS"]], 3);
+        wrap_s(&mut edited, "bogus");
+        let error = pack(&manifest, &l, &document, &edited, &mut bytes).unwrap_err();
+        assert!(error.starts_with("tex's wrapS is bogus"), "{error}");
+        // An image node authoring none is periodic; its tokens are the
+        // enumeration's own.
+        let mut image = tex.clone();
+        image.node_type = "ND_image_color3".into();
+        image.params.remove("wrapS");
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [2, 2]);
+        (image.params).insert("uaddressmode".into(), Value::Text("constant".into()));
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [0, 2]);
+        (image.params).insert("vaddressmode".into(), Value::Text("bogus".into()));
+        let error = address_modes(&image, [3, 0]).unwrap_err();
+        assert!(error.starts_with("vaddressmode is bogus"), "{error}");
         let surface = &network.nodes["surface"];
         assert_eq!(
-            address_modes(&l, &bytes, surface, 0, [3, 0]),
+            address_modes(surface, [3, 0]).unwrap(),
             [2, 2],
             "no texture: periodic"
         );

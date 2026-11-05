@@ -143,15 +143,19 @@ struct Image {
     view: vk::ImageView,
     bytes: u64,
     tiles: Buffer,
+    wrap: [u32; 2],
 }
 
 /// What a surface binds for one texture: its view and its tile table,
 /// whose range is the table's own length, which the shader reads to tell a
-/// plain image from a set (a buffer itself is at least 16 bytes).
+/// plain image from a set (a buffer itself is at least 16 bytes), and the
+/// wrap modes its file states (`Texture::wrap`), which choose its sampler
+/// with its node's (`surface::address_modes`).
 #[derive(Clone, Copy)]
 pub struct Binding {
     pub view: vk::ImageView,
     pub tiles: vk::DescriptorBufferInfo,
+    pub wrap: [u32; 2],
 }
 
 impl Image {
@@ -184,6 +188,7 @@ impl Image {
             view: vk::ImageView::null(),
             bytes: 0,
             tiles,
+            wrap: texture.wrap,
         };
         // SAFETY (this and every call below): `d` is live, each info struct
         // outlives its call, and each handle passed in was created on `d`
@@ -279,6 +284,7 @@ impl Image {
             tiles: vk::DescriptorBufferInfo::default()
                 .buffer(self.tiles.raw)
                 .range(self.tiles.size),
+            wrap: self.wrap,
         }
     }
 }
@@ -342,9 +348,9 @@ impl Textures {
         path: &Path,
         texture: &Texture,
         source: &Path,
-    ) -> Result<Binding, String> {
-        if let Some(image) = self.images.get(path) {
-            return Ok(image.binding());
+    ) -> Result<(), String> {
+        if self.images.contains_key(path) {
+            return Ok(());
         }
         if texture.source != [texture.width, texture.height] {
             eprintln!(
@@ -359,9 +365,15 @@ impl Textures {
         let (image, staging) = Image::new(device, texture)?;
         image.record(cb, &staging, texture);
         self.staging.push(staging);
-        let binding = image.binding();
         self.images.insert(path.to_owned(), image);
-        Ok(binding)
+        Ok(())
+    }
+
+    /// What a surface binds for the texture at `path`, loaded and kept
+    /// while a material lists it (`retain`).
+    pub fn binding(&self, path: &Path) -> Result<Binding, String> {
+        (self.images.get(path).map(Image::binding))
+            .ok_or_else(|| format!("texture {} is not loaded", path.display()))
     }
 
     /// Drops the textures not in `used`. No GPU work may be pending.

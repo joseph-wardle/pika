@@ -3,7 +3,8 @@
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by a
 //! headlight. A material is built off the render thread (`build`) and drawn
-//! clay until its build lands; a value edit writes its block in place.
+//! clay until its build lands; a value edit writes its block in place and
+//! rebinds its samplers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -14,7 +15,7 @@ use crate::bake::{Bake, Manifest};
 use crate::build::{self, Builder, Built};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
-use crate::material::{self, Source};
+use crate::material::{self, Document, Source};
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::store::{Moved, Network, Store};
 use crate::surface::{self, Layout};
@@ -231,13 +232,15 @@ impl Shade {
             let surface = &self.surfaces[&document.hash];
             if build::sources(&surface.manifest, &document, network)? == uniforms.sources {
                 self.builder.forget(id);
-                return surface::pack(
+                surface::pack(
                     &surface.manifest,
                     &surface.layout,
                     &document,
                     network,
                     uniforms.buffer.bytes(),
-                );
+                )?;
+                // An address mode is a value too: the samplers follow it.
+                return uniforms.bind(&mut self.textures, surface, &document, network);
             }
         }
         self.materials.remove(&id);
@@ -277,24 +280,12 @@ impl Shade {
             &built.network,
             uniforms.buffer.bytes(),
         )?;
-        let mut bindings = Vec::new();
-        for (name, baked) in manifest.textures.iter().zip(&output.textures) {
-            let (index, _) = surface::node_input(name)?;
+        for baked in &output.textures {
             update.baked += usize::from(baked.fresh);
-            let binding = textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
-            let node = &built.network.nodes[&built.document.nodes[index]];
-            let modes = surface::address_modes(
-                layout,
-                uniforms.buffer.bytes(),
-                node,
-                index,
-                baked.texture.wrap,
-            );
-            let sampler = textures.sampler(modes)?;
-            bindings.push((binding, sampler));
+            textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
             uniforms.textures.push(baked.path.clone());
         }
-        uniforms.bind(layout, &bindings);
+        uniforms.bind(textures, surface, &built.document, &built.network)?;
         uniforms.sources = output.sources;
         uniforms.cap = built.cap;
         Ok(uniforms)
@@ -535,10 +526,28 @@ impl Uniforms {
         Ok(u)
     }
 
-    /// Writes the set: the block, and each of `layout`'s textures from
-    /// `bindings` in order. The GPU must not be reading the set.
-    fn bind(&self, layout: &Layout, bindings: &[(Binding, vk::Sampler)]) {
-        assert_eq!(bindings.len(), layout.textures.len());
+    /// Writes the set: the block, and each of `self.textures`, in the
+    /// surface's order, through a sampler of the address modes its node
+    /// in `network`, by `document`'s node order, and its file say
+    /// (`surface::address_modes`). The GPU must not be reading the set.
+    fn bind(
+        &self,
+        textures: &mut Textures,
+        surface: &Surface,
+        document: &Document,
+        network: &Network,
+    ) -> Result<(), String> {
+        let layout = &surface.layout;
+        assert_eq!(self.textures.len(), layout.textures.len());
+        let mut bindings: Vec<(Binding, vk::Sampler)> = Vec::new();
+        for (name, path) in surface.manifest.textures.iter().zip(&self.textures) {
+            let (index, _) = surface::node_input(name)?;
+            let node = &network.nodes[&document.nodes[index]];
+            let binding = textures.binding(path)?;
+            let modes = surface::address_modes(node, binding.wrap)
+                .map_err(|e| format!("{}'s {e}", document.nodes[index]))?;
+            bindings.push((binding, textures.sampler(modes)?));
+        }
         let buffer_info = [vk::DescriptorBufferInfo::default()
             .buffer(self.buffer.raw)
             .range(vk::WHOLE_SIZE)];
@@ -586,6 +595,7 @@ impl Uniforms {
         // SAFETY: the set, buffers, views and samplers were created on
         // `device`, which is live, and the infos outlive the call.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        Ok(())
     }
 }
 

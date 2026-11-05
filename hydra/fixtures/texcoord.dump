@@ -7,8 +7,6 @@ material /world/mtl/paint
     colorSpace:file text "raw"
     file asset "bake/fixtures/swatch.png"
     typeName:file text "asset"
-    typeName:wrapT text "token"
-    wrapT text "mirror"
     st from uv result
   node uv UsdPrimvarReader_float2
     typeName:varname text "string"
@@ -44,8 +42,6 @@ material /world/mtl/paint
     colorSpace:file text "raw"
     file asset "bake/fixtures/swatch.png"
     typeName:file text "asset"
-    typeName:wrapT text "token"
-    wrapT text "mirror"
     st from uv result
   node uv UsdPrimvarReader_float2
     typeName:varname text "string"

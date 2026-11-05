@@ -2,7 +2,7 @@ materialx 1.39.5
 uniform surfaceshader backsurfaceshader
 uniform displacementshader displacementshader1
 texture n1_file
-uniform integer n1_wrapS 1
+uniform integer n1_wrapS 2
 uniform integer n1_wrapT 2
 uniform color4 n1_fallback 0, 0, 0, 1
 uniform color4 n1_scale 1, 1, 1, 1

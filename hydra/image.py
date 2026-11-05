@@ -96,9 +96,10 @@ What the reference encodes:
   index 0: UV0, the texcoord MaterialX's nodes read by default, which
   Storm and Karma read as st (hydra/images/uv0.usda),
   under the image node's address modes, or a UsdUVTexture's wrapS and
-  wrapT, whose useMetadata, USD's default when none is authored, is what
-  the file's wrapmodes metadata states, black where it states none, as
-  Storm reads it (hydra/images/wrapped.usda); with st (0, 0) at the image's
+  wrapT, read at the frame (hydra/images/rewrapped.usda), whose
+  useMetadata, USD's default when none is authored, is what the file's
+  wrapmodes metadata states, black where it states none, as Storm reads it
+  (hydra/images/wrapped.usda); with st (0, 0) at the image's
   bottom-left corner as USD and MaterialX read it, the channels padded
   with 0 to three. The sample is bilinear within a level, at the level the
   hit's footprint picks as a Vulkan sampler with linear mip filtering and
@@ -504,12 +505,12 @@ def uv0(image):
     return not index or index.Get() == 0
 
 
-def sampled(image, kind, control=None):
-    """The file, address modes (u, v), primvar and declared colour space
-    (auto when none for a colour, raw for the rest) of an ND_image_<kind>
-    node sampled at UV0 (st) or a geompropvalue reader, or of a UsdUVTexture
-    (`kind` rgb, its output) sampled at st or a UsdPrimvarReader_float2, or
-    None for any other node."""
+def sampled(image, kind, time, control=None):
+    """The file, address modes (u, v) at `time`, primvar and declared colour
+    space (auto when none for a colour, raw for the rest) of an
+    ND_image_<kind> node sampled at UV0 (st) or a geompropvalue reader, or
+    of a UsdUVTexture (`kind` rgb, its output) sampled at st or a
+    UsdPrimvarReader_float2, or None for any other node."""
     usd = kind == "rgb"
     if not image or image.GetShaderId() != ("UsdUVTexture" if usd else f"ND_image_{kind}"):
         return None
@@ -532,20 +533,20 @@ def sampled(image, kind, control=None):
     if "<UDIM>" in file.Get().path:
         path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
     if usd:
-        modes = tuple(wrap(image, name, path, control) for name in ("wrapS", "wrapT"))
+        modes = tuple(wrap(image, name, path, time, control) for name in ("wrapS", "wrapT"))
     else:
-        modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
+        modes = tuple(image.GetInput(m).Get(time) if image.GetInput(m) else "periodic"
                       for m in ("uaddressmode", "vaddressmode"))
     colour = usd or kind == "color3" or control == "8-bit data read as sRGB"
     space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
     return (path, modes, primvar, space)
 
 
-def wrap(image, name, path, control=None):
-    """A UsdUVTexture's wrapS or wrapT in the image nodedefs' words: repeat
-    is periodic, and useMetadata, USD's default when none is authored, is
-    what the file's metadata states for that axis."""
-    token = image.GetInput(name).Get() if image.GetInput(name) else "useMetadata"
+def wrap(image, name, path, time, control=None):
+    """A UsdUVTexture's wrapS or wrapT at `time` in the image nodedefs'
+    words: repeat is periodic, and useMetadata, USD's default when none is
+    authored, is what the file's metadata states for that axis."""
+    token = image.GetInput(name).Get(time) if image.GetInput(name) else "useMetadata"
     if token != "useMetadata":
         return "periodic" if token == "repeat" else token
     if control == "useMetadata read as periodic":
@@ -584,7 +585,7 @@ def lit(surface, time, control=None):
         node = upstream(surface, bump)
         chain = node and node.GetShaderId() == "ND_normalmap_float" and (
             [i.GetBaseName() for i in node.GetInputs()] == ["in"])
-        normal = sampled(upstream(node, "in"), "vector3", control) if chain else None
+        normal = sampled(upstream(node, "in"), "vector3", time, control) if chain else None
         if not normal:
             raise ValueError(f"{path}: the reference perturbs a normal only by a normalmap of an "
                              "image's vector3 sample at a primvar")
@@ -631,7 +632,7 @@ def preview(surface, time, control=None):
                          "set useSpecularWorkflow to 1 and specularColor to black")
     image, emission = None, value("emissiveColor")
     if "emissiveColor" in authored and authored["emissiveColor"].HasConnectedSource():
-        image = sampled(upstream(surface, "emissiveColor"), "rgb", control)
+        image = sampled(upstream(surface, "emissiveColor"), "rgb", time, control)
         if not image:
             raise ValueError(f"{path}: the reference emits a UsdUVTexture's rgb sampled at a primvar, "
                              "nothing else connected")
@@ -669,8 +670,8 @@ def look(prim, host, time, control=None):
     node = upstream(edf, "color")
     while node and node.GetShaderId().startswith("ND_convert_"):
         node = upstream(node, "in")
-    image = (sampled(node, "vector2", control) or sampled(node, "vector3", control)
-             or sampled(node, "color3", control))
+    image = (sampled(node, "vector2", time, control) or sampled(node, "vector3", time, control)
+             or sampled(node, "color3", time, control))
     if not image:
         raise refuse
     if control == "UV0 drawn pink" and uv0(node):

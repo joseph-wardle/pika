@@ -5,7 +5,6 @@
   </node>
   <node name="n1" nodedef="ND_UsdUVTexture_23">
     <input name="st" nodename="n2" />
-    <input name="wrapS" type="string" value="clamp" />
   </node>
   <node name="n2" nodedef="ND_geompropvalue_vector2">
     <input name="geomprop" type="string" value="st" />

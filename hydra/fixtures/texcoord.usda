@@ -41,7 +41,6 @@ def Xform "world"
                 uniform token info:id = "UsdUVTexture"
                 asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
                 float2 inputs:st.connect = </world/mtl/paint/uv.outputs:result>
-                token inputs:wrapT = "mirror"
                 float3 outputs:rgb
             }
 

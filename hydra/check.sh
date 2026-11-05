@@ -152,9 +152,9 @@ fixture() {
         fail "$name: the summary has no GPU readback time, so a pass went untimed"
     grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
         fail "$name: the summary has no memory budget"
-    # An edit to a value or an asset path compiles nothing; one to the
-    # network's structure, the primvar a reader names included, compiles its
-    # surface; a texture is baked once per file. The scenes that edit a
+    # An edit to a value, a wrap mode among them, or an asset path compiles
+    # nothing; one to the network's structure, the primvar a reader names
+    # included, compiles its surface; a texture is baked once per file. The scenes that edit a
     # material are each other's control, and each must compile within its
     # frame, so a counter that never moves fails. A material that cannot be
     # built is warned of when its build lands, which is once, though husk
@@ -170,6 +170,7 @@ fixture() {
     case $name in
         network) first=1 edited="0 1" ;;
         rewired) first=1 edited="1 0" ;;
+        rewrapped) first=1 ;;
         broken) edited="1 0" warnings=1 ;;
         texcoord) first=1 edited="1 0" ;;
         unrelated) first=1 redundant=0 ;;

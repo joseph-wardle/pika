@@ -3,10 +3,10 @@
 //!
 //! The document holds only what decides the generated code: the nodes
 //! upstream of the surface, named by their MaterialX nodedefs, their
-//! connections, and their text inputs (a geomprop name or a wrap mode is
-//! compiled in). Numbers and assets are left out: they reach the shader as
-//! uniforms and textures, so a material whose values change keeps its
-//! shader, and materials of one structure share it.
+//! connections, and their text inputs (a geomprop name is compiled in).
+//! Numbers, assets and address modes are left out: they reach the shader
+//! as uniforms, textures and samplers, so a material whose values change
+//! keeps its shader, and materials of one structure share it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -87,15 +87,21 @@ pub struct Document {
     pub texcoord: String,
 }
 
+/// The inputs that choose a texture's sampler, u then v: a UsdUVTexture's
+/// and an image node's. The generator compiles a text input in, but these
+/// land as integer uniforms the generated code never reads, since the
+/// sampler addresses the texture, so they are values: left out of the
+/// document, packed from their tokens (`surface::pack`) and read into the
+/// sampler (`surface::address_modes`), and an edit to one compiles nothing.
+pub const ADDRESS_MODES: [&str; 4] = ["wrapS", "wrapT", "uaddressmode", "vaddressmode"];
+
 /// A USD shader id and the MaterialX nodedef that implements it, with the
-/// inputs, outputs and tokens whose names differ and the inputs the nodedef
-/// lacks.
+/// inputs and outputs whose names differ and the inputs the nodedef lacks.
 struct Rename {
     usd: &'static str,
     nodedef: &'static str,
     inputs: &'static [(&'static str, &'static str)],
     outputs: &'static [(&'static str, &'static str)],
-    tokens: &'static [(&'static str, &'static str)],
     dropped: &'static [&'static str],
 }
 
@@ -105,7 +111,6 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdPreviewSurface_surfaceshader",
         inputs: &[],
         outputs: &[("surface", "out")],
-        tokens: &[],
         dropped: &[],
     },
     Rename {
@@ -113,11 +118,6 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdUVTexture_23",
         inputs: &[],
         outputs: &[],
-        // The nodedef's wrap enum is black, clamp, periodic, mirror.
-        // useMetadata asks for the file's own wrap mode, which the bake
-        // reads and the sampler takes (surface::address_modes); the
-        // document needs a value the enum has.
-        tokens: &[("repeat", "periodic"), ("useMetadata", "periodic")],
         // The texture's colour space is applied when it is loaded.
         dropped: &["sourceColorSpace"],
     },
@@ -126,7 +126,6 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_geompropvalue_vector2",
         inputs: &[("varname", "geomprop"), ("fallback", "default")],
         outputs: &[("result", "out")],
-        tokens: &[],
         dropped: &[],
     },
     Rename {
@@ -134,7 +133,6 @@ const RENAMES: &[Rename] = &[
         nodedef: "ND_UsdTransform2d",
         inputs: &[],
         outputs: &[("result", "out")],
-        tokens: &[],
         dropped: &[],
     },
 ];
@@ -145,7 +143,6 @@ const NONE: &Rename = &Rename {
     nodedef: "",
     inputs: &[],
     outputs: &[],
-    tokens: &[],
     dropped: &[],
 };
 
@@ -241,10 +238,12 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
             };
             // Hydra adds `typeName:` and `colorSpace:` entries beside the
             // inputs; they describe the values this document leaves out.
-            if name.contains(':') || rename.dropped.contains(&name.as_str()) {
+            if name.contains(':')
+                || rename.dropped.contains(&name.as_str())
+                || ADDRESS_MODES.contains(&name.as_str())
+            {
                 continue;
             }
-            let value = renamed(rename.tokens, value);
             let attributes = format!("type=\"string\" value=\"{}\"", escape(value));
             inputs.insert(renamed(rename.inputs, name), attributes);
         }
@@ -497,25 +496,30 @@ pub mod tests {
     }
 
     #[test]
-    fn usd_wrap_tokens_become_the_nodedefs() {
+    fn address_modes_are_values() {
         let wrapped = |token: &str| {
             let mut network = fixture();
             let tex = network.nodes.get_mut("tex").unwrap();
             tex.params.insert("wrapS".into(), Value::Text(token.into()));
+            tex.params.insert("wrapT".into(), Value::Text(token.into()));
             network
         };
-        let repeat = text(&wrapped("repeat"));
-        assert!(repeat.contains("name=\"wrapS\" type=\"string\" value=\"periodic\""));
-        assert!(!repeat.contains("repeat"));
-        assert_eq!(text(&wrapped("useMetadata")), repeat);
-        // The control: a token both vocabularies share passes through, and
-        // the token is a value, so only UsdUVTexture's are translated.
-        assert!(text(&wrapped("mirror")).contains("value=\"mirror\""));
+        for token in ["repeat", "mirror", "useMetadata"] {
+            assert_eq!(text(&wrapped(token)), FIXTURE, "{token}");
+        }
+        let mut image = fixture();
+        let tex = image.nodes.get_mut("tex").unwrap();
+        tex.node_type = "ND_image_color3".into();
+        (tex.params).insert("uaddressmode".into(), Value::Text("constant".into()));
+        (tex.params).insert("vaddressmode".into(), Value::Text("mirror".into()));
+        assert!(!text(&image).contains("addressmode"));
+        // The control: a text input that is not an address mode is
+        // compiled in, whatever the token.
         let mut reader = fixture();
         let st = reader.nodes.get_mut("st").unwrap();
         st.params
-            .insert("varname".into(), Value::Text("repeat".into()));
-        assert!(text(&reader).contains("name=\"geomprop\" type=\"string\" value=\"repeat\""));
+            .insert("varname".into(), Value::Text("mirror".into()));
+        assert!(text(&reader).contains("name=\"geomprop\" type=\"string\" value=\"mirror\""));
     }
 
     #[test]

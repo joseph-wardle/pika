@@ -8,8 +8,7 @@
 # A structural edit: frame 2 moves the texture from the surface's diffuse
 # colour to its emissive colour. That is a new network, so Pika compiles a
 # new surface, while the texture, whose file did not change, is not baked
-# again. The texture mirrors so that neither frame's network is network.usda's,
-# which the run's cache would answer without compiling.
+# again.
 def Xform "world"
 {
     def Camera "camera" {}
@@ -46,7 +45,6 @@ def Xform "world"
                 asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
                 float4 inputs:scale = (2, 2, 2, 1)
                 float2 inputs:st.connect = </world/mtl/paint/st.outputs:result>
-                token inputs:wrapS = "mirror"
                 float3 outputs:rgb
             }
 

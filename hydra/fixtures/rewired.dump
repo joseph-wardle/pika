@@ -16,8 +16,6 @@ material /world/mtl/paint
     scale float 2 2 2 1
     typeName:file text "asset"
     typeName:scale text "float4"
-    typeName:wrapS text "token"
-    wrapS text "mirror"
     st from st result
 mesh /world/tri
   render_tag geometry
@@ -61,8 +59,6 @@ material /world/mtl/paint
     scale float 2 2 2 1
     typeName:file text "asset"
     typeName:scale text "float4"
-    typeName:wrapS text "token"
-    wrapS text "mirror"
     st from st result
 mesh /world/tri
   render_tag geometry
