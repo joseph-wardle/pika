@@ -26,7 +26,7 @@ struct Push
     // Three vertex indices per triangle, counted from the mesh's first
     // vertex, as the draws read them.
     uint *indices;
-    float4 *tangents;
+    uint *tangents;
     // The vertices this dispatch writes.
     uint first;
     uint count;
@@ -103,6 +103,6 @@ void cs(uint3 thread : SV_DispatchThreadID)
             t.xyz = normalize(u);
             t.w = dot(cross(n, t.xyz), w) < 0 ? -1 : 1;
         }
-        push.tangents[v] = t;
+        push.tangents[v] = pack_tangent(t);
     }
 }

@@ -11,6 +11,23 @@ static const uint SMOOTH = 0xffffffff;
 // A vertex's texcoord index when its mesh has none.
 static const uint NONE = 0xffffffff;
 
+// A vertex's tangent in 4 bytes: x, y and z as signed 10-bit fractions of
+// 511 from the low bits up, and its handedness, 1 or -1, in the top two
+// (Vulkan's A2B10G10R10_SNORM). 10 bits turn a unit vector by at most 0.1
+// degree, under what a normal map's 8-bit texels resolve.
+uint pack_tangent(float4 t)
+{
+    uint3 xyz = uint3(int3(round(clamp(t.xyz, -1, 1) * 511))) & 0x3ff;
+    uint w = t.w < 0 ? 3 : 1;
+    return xyz.x | xyz.y << 10 | xyz.z << 20 | w << 30;
+}
+
+float4 unpack_tangent(uint packed)
+{
+    int3 xyz = (int3(packed) << int3(22, 12, 2)) >> 22;
+    return float4(float3(xyz) / 511, float(int(packed) >> 30));
+}
+
 // The lights a view has: the headlight, until the lights milestone.
 static const int LIGHTS = 1;
 
@@ -44,8 +61,8 @@ struct View
     // Per texcoord value, and the texcoord index (or NONE) per vertex.
     float *texcoord;
     uint *vertex_texcoord;
-    // Per vertex: its tangent and, in w, its handedness (shaders/tangent.slang).
-    float4 *tangents;
+    // Per vertex: its tangent and handedness, packed (shaders/tangent.slang).
+    uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
     // Each instance's draw record.

@@ -111,7 +111,8 @@ struct Layout {
     vertices: Buffer,
     /// The texcoord index (or `NONE`) per vertex.
     vertex_texcoord: Buffer,
-    /// xyz and handedness per vertex, written by the tangent pass.
+    /// The tangent and handedness per vertex, packed into 4 bytes by the
+    /// tangent pass (`shaders/view.slang`).
     tangents: Buffer,
     vertex_adjacency: Adjacency,
     /// Three vertex indices per triangle, counted from the mesh's first vertex.
@@ -210,7 +211,8 @@ struct Draws {
 pub struct Geometry {
     layout: Option<Layout>,
     draws: Option<Draws>,
-    /// The host buffer each frame's uploads are copied from, grown as needed.
+    /// The host buffer the frame's uploads are copied from, kept while
+    /// frames keep uploading and dropped by the first that does not.
     staging: Option<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
@@ -546,6 +548,10 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
 
 /// Writes `copies` into the staging buffer, grown when they do not fit, and
 /// records them into `cb` with a barrier making them visible to every pass.
+/// A frame with nothing to copy frees the buffer: a scene's first upload is
+/// its whole layout, gigabytes of host memory that playback, which moves a
+/// frame's points at a time, must not keep, while reusing the buffer between
+/// its own frames saves allocating one each.
 fn upload(
     device: &gpu::Device,
     staging: &mut Option<Buffer>,
@@ -554,6 +560,7 @@ fn upload(
 ) -> Result<u64, String> {
     let total: u64 = copies.iter().map(|c| c.bytes.len() as u64).sum();
     if total == 0 {
+        *staging = None;
         return Ok(0);
     }
     let staging = match staging.take() {
@@ -769,7 +776,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
         texcoord_stencils: Stencils::new(device, &tables.texcoord_stencils)?,
         vertices: Buffer::device_local(device, size(&tables.vertices), storage)?,
         vertex_texcoord: Buffer::device_local(device, size(&tables.vertex_texcoord), storage)?,
-        tangents: Buffer::device_local(device, vertices * 16, written)?,
+        tangents: Buffer::device_local(device, vertices * 4, written)?,
         vertex_adjacency: Adjacency {
             offsets: Buffer::device_local(device, size(&tables.vertex_offsets), storage)?,
             corners: Buffer::device_local(device, size(&tables.vertex_corners), storage)?,

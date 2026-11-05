@@ -43,7 +43,7 @@ Vertex pull(uint vertex, uint slot)
     float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
     float3 n = v.y == SMOOTH ? load3(view->smooth, v.x) : load3(view->normals, v.y);
     uint t = view->vertex_texcoord[vertex];
-    float4 tangent = view->tangents[vertex];
+    float4 tangent = unpack_tangent(view->tangents[vertex]);
     float3 bitangent = tangent.w * cross(n, tangent.xyz);
 
     Vertex o;
