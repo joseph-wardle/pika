@@ -17,7 +17,8 @@
 //
 // The file is a header of little-endian u32: "pika", width, height, layers,
 // levels, the VkFormat, the source's width and height before the cap (a
-// set's largest tile's), then the tile table's length and the table: one
+// set's largest tile's), the wrap modes the source states, u then v (black,
+// clamp, periodic, mirror), then the tile table's length and the table: one
 // entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
 // or 0xFFFFFFFF where the set lacks it. Then each level in order, every
 // layer within it. src/texture.rs reads it.
@@ -29,6 +30,7 @@
 #include <OpenImageIO/imageio.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
@@ -118,6 +120,30 @@ void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &he
     }
     width = std::max(width, w);
     height = std::max(height, h);
+}
+
+// The wrap modes the file states in its `wrapmodes` attribute, which
+// maketx writes as "black,clamp" or as one word for both, in the image
+// nodedefs' enumeration; black where it states none or another, as Storm
+// reads a UsdUVTexture's useMetadata (HdWrapNoOpinion falls back to
+// black).
+std::array<uint32_t, 2> wrap(std::string const &path) {
+    std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
+    if (!in)
+        throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
+    std::string modes = in->spec().get_string_attribute("wrapmodes");
+    in->close();
+    size_t comma = modes.find(',');
+    std::string u = modes.substr(0, comma);
+    std::string v = comma == std::string::npos ? u : modes.substr(comma + 1);
+    auto mode = [](std::string const &name) -> uint32_t {
+        char const *const names[] = {"black", "clamp", "periodic", "mirror"};
+        for (uint32_t i = 0; i < 4; ++i)
+            if (name == names[i])
+                return i;
+        return 0;
+    };
+    return {mode(u), mode(v)};
 }
 
 Level read(OIIO::ImageInput &in, std::string const &path) {
@@ -380,6 +406,7 @@ void texture(std::string const &source, std::string const &space, std::string co
     unsigned width = 0, height = 0, source_width = 0, source_height = 0;
     for (Tile const &tile : set)
         extent(tile.path, cap, width, height, source_width, source_height);
+    std::array<uint32_t, 2> modes = wrap(set.front().path);
 
     // One tile at a time, keeping only its encoded bytes: a 4K tile is 256
     // MB of floats, and ALab's sets reach 34 tiles. The first tile's
@@ -426,6 +453,8 @@ void texture(std::string const &source, std::string const &space, std::string co
     put(file, format);
     put(file, source_width);
     put(file, source_height);
+    put(file, modes[0]);
+    put(file, modes[1]);
     put(file, uint32_t(table.size()));
     for (uint32_t entry : table)
         put(file, entry);

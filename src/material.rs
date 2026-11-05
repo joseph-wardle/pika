@@ -104,8 +104,9 @@ const RENAMES: &[Rename] = &[
         inputs: &[],
         outputs: &[],
         // The nodedef's wrap enum is black, clamp, periodic, mirror.
-        // useMetadata asks for the file's wrap mode; Storm, like Pika, reads
-        // none and repeats.
+        // useMetadata asks for the file's own wrap mode, which the bake
+        // reads and the sampler takes (surface::address_modes); the
+        // document needs a value the enum has.
         tokens: &[("repeat", "periodic"), ("useMetadata", "periodic")],
         // The texture's colour space is applied when it is loaded.
         dropped: &["sourceColorSpace"],

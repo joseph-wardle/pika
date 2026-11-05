@@ -2,12 +2,13 @@
 //! set under the cache (`bake/texture.cpp`), as the renderer reads it, the
 //! image it is uploaded to, and the set of them loaded for the materials
 //! drawn, with the samplers they are read through. The file is a header,
-//! `pika` and seven little-endian u32 (width, height, layers, levels, the
+//! `pika` and nine little-endian u32 (width, height, layers, levels, the
 //! VkFormat, the source's width and height before the cap: a set's
-//! largest tile's), the tile table's length and the table (the layer of each
-//! UDIM tile from 1001, or past the layers where the set lacks it; one
-//! entry for a plain image), then every mip level in order, each layer
-//! within it, so an upload is one copy per level.
+//! largest tile's, and the wrap modes the source states, u then v), the
+//! tile table's length and the table (the layer of each UDIM tile from
+//! 1001, or past the layers where the set lacks it; one entry for a plain
+//! image), then every mip level in order, each layer within it, so an
+//! upload is one copy per level.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -24,6 +25,11 @@ pub struct Texture {
     pub format: vk::Format,
     /// The source's width and height before the cap, a set's largest tile's.
     pub source: [u32; 2],
+    /// The wrap modes the source's metadata states, u then v, in the image
+    /// nodedefs' enumeration (black, clamp, periodic, mirror), black where
+    /// it states none: what a UsdUVTexture's useMetadata reads
+    /// (`surface::address_modes`).
+    pub wrap: [u32; 2],
     /// The layer of each tile, which the shader reads (`mx_texture.slang`).
     pub tiles: Vec<u32>,
     /// Each level's bytes within `file`, all its layers, finest first.
@@ -37,20 +43,21 @@ pub fn read(path: &Path) -> Result<Texture, String> {
 }
 
 pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
-    if file.len() < 36 || &file[..4] != b"pika" {
+    if file.len() < 44 || &file[..4] != b"pika" {
         return Err("is not a baked texture".into());
     }
     let word = |i: usize| u32::from_le_bytes(file[4 + 4 * i..8 + 4 * i].try_into().unwrap());
     let (width, height, layers, levels) = (word(0), word(1), word(2), word(3));
     let format = vk::Format::from_raw(word(4) as i32);
     let source = [word(5), word(6)];
-    let entries = word(7) as usize;
-    if entries != 1 && entries != 100 || file.len() < 36 + 4 * entries {
+    let wrap = [word(7), word(8)];
+    let entries = word(9) as usize;
+    if entries != 1 && entries != 100 || file.len() < 44 + 4 * entries {
         return Err(format!(
             "has a tile table of {entries} entries, not 1 or 100"
         ));
     }
-    let tiles: Vec<u32> = (0..entries).map(|i| word(8 + i)).collect();
+    let tiles: Vec<u32> = (0..entries).map(|i| word(10 + i)).collect();
     if tiles
         .iter()
         .any(|&layer| layer != u32::MAX && layer >= layers)
@@ -71,6 +78,11 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
             source[0], source[1]
         ));
     }
+    if let Some(mode) = wrap.iter().find(|&&m| m > 3) {
+        return Err(format!(
+            "states the wrap mode {mode}, not black, clamp, periodic or mirror"
+        ));
+    }
     let chain = 32 - width.max(height).leading_zeros();
     if levels != chain {
         return Err(format!(
@@ -78,7 +90,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         ));
     }
     let mut ranges = Vec::new();
-    let (mut offset, mut w, mut h) = (36 + 4 * entries, width, height);
+    let (mut offset, mut w, mut h) = (44 + 4 * entries, width, height);
     for _ in 0..levels {
         let size = level_size(format, w, h).unwrap() * layers as usize;
         ranges.push(offset..offset + size);
@@ -99,6 +111,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         layers,
         format,
         source,
+        wrap,
         tiles,
         levels: ranges,
         file,
@@ -433,9 +446,10 @@ mod tests {
         assert_eq!((t.width, t.height, t.layers), (8, 8, 1));
         assert_eq!(t.format, vk::Format::R32G32_SFLOAT);
         assert_eq!(t.source, [8, 8]);
+        assert_eq!(t.wrap, [0, 0], "the ramp states no wrap mode: black");
         assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
-        assert_eq!(t.levels[0].start, 40);
+        assert_eq!(t.levels[0].start, 48);
         let texel = |level: usize, x: usize, y: usize| {
             let at = t.levels[level].start + (y * (8 >> level) + x) * 8;
             let f = |i: usize| f32::from_le_bytes(t.file[at + i..at + i + 4].try_into().unwrap());
@@ -459,18 +473,22 @@ mod tests {
         bad[24] = 4;
         assert!(parse(bad).is_err(), "a source smaller than the bake");
         let mut bad = RAMP.to_vec();
-        bad[32] = 2;
+        bad[36] = 4;
+        assert!(parse(bad).is_err(), "a wrap mode past mirror");
+        let mut bad = RAMP.to_vec();
+        bad[40] = 2;
         assert!(parse(bad).is_err(), "a table of two entries");
         let mut bad = RAMP.to_vec();
-        bad[36] = 1;
+        bad[44] = 1;
         assert!(parse(bad).is_err(), "a tile past the layers");
     }
 
     #[test]
     fn reads_a_set_of_tiles() {
-        // Two 1×1 R32_SFLOAT layers, tiles 1001 and 1012.
+        // Two 1×1 R32_SFLOAT layers, periodic in u, clamped in v, tiles
+        // 1001 and 1012.
         let mut file = b"pika".to_vec();
-        for word in [1u32, 1, 2, 1, 100, 1, 1, 100] {
+        for word in [1u32, 1, 2, 1, 100, 1, 1, 2, 1, 100] {
             file.extend_from_slice(&word.to_le_bytes());
         }
         let mut table = [u32::MAX; 100];
@@ -482,8 +500,9 @@ mod tests {
         file.extend_from_slice(&0.75f32.to_le_bytes());
         let t = parse(file.clone()).unwrap();
         assert_eq!((t.layers, t.tiles.len()), (2, 100));
+        assert_eq!(t.wrap, [2, 1]);
         assert_eq!((t.tiles[0], t.tiles[11], t.tiles[1]), (0, 1, u32::MAX));
-        assert_eq!(t.levels, vec![436..444]);
+        assert_eq!(t.levels, vec![444..452]);
         file.truncate(file.len() - 4);
         assert!(parse(file).is_err(), "a layer missing");
     }

@@ -55,7 +55,12 @@ What the reference encodes:
   Surface base × base_color and emission × emission_color, unauthored
   inputs at the defaults the host's libraries give them; their specular
   weight must be 0 and no other input authored or connected, since the
-  rest has no closed form. An OpenPBR surface is checked only within 35°
+  rest has no closed form. A UsdPreviewSurface (hydra/images/wrapped.usda)
+  has albedo diffuseColor and emission emissiveColor, a value or the rgb a
+  UsdUVTexture samples, under the specular workflow with a black
+  specularColor and nothing else authored; MaterialX layers a Schlick lobe
+  with F90 white over its diffuse, so it is checked within 30° of facing.
+  An OpenPBR surface is checked only within 35°
   of facing the eye: at specular weight 0 its dielectric layer has an IOR
   of 1, but MaterialX still attenuates the base by the layer's directional
   albedo, an analytic fit with F90 = 1 whatever the IOR, which takes 0.2 %
@@ -90,7 +95,10 @@ What the reference encodes:
   or st when the image's texcoord is unconnected or a texcoord node of
   index 0: UV0, the texcoord MaterialX's nodes read by default, which
   Storm and Karma read as st (hydra/images/uv0.usda),
-  under the image node's address modes, with st (0, 0) at the image's
+  under the image node's address modes, or a UsdUVTexture's wrapS and
+  wrapT, whose useMetadata, USD's default when none is authored, is what
+  the file's wrapmodes metadata states, black where it states none, as
+  Storm reads it (hydra/images/wrapped.usda); with st (0, 0) at the image's
   bottom-left corner as USD and MaterialX read it, the channels padded
   with 0 to three. The sample is bilinear within a level, at the level the
   hit's footprint picks as a Vulkan sampler with linear mip filtering and
@@ -182,6 +190,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "cage drawn on subdivided meshes", "boundary rules of the interior",
             "purposes ignored", "culled by box centre", "headlight from the eye",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
+            "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
             "faceVarying st corners kept apart",
             "failed materials drawn clay", "base weight ignored", "emission ignored",
@@ -498,28 +507,64 @@ def uv0(image):
 def sampled(image, kind, control=None):
     """The file, address modes (u, v), primvar and declared colour space
     (auto when none for a colour, raw for the rest) of an ND_image_<kind>
-    node sampled at UV0 (st) or a geompropvalue reader, or None for any
-    other node."""
-    if not image or image.GetShaderId() != f"ND_image_{kind}":
+    node sampled at UV0 (st) or a geompropvalue reader, or of a UsdUVTexture
+    (`kind` rgb, its output) sampled at st or a UsdPrimvarReader_float2, or
+    None for any other node."""
+    usd = kind == "rgb"
+    if not image or image.GetShaderId() != ("UsdUVTexture" if usd else f"ND_image_{kind}"):
         return None
-    reader = upstream(image, "texcoord")
-    if uv0(image):
+    if usd:
+        reader = upstream(image, "st")
+        if reader and reader.GetShaderId() != "UsdPrimvarReader_float2":
+            return None
+        primvar = reader.GetInput("varname").Get() if reader else "st"
+    elif uv0(image):
         primvar = "st"
-    elif reader and reader.GetShaderId() == "ND_geompropvalue_vector2":
-        primvar = reader.GetInput("geomprop").Get()
     else:
-        return None
-    modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
-                  for m in ("uaddressmode", "vaddressmode"))
+        reader = upstream(image, "texcoord")
+        if not reader or reader.GetShaderId() != "ND_geompropvalue_vector2":
+            return None
+        primvar = reader.GetInput("geomprop").Get()
     file = image.GetInput("file")
     # USD resolves a path to the file it names, which a <UDIM> pattern is
     # not; the pattern is anchored to its layer, as UsdImaging anchors it.
     path = file.Get().resolvedPath
     if "<UDIM>" in file.Get().path:
         path = file.GetAttr().GetPropertyStack(Usd.TimeCode.Default())[0].layer.ComputeAbsolutePath(file.Get().path)
-    colour = kind == "color3" or control == "8-bit data read as sRGB"
+    if usd:
+        modes = tuple(wrap(image, name, path, control) for name in ("wrapS", "wrapT"))
+    else:
+        modes = tuple(image.GetInput(m).Get() if image.GetInput(m) else "periodic"
+                      for m in ("uaddressmode", "vaddressmode"))
+    colour = usd or kind == "color3" or control == "8-bit data read as sRGB"
     space = file.GetAttr().GetColorSpace() or ("auto" if colour else "raw")
     return (path, modes, primvar, space)
+
+
+def wrap(image, name, path, control=None):
+    """A UsdUVTexture's wrapS or wrapT in the image nodedefs' words: repeat
+    is periodic, and useMetadata, USD's default when none is authored, is
+    what the file's metadata states for that axis."""
+    token = image.GetInput(name).Get() if image.GetInput(name) else "useMetadata"
+    if token != "useMetadata":
+        return "periodic" if token == "repeat" else token
+    if control == "useMetadata read as periodic":
+        return "periodic"
+    return metadata(path, control)[name == "wrapT"]
+
+
+def metadata(path, control=None):
+    """The wrap modes (u, v) the file's wrapmodes attribute states, as
+    maketx writes it ("black,clamp", or one word for both), black for an
+    axis it states none or another for, as Storm reads it; a set's are its
+    first tile's, as the bake tool reads them."""
+    if "<UDIM>" in path:
+        path = next(p for p in (path.replace("<UDIM>", str(n)) for n in range(1001, 1101)) if os.path.isfile(p))
+    file = oiio.ImageInput.open(path)
+    stated = "" if control == "file wrap metadata ignored" else file.spec().getattribute("wrapmodes") or ""
+    file.close()
+    words = stated.split(",")
+    return tuple(w if w in ("black", "clamp", "periodic", "mirror") else "black" for w in (words + words)[:2])
 
 
 def lit(surface, time, control=None):
@@ -559,10 +604,45 @@ def lit(surface, time, control=None):
                 None, normal, facing)
 
 
+def preview(surface, time, control=None):
+    """The Look of a UsdPreviewSurface (hydra/images/wrapped.usda): albedo
+    diffuseColor, emission emissiveColor, a value or the rgb a UsdUVTexture
+    samples, under the specular workflow with a black specularColor, since
+    the rest has no closed form. MaterialX layers a Schlick lobe with F90
+    white over the diffuse, which only grazing angles show, so the form
+    holds within 30° of facing."""
+    path = surface.GetPath()
+    authored = {i.GetBaseName(): i for i in surface.GetInputs()}
+    extra = sorted(set(authored) - {"diffuseColor", "emissiveColor", "useSpecularWorkflow", "specularColor"})
+    connected = [n for n, i in authored.items() if i.HasConnectedSource() and n != "emissiveColor"]
+    if extra or connected:
+        raise ValueError(f"{path}: the reference lights a UsdPreviewSurface's diffuseColor and emissiveColor "
+                         f"as values; it has no closed form for {extra or connected}")
+
+    def value(name):
+        if name in authored:
+            v = authored[name].Get(time)
+        else:
+            v = NODEDEFS.getNodeDef("ND_UsdPreviewSurface_surfaceshader").getActiveInput(name).getValue()
+        return tuple(v) if hasattr(v, "__len__") else v
+
+    if value("useSpecularWorkflow") != 1 or value("specularColor") != (0.0, 0.0, 0.0):
+        raise ValueError(f"{path}: the reference has no closed form for a UsdPreviewSurface's specular lobe; "
+                         "set useSpecularWorkflow to 1 and specularColor to black")
+    image, emission = None, value("emissiveColor")
+    if "emissiveColor" in authored and authored["emissiveColor"].HasConnectedSource():
+        image = sampled(upstream(surface, "emissiveColor"), "rgb", control)
+        if not image:
+            raise ValueError(f"{path}: the reference emits a UsdUVTexture's rgb sampled at a primvar, "
+                             "nothing else connected")
+        emission = (0.0,) * 3
+    return Look(value("diffuseColor"), emission, image, None, 30)
+
+
 def look(prim, host, time, control=None):
     """The closed form of the mesh's material: CLAY with none bound; PINK
     for a surface shader naming a nodedef the libraries do not define, when
-    `host` delivers it; a lit surface's; or the image file, its address
+    `host` delivers it; a UsdPreviewSurface's; a lit surface's; or the image file, its address
     modes (u, v), the primvar it is sampled at and its colour space, for a
     MaterialX surface whose emission is a uniform EDF of an image node's
     vector2 or vector3 sample through converts (hydra/images/textured.usda,
@@ -577,6 +657,8 @@ def look(prim, host, time, control=None):
     if surface and unknown(surface):
         clay = control == "failed materials drawn clay" or not host.delivers_unknown
         return CLAY if clay else PINK
+    if surface and surface.GetShaderId() == "UsdPreviewSurface":
+        return preview(surface, time, control)
     if surface and surface.GetShaderId() in LIT:
         return lit(surface, time, control)
     if not surface or surface.GetShaderId() != "ND_surface":
@@ -634,16 +716,21 @@ def bilinear(texels, st, modes, control=None):
     fx, fy = (f - i0)[:, :1], (f - i0)[:, 1:]
 
     def address(i, n, mode):
+        """The texel column or row `i` reads, in `padded`, whose border of
+        0 is what black addresses past the edge."""
+        if mode == "black":
+            return np.clip(i, -1, n) + 1
         if mode == "clamp":
-            return np.clip(i, 0, n - 1)
+            return np.clip(i, 0, n - 1) + 1
         if mode == "periodic":
-            return i % n
-        raise ValueError(f"the reference samples clamp and periodic, not {mode}")
+            return i % n + 1
+        raise ValueError(f"the reference samples black, clamp and periodic, not {mode}")
 
+    padded = np.pad(texels, ((1, 1), (1, 1), (0, 0)))
     x0, x1 = address(i0[:, 0], w, modes[0]), address(i0[:, 0] + 1, w, modes[0])
     y0, y1 = address(i0[:, 1], h, modes[1]), address(i0[:, 1] + 1, h, modes[1])
-    return ((texels[y0, x0] * (1 - fx) + texels[y0, x1] * fx) * (1 - fy) +
-            (texels[y1, x0] * (1 - fx) + texels[y1, x1] * fx) * fy)
+    return ((padded[y0, x0] * (1 - fx) + padded[y0, x1] * fx) * (1 - fy) +
+            (padded[y1, x0] * (1 - fx) + padded[y1, x1] * fx) * fy)
 
 
 def sample(path, st, step, modes, space, cap, control=None):

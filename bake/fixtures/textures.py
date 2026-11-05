@@ -35,6 +35,11 @@ udim.<UDIM>.exr
             ((x + 0.5) / 16, (y + 0.5) / 16), so a sample tells the tiles
             apart and the tiles between and around them are missing
             (hydra/images/udim.usda).
+wrapped.exr 8×8, three float channels, four flat 4×4 blocks of the greys
+            WRAPPED, multiples of 1/255 so that a linear 8-bit bake is exact,
+            stating the wrap modes "periodic,clamp" in its wrapmodes
+            attribute, as maketx writes them, which a UsdUVTexture's
+            useMetadata reads (hydra/images/wrapped.usda).
 mixed.<UDIM>.exr
             A set whose tiles differ in size, as ALab's stoat has: tile 1001
             is the ramp, tile 1002 a 4×4 ramp, texel (x, y) holding
@@ -54,6 +59,7 @@ SWATCH = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)]
 # GPU blends texels with 8-bit weights, so a larger step misses
 # hydra/image.py's tolerance where two blocks blend.
 GREYS = [17 * i for i in range(16)]
+WRAPPED = [51, 102, 153, 204]
 COLORS = [(240, 60, 60), (220, 100, 60), (200, 140, 60), (180, 180, 60),
           (140, 200, 80), (100, 200, 120), (60, 200, 160), (60, 180, 200)]
 # Linear Rec.709 to ACEScg: the inverse of hydra/image.py's ACESCG_TO_REC709.
@@ -158,6 +164,19 @@ def mips():
     out.close()
 
 
+def wrapped():
+    pixels = blocks(4, [(g, g, g) for g in WRAPPED], 2, np.float32) / 255
+    path = os.path.join(HERE, "wrapped.exr")
+    spec = oiio.ImageSpec(8, 8, 3, oiio.FLOAT)
+    spec.attribute("wrapmodes", "periodic,clamp")
+    out = oiio.ImageOutput.create(path)
+    out.open(path, spec)
+    out.write_image(np.ascontiguousarray(pixels))
+    out.close()
+    if oiio.ImageInput.open(path).spec().getattribute("wrapmodes") != "periodic,clamp":
+        raise SystemExit("wrapped.exr does not keep its wrapmodes")
+
+
 def normal():
     codes = np.broadcast_to(np.array([153, 204, 242], np.uint8), (4, 4, 3))
     out = oiio.ImageOutput.create("normal.exr")
@@ -174,6 +193,7 @@ if __name__ == "__main__":
     ramp()
     swatch()
     mips()
+    wrapped()
     normal()
     greys()
     acescg()

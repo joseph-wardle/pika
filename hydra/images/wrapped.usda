@@ -1,0 +1,111 @@
+#usda 1.0
+(
+    doc = "Two quads facing the camera, each bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb sampled at its st, which runs half an image past the image on every side and shifts at frame 2. The left quad's texture, bake/fixtures/acescg.exr, states no wrap mode and its wrapS and wrapT are unauthored, so they are useMetadata, USD's default, and the sample is black past the image, as Storm draws it. The right quad's, bake/fixtures/wrapped.exr, states periodic in u and clamp in v, and its wrapS and wrapT say useMetadata: its greys repeat across and stretch up and down. Both textures are magnified, as the reference reads only the levels a file stores."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "unstated" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, -0.7, -5), (-0.1, -0.7, -5), (-0.1, 0.7, -5), (-1.7, 0.7, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)],
+        2: [(-0.4, -0.5), (1.6, -0.5), (1.6, 1.5), (-0.4, 1.5)],
+    }
+    rel material:binding = </black>
+}
+
+def Mesh "stated" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0.1, -0.7, -5), (1.7, -0.7, -5), (1.7, 0.7, -5), (0.1, 0.7, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)],
+        2: [(-0.4, -0.5), (1.6, -0.5), (1.6, 1.5), (-0.4, 1.5)],
+    }
+    rel material:binding = </metadata>
+}
+
+def Material "black"
+{
+    token outputs:surface.connect = </black/surface.outputs:surface>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor = (0, 0, 0)
+        color3f inputs:emissiveColor.connect = </black/image.outputs:rgb>
+        int inputs:useSpecularWorkflow = 1
+        color3f inputs:specularColor = (0, 0, 0)
+        token outputs:surface
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @../../bake/fixtures/acescg.exr@ (colorSpace = "acescg")
+        float2 inputs:st.connect = </black/st.outputs:result>
+        float3 outputs:rgb
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "UsdPrimvarReader_float2"
+        string inputs:varname = "st"
+        float2 outputs:result
+    }
+}
+
+def Material "metadata"
+{
+    token outputs:surface.connect = </metadata/surface.outputs:surface>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor = (0, 0, 0)
+        color3f inputs:emissiveColor.connect = </metadata/image.outputs:rgb>
+        int inputs:useSpecularWorkflow = 1
+        color3f inputs:specularColor = (0, 0, 0)
+        token outputs:surface
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @../../bake/fixtures/wrapped.exr@ (colorSpace = "raw")
+        token inputs:wrapS = "useMetadata"
+        token inputs:wrapT = "useMetadata"
+        float2 inputs:st.connect = </metadata/st.outputs:result>
+        float3 outputs:rgb
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "UsdPrimvarReader_float2"
+        string inputs:varname = "st"
+        float2 outputs:result
+    }
+}

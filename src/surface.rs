@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use crate::bake::Manifest;
 use crate::json::{self, Json};
 use crate::material::{self, Document};
-use crate::store::{Network, Value};
+use crate::store::{Network, Node, Value};
 
 /// The uniform block's byte layout and its textures' bindings, in
 /// descriptor set 0, as slangc laid them out.
@@ -185,12 +185,20 @@ pub fn node_input(name: &str) -> Result<(usize, &str), String> {
         .ok_or_else(|| format!("uniform {name} is not a node's input"))
 }
 
-/// The address modes of node `index`'s texture, u then v, as packed in
-/// `bytes`: the UsdUVTexture `wrapS`/`wrapT` or the image
+/// The address modes of `node`, the document's node `index`, u then v,
+/// as packed in `bytes`: the UsdUVTexture `wrapS`/`wrapT` or the image
 /// `uaddressmode`/`vaddressmode` integers, whose nodedefs share one
 /// enumeration (black or constant, clamp, periodic, mirror); periodic
-/// when the node has neither.
-pub fn address_modes(layout: &Layout, bytes: &[u8], index: usize) -> [u32; 2] {
+/// when the node has neither. A UsdUVTexture's `useMetadata`, USD's
+/// default when none is authored, asks for the `file`'s own, as the bake
+/// read them (`texture::Texture::wrap`).
+pub fn address_modes(
+    layout: &Layout,
+    bytes: &[u8],
+    node: &Node,
+    index: usize,
+    file: [u32; 2],
+) -> [u32; 2] {
     let read = |names: [&str; 2]| {
         names.iter().find_map(|name| {
             let offset = *layout.offsets.get(&format!("n{index}_{name}"))?;
@@ -199,9 +207,25 @@ pub fn address_modes(layout: &Layout, bytes: &[u8], index: usize) -> [u32; 2] {
             ))
         })
     };
+    let metadata = |name: &str| {
+        node.node_type == "UsdUVTexture"
+            && match node.params.get(name) {
+                None => true,
+                Some(Value::Text(token)) => token == "useMetadata",
+                Some(_) => false,
+            }
+    };
     [
-        read(["wrapS", "uaddressmode"]).unwrap_or(2),
-        read(["wrapT", "vaddressmode"]).unwrap_or(2),
+        if metadata("wrapS") {
+            file[0]
+        } else {
+            read(["wrapS", "uaddressmode"]).unwrap_or(2)
+        },
+        if metadata("wrapT") {
+            file[1]
+        } else {
+            read(["wrapT", "vaddressmode"]).unwrap_or(2)
+        },
     ]
 }
 
@@ -346,10 +370,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // The wrap token was compiled in as the nodedef's integer.
+        // The wrap token was compiled in as the nodedef's integer; wrapT,
+        // unauthored, is useMetadata: the file's, as is a wrapS saying so.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 1);
-        assert_eq!(address_modes(&l, &bytes, 1), [1, 2]);
-        assert_eq!(address_modes(&l, &bytes, 0), [2, 2], "no texture: periodic");
+        let tex = &network.nodes["tex"];
+        assert_eq!(address_modes(&l, &bytes, tex, 1, [3, 0]), [1, 0]);
+        let mut metadata = tex.clone();
+        (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
+        assert_eq!(address_modes(&l, &bytes, &metadata, 1, [3, 0]), [3, 0]);
+        let surface = &network.nodes["surface"];
+        assert_eq!(
+            address_modes(&l, &bytes, surface, 0, [3, 0]),
+            [2, 2],
+            "no texture: periodic"
+        );
         assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
         assert!(node_input("u_viewPosition").is_err());
 

@@ -31,21 +31,22 @@ def fail(what):
 
 
 def header(path):
-    """The header's five numbers, the source's size, the tile table and the
-    levels' bytes."""
+    """The header's five numbers, the source's size, the wrap modes (u, v),
+    the tile table and the levels' bytes."""
     with open(path, "rb") as f:
         bytes = f.read()
-    magic, width, height, layers, levels, fmt, *source, entries = struct.unpack("<4s8I", bytes[:36])
+    magic, width, height, layers, levels, fmt, *rest = struct.unpack("<4s10I", bytes[:44])
     if magic != b"pika":
         raise ValueError(f"{path} is not a texture file")
-    table = struct.unpack(f"<{entries}I", bytes[36:36 + 4 * entries])
-    return width, height, layers, levels, fmt, tuple(source), table, bytes[36 + 4 * entries:]
+    source, wrap, entries = tuple(rest[:2]), tuple(rest[2:4]), rest[4]
+    table = struct.unpack(f"<{entries}I", bytes[44:44 + 4 * entries])
+    return width, height, layers, levels, fmt, source, wrap, table, bytes[44 + 4 * entries:]
 
 
 def decode(path):
     """Each level as an array of shape (height, width, channels), or for a
     float texture of several layers (layers, height, width, channels)."""
-    width, height, layers, levels, fmt, _, _, data = header(path)
+    width, height, layers, levels, fmt, _, _, _, data = header(path)
     if fmt in FLOAT:
         out, offset, w, h = [], 0, width, height
         for _ in range(levels):
@@ -98,10 +99,10 @@ def check(out):
     fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
     swatch = np.asarray(oiio.ImageBuf(os.path.join(fixtures, "swatch.png")).get_pixels(oiio.UINT8))
 
-    def baked(name, want, source=None, table=(0,)):
+    def baked(name, want, source=None, wrap=(0, 0), table=(0,)):
         path = os.path.join(out, name + ".texture")
-        got = header(path)[:7]
-        want = want + (source or want[:2], table)
+        got = header(path)[:8]
+        want = want + (source or want[:2], wrap, table)
         if got != want:
             fail(f"{name}: the header says {got}, not {want}")
         return decode(path)
@@ -152,6 +153,11 @@ def check(out):
     centre = (np.clip((np.arange(8) + 0.5) / 2 - 0.5, 0, 3) + 0.5) / 4
     want = np.stack(np.meshgrid(centre, centre), -1)
     expect("mixed level 0 tile 1002", levels[0][1], want, 1e-6)
+
+    # The wrap modes a file states are kept, u then v; one stating none
+    # (the ramp, the swatch) bakes black.
+    levels = baked("wrapped", (8, 8, 1, 4, 145), wrap=(2, 1))
+    expect("wrapped level 0", levels[0][..., :3], textures.blocks(4, [(g, g, g) for g in textures.WRAPPED], 2, np.uint8), 0)
 
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)

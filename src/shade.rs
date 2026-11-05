@@ -301,7 +301,14 @@ impl Shade {
             update.baked += usize::from(baked.fresh);
             let binding =
                 (self.textures).load(device, cb, &baked.path, &baked.texture, &baked.source)?;
-            let modes = surface::address_modes(layout, uniforms.buffer.bytes(), index);
+            let node = &built.network.nodes[&built.document.nodes[index]];
+            let modes = surface::address_modes(
+                layout,
+                uniforms.buffer.bytes(),
+                node,
+                index,
+                baked.texture.wrap,
+            );
             let sampler = self.textures.sampler(modes)?;
             bindings.push((binding, sampler));
             uniforms.textures.push(baked.path.clone());

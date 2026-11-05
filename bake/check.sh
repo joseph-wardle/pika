@@ -89,6 +89,7 @@ texture swatch.png srgb_texture color 4096 swatch
 texture swatch.png raw color 4096 swatch_raw
 texture swatch.png raw single 4096 single
 texture mips.exr raw data 4 mips
+texture wrapped.exr raw data 4096 wrapped
 texture mips.exr raw data 8 mips8
 # "auto" is sRGB for an 8-bit image and raw for a float one.
 texture swatch.png auto color 4096 swatch_auto
