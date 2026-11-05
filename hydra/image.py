@@ -108,7 +108,7 @@ What the reference encodes:
   hit's plane; the longer step, in texels of level 0, is 2^λ, and levels
   ⌊λ⌋ and ⌈λ⌉ are blended by λ's fraction, level 0 alone where the image is
   magnified. The levels are the file's stored ones from the first within
-  the texture cap, the render setting pika:textureCap, 1024 unless the
+  the texture cap, the render setting pika:textureCap, none unless the
   render settings prim authors it (hydra/images/capped.usda); the
   reference refuses a level the file lacks and a cap no stored level fits.
   Pika warns of the textures the cap shrank in one line, with their count,
@@ -176,8 +176,8 @@ from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdRender, UsdSh
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
-# The delegate's default texture cap (hydra/plugin.cpp).
-CAP = 1024
+# The delegate's default texture cap (hydra/plugin.cpp): none.
+CAP = float("inf")
 # The scenes whose texture the cap shrinks, which husk must warn of in one
 # line.
 CAPPED = {"capped": 1}
@@ -967,7 +967,8 @@ def reference(stage, time, width, height, host, control=None):
     f = frustum(stage, time, width, height, focal, policy)
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
-    cap = authored.Get() if host.settings and authored else CAP
+    # 0 is none, as it is to Pika.
+    cap = (authored.Get() if host.settings and authored else 0) or CAP
     eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)

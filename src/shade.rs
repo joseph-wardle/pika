@@ -17,6 +17,7 @@ use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Source};
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
+use crate::stats;
 use crate::store::{Moved, Network, Store};
 use crate::target;
 use crate::texture::{Binding, Textures};
@@ -41,8 +42,8 @@ pub struct Shade {
     /// Whether a material came or went since the textures no material
     /// uses were last dropped.
     stale: bool,
-    /// The texture cap of the frame; 0 before the first.
-    cap: u32,
+    /// The last frame's texture cap, 0 for none; None before the first.
+    cap: Option<u32>,
     /// The textures loaded since the last build landed whose source the
     /// cap shrank, warned of in one line when every build has: a scene's
     /// worth at once, rather than a line per texture, thousands on a
@@ -128,7 +129,7 @@ impl Shade {
             materials: BTreeMap::new(),
             failed: BTreeSet::new(),
             stale: false,
-            cap: 0,
+            cap: None,
             capped: 0,
             clay,
             pink,
@@ -137,11 +138,12 @@ impl Shade {
 
     /// Rewrites the block of each material whose network changed its
     /// values alone, and submits a build of each whose structure, textures
-    /// or, when the texture cap `cap` changed, cap did, drawn as it was
-    /// until it lands; installs the builds that landed, `INSTALL` bytes of
-    /// textures a frame. A material that cannot be built is warned of and
-    /// drawn pink; the frame goes on. Records into `cb`, outside rendering,
-    /// the uploads. No GPU work may be pending.
+    /// or, when the texture cap `cap` (0 for none) changed, cap did, drawn
+    /// as it was until it lands; installs the builds that landed, `INSTALL`
+    /// bytes of textures a frame, within the device's memory budget. A
+    /// material that cannot be built or installed is warned of and drawn
+    /// pink; the frame goes on. Records into `cb`, outside rendering, the
+    /// uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -150,13 +152,6 @@ impl Shade {
         cap: u32,
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
-        if cap == 0 {
-            return Err(
-                "the texture cap is 0: set pika:textureCap to the texels a texture's \
-                        longest side is capped at"
-                    .into(),
-            );
-        }
         self.textures.begin();
         let before = self.materials.len();
         self.materials
@@ -177,7 +172,7 @@ impl Shade {
             self.stale = false;
         }
         let mut update = Update::default();
-        let ids: Vec<u64> = if cap == self.cap {
+        let ids: Vec<u64> = if self.cap == Some(cap) {
             moved.materials.iter().copied().collect()
         } else {
             // Every material is built again under the new cap, so the
@@ -185,7 +180,7 @@ impl Shade {
             self.capped = 0;
             store.materials().keys().copied().collect()
         };
-        self.cap = cap;
+        self.cap = Some(cap);
         for id in ids {
             let Some(material) = store.materials().get(&id) else {
                 continue;
@@ -195,7 +190,7 @@ impl Shade {
             };
             self.failed.remove(&id);
             self.stale = true;
-            if let Err(e) = self.material(id, network) {
+            if let Err(e) = self.material(id, network, cap) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.materials.remove(&id);
                 self.failed.insert(id);
@@ -227,8 +222,8 @@ impl Shade {
                 _ => ("textures", "were"),
             };
             eprintln!(
-                "pika: warning: {} {textures} {were} capped to {} texels a side by pika:textureCap",
-                self.capped, self.cap
+                "pika: warning: {} {textures} {were} capped to {cap} texels a side by pika:textureCap",
+                self.capped
             );
             self.capped = 0;
         }
@@ -236,10 +231,10 @@ impl Shade {
     }
 
     /// Rewrites material `id`'s block from `network` when it keeps its
-    /// document, textures and cap, else submits its build, leaving the
-    /// material as it was, clay before its first, until the build lands.
-    /// A network with no surface leaves the material drawn clay.
-    fn material(&mut self, id: u64, network: &Network) -> Result<(), String> {
+    /// document, textures and cap, else submits its build under `cap`,
+    /// leaving the material as it was, clay before its first, until the
+    /// build lands. A network with no surface leaves the material drawn clay.
+    fn material(&mut self, id: u64, network: &Network, cap: u32) -> Result<(), String> {
         let Some(document) = material::document(network)? else {
             self.builder.forget(id);
             self.materials.remove(&id);
@@ -247,7 +242,7 @@ impl Shade {
         };
         if let Some(uniforms) = self.materials.get_mut(&id)
             && uniforms.hash == document.hash
-            && uniforms.cap == self.cap
+            && uniforms.cap == cap
         {
             let surface = &self.surfaces[&document.hash];
             if bake::sources(&surface.manifest, &document, network)? == uniforms.sources {
@@ -264,13 +259,14 @@ impl Shade {
             }
         }
         let held = self.surfaces.contains_key(&document.hash);
-        (self.builder).submit(id, document, network.clone(), self.cap, held)
+        (self.builder).submit(id, document, network.clone(), cap, held)
     }
 
     /// Installs a build that landed: its surface into `surfaces` unless
     /// held, its uniforms, and its textures, loaded now into `textures`
-    /// with their uploads recorded into `cb`; counts into `update` what the
-    /// build did.
+    /// with their uploads recorded into `cb`, unless the ones not loaded
+    /// yet would take the process past the device's memory budget; counts
+    /// into `update` what the build did.
     fn install(
         device: &gpu::Device,
         surfaces: &mut BTreeMap<u64, Surface>,
@@ -290,6 +286,23 @@ impl Shade {
             surfaces.insert(hash, surface);
         }
         let surface = &surfaces[&hash];
+        update.baked += output.textures.iter().filter(|b| b.fresh).count();
+        // An allocation the driver refuses returns an error and leaves the
+        // device usable (measured on the 580 driver: allocations fail at
+        // the budget, and submits after one succeed), but ALab filling the
+        // device at the 1024 cap lost it, so the budget is never crossed.
+        let fresh: u64 = (output.textures.iter())
+            .filter(|b| !textures.holds(&b.path))
+            .map(|b| b.texture.bytes())
+            .sum();
+        let (used, allowed) = device.budget();
+        if fresh > 0 && allowed > 0 && used + fresh > allowed {
+            return Err(format!(
+                "its textures, {} baked, do not fit the device's memory budget: set or lower \
+                 pika:textureCap",
+                stats::size(fresh)
+            ));
+        }
         let (manifest, layout) = (&surface.manifest, &surface.layout);
         let mut uniforms = Uniforms::new(device, surface, hash)?;
         uniforms::pack(
@@ -300,7 +313,6 @@ impl Shade {
             uniforms.buffer.bytes(),
         )?;
         for baked in &output.textures {
-            update.baked += usize::from(baked.fresh);
             let loaded = textures.load(device, cb, &baked.path, &baked.texture)?;
             update.loaded += loaded;
             update.capped += usize::from(loaded > 0 && baked.texture.capped());

@@ -19,6 +19,9 @@ PATIENCE = 600
 def testUsdviewInputFunction(appController):
     app = QtWidgets.QApplication.instance()
     view = appController._stageView
+    # ALab's textures are 145 GB at their own size (design.md), so the gate
+    # caps them at 512 until they stream; the delegate's default is no cap.
+    view.SetRendererSetting("pika:textureCap", 512)
     view.SetPhysicalWindowSize(WIDTH, HEIGHT)
     settings = appController._dataModel.viewSettings
     settings.displayRender = True

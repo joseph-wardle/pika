@@ -69,7 +69,10 @@ struct Level {
 
 unsigned half(unsigned n) { return std::max(1u, n / 2); }
 
-bool fits(Level const &level, unsigned cap) { return level.width <= cap && level.height <= cap; }
+// Whether a level of `width` by `height` is within the cap, 0 being none.
+bool fits(unsigned width, unsigned height, unsigned cap) {
+    return cap == 0 || (width <= cap && height <= cap);
+}
 
 // The size the source's first stored level at or below the cap (or its
 // smallest) takes once halved to fit the cap: the size it bakes at. And
@@ -87,11 +90,11 @@ void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &he
             source_width = std::max(source_width, w);
             source_height = std::max(source_height, h);
         }
-        if (w <= cap && h <= cap)
+        if (fits(w, h, cap))
             break;
     }
     in->close();
-    while (w > cap || h > cap) {
+    while (!fits(w, h, cap)) {
         w = half(w);
         h = half(h);
     }
@@ -155,7 +158,7 @@ std::vector<Level> stored(std::string const &path, unsigned cap, int &channels,
         throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
     int first = -1, count = 0;
     for (; in->seek_subimage(0, count); ++count) {
-        if (first < 0 && in->spec().width <= int(cap) && in->spec().height <= int(cap))
+        if (first < 0 && fits(in->spec().width, in->spec().height, cap))
             first = count;
     }
     if (first < 0)
@@ -413,7 +416,7 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
             conversion = std::make_unique<Conversion>(resolved, config);
         }
         conversion->apply(levels);
-        while (!fits(levels.front(), cap))
+        while (!fits(levels.front().width, levels.front().height, cap))
             levels.front() = halve(levels.front());
         if (levels.front().width != width || levels.front().height != height)
             levels = {enlarge(levels.front(), width, height)};

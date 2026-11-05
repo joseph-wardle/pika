@@ -81,7 +81,8 @@ pub struct Frame<'a> {
     pub normal: Option<Aov<'a>>,
     /// The render tags the pass draws; none means every tag.
     pub render_tags: Vec<String>,
-    /// The texels a texture's longest side is capped at (`pika:textureCap`).
+    /// The texels a texture's longest side is capped at (`pika:textureCap`),
+    /// 0 for none.
     pub texture_cap: u32,
 }
 

@@ -104,6 +104,10 @@ texture swatch.png raw single 4096 single
 texture mips.exr raw data 4 mips
 texture wrapped.exr raw data 4096 wrapped
 texture mips.exr raw data 8 mips8
+# A cap of 0 is none: the whole chain, as under a cap the source fits.
+texture mips.exr raw data 4096 mips4096
+texture mips.exr raw data 0 mips0
+cmp "$OUT/textures/mips4096.texture" "$OUT/textures/mips0.texture" || fail "mips0: a cap of 0 is not none"
 # "auto" is sRGB for an 8-bit image and raw for a float one.
 texture swatch.png auto color 4096 swatch_auto
 cmp "$OUT/textures/swatch.texture" "$OUT/textures/swatch_auto.texture" || fail "swatch_auto: auto is not sRGB for a PNG"

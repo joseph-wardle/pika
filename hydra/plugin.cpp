@@ -58,8 +58,8 @@ protected:
         }
         pika_frame frame = {};
         std::copy_n(state->GetWorldToViewMatrix().data(), 16, frame.world_to_view);
-        // A host may author the cap as any number; one that is none is
-        // passed as 0, which Pika refuses.
+        // A host may author the cap as any number; 0, and so one that is
+        // none, is no cap.
         HdRenderDelegate const *delegate = GetRenderIndex()->GetRenderDelegate();
         int cap = delegate->GetRenderSetting<int>(_tokens->textureCap, 0);
         frame.texture_cap = uint32_t(std::max(cap, 0));
@@ -274,10 +274,11 @@ private:
     Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
-    // The texels a texture's longest side is capped at, so a show's textures
-    // fit beside its geometry; design.md weighs the default.
+    // The texels a texture's longest side is capped at, for a show whose
+    // textures do not fit beside its geometry; none by default, as textures
+    // are expected at their own size (design.md).
     HdRenderSettingDescriptorList _settings = {
-        {"Texture cap (texels a side)", _tokens->textureCap, VtValue(1024)}};
+        {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)}};
 };
 
 } // namespace

@@ -162,7 +162,7 @@ typedef struct pika_frame {
     const char *const *render_tags;
     size_t render_tag_count;
     // The texels a texture's longest side is capped at, the host's
-    // pika:textureCap; Pika refuses 0.
+    // pika:textureCap; 0 is no cap.
     uint32_t texture_cap;
 } pika_frame;
 

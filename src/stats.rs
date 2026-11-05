@@ -342,7 +342,7 @@ fn misses(periods: impl Iterator<Item = f64>) -> (usize, usize) {
 }
 
 /// Bytes in the unit that reads best.
-fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1e9 {
         format!("{:.2} GB", b / 1e9)

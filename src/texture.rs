@@ -370,6 +370,11 @@ impl Textures {
     }
 
     /// Drops the textures not in `used`. No GPU work may be pending.
+    /// Whether the texture baked at `path` is loaded.
+    pub fn holds(&self, path: &Path) -> bool {
+        self.images.contains_key(path)
+    }
+
     pub fn retain(&mut self, used: &BTreeSet<PathBuf>) {
         self.images.retain(|path, _| used.contains(path));
     }

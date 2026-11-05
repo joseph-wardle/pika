@@ -17,7 +17,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::abi;
@@ -192,8 +192,8 @@ impl Bake {
 
     /// Bakes the image `source`, or the UDIM set its `<UDIM>` pattern
     /// names, declared in the colour space `space`, with the levels above
-    /// `cap` texels dropped, in one of the tool's encodings, unless the
-    /// cache holds it, and reads it.
+    /// `cap` texels dropped (none for 0), in one of the tool's encodings,
+    /// unless the cache holds it, and reads it.
     pub fn texture(
         &self,
         source: &Path,
@@ -411,7 +411,7 @@ impl Built {
     /// `network`'s build, run now on this thread: Pika's own networks are
     /// built before the first frame, with no textures and so no cap.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
-        let result = build(bake, &document, &network, 0, false);
+        let result = build(bake, &document, &network, 0, false, &|| true);
         Self {
             id: 0,
             generation: 0,
@@ -441,10 +441,11 @@ pub struct Builder {
     arrived: Vec<Built>,
 }
 
-/// The generation of each material's latest job while it is out.
+/// The generation of each material's latest job while it is out, shared
+/// with the workers, which skip a job the material has resubmitted since.
 #[derive(Default)]
 struct Latest {
-    jobs: BTreeMap<u64, u64>,
+    jobs: Arc<Mutex<BTreeMap<u64, u64>>>,
     generation: u64,
 }
 
@@ -456,14 +457,16 @@ impl Builder {
         // it, and a frame installs so many: the workers wait with their
         // results rather than run ahead to a scene's every texture.
         let (finished, done) = mpsc::sync_channel(WORKERS);
+        let latest = Latest::default();
         for _ in 0..WORKERS {
             let (bake, queue, finished) = (bake.clone(), queue.clone(), finished.clone());
-            std::thread::spawn(move || work(&bake, &queue, &finished));
+            let jobs = latest.jobs.clone();
+            std::thread::spawn(move || work(&bake, &queue, &finished, &jobs));
         }
         Self {
             jobs,
             done,
-            latest: Latest::default(),
+            latest,
             arrived: Vec::new(),
         }
     }
@@ -497,7 +500,7 @@ impl Builder {
         if !self.arrived.is_empty() {
             return Ok(true);
         }
-        if self.latest.jobs.is_empty() {
+        if self.latest.jobs().is_empty() {
             return Ok(false);
         }
         match self.done.recv_timeout(timeout) {
@@ -534,54 +537,85 @@ impl Builder {
 
     /// Drops material `id`'s job, if one is out: its result will be stale.
     pub fn forget(&mut self, id: u64) {
-        self.latest.jobs.remove(&id);
+        self.latest.jobs().remove(&id);
     }
 
     pub fn retain(&mut self, keep: impl Fn(&u64) -> bool) {
-        self.latest.jobs.retain(|id, _| keep(id));
+        self.latest.jobs().retain(|id, _| keep(id));
     }
 
     /// The materials whose build is out.
     pub fn len(&self) -> usize {
-        self.latest.jobs.len()
+        self.latest.jobs().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.latest.jobs.is_empty()
+        self.latest.jobs().is_empty()
     }
 }
 
 impl Latest {
+    fn jobs(&self) -> MutexGuard<'_, BTreeMap<u64, u64>> {
+        self.jobs.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn submit(&mut self, id: u64) -> u64 {
         self.generation += 1;
-        self.jobs.insert(id, self.generation);
+        self.jobs().insert(id, self.generation);
         self.generation
     }
 
     /// Whether the job of `generation` is material `id`'s latest, which
     /// then lands; an older one, or one forgotten, does not.
     fn landed(&mut self, id: u64, generation: u64) -> bool {
-        if self.jobs.get(&id) != Some(&generation) {
+        let mut jobs = self.jobs();
+        if jobs.get(&id) != Some(&generation) {
             return false;
         }
-        self.jobs.remove(&id);
+        jobs.remove(&id);
         true
     }
 }
 
+/// Whether the job of `generation` is still material `id`'s latest in
+/// `jobs`.
+fn current(jobs: &Mutex<BTreeMap<u64, u64>>, id: u64, generation: u64) -> bool {
+    (jobs.lock().unwrap_or_else(PoisonError::into_inner)).get(&id) == Some(&generation)
+}
+
 /// A worker: builds each job from the queue until the builder is dropped.
+/// A job the material has resubmitted since, under another cap or
+/// network, is skipped, or dropped between its textures: a scene's every
+/// material is queued at the cap usdview opens with before the artist sets
+/// another, and ALab's at no cap would be built through for hours first.
 /// One dropped mid-build finishes it; the cache's temporary names keep a
 /// build cut short by the process exiting from leaving a partial entry.
-fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &SyncSender<Built>) {
+fn work(
+    bake: &Bake,
+    queue: &Mutex<Receiver<Job>>,
+    finished: &SyncSender<Built>,
+    jobs: &Mutex<BTreeMap<u64, u64>>,
+) {
     loop {
         let job = queue.lock().unwrap_or_else(PoisonError::into_inner).recv();
         let Ok(job) = job else {
             return;
         };
+        let wanted = || current(jobs, job.id, job.generation);
+        if !wanted() {
+            continue;
+        }
         // A panic here would leave the material pending for good, with no
         // frame to report it: it is the build's failure, warned of like one.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            build(bake, &job.document, &job.network, job.cap, job.held)
+            build(
+                bake,
+                &job.document,
+                &job.network,
+                job.cap,
+                job.held,
+                &wanted,
+            )
         }))
         .unwrap_or_else(|payload| {
             Err(format!(
@@ -604,20 +638,24 @@ fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &SyncSender<Built>)
 }
 
 /// Generates `document`'s stages, bakes and reads each texture `network`
-/// gives it, under the cap `cap`, and then, unless `held`, compiles its
-/// surface: a texture that cannot be read fails the build before the
-/// compile is paid for.
+/// gives it, under the cap `cap`, while `wanted` says the build still is,
+/// and then, unless `held`, compiles its surface: a texture that cannot
+/// be read fails the build before the compile is paid for.
 fn build(
     bake: &Bake,
     document: &Document,
     network: &Network,
     cap: u32,
     held: bool,
+    wanted: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
     let generated = bake.generate(document)?;
     let sources = sources(&generated.manifest, document, network)?;
     let mut textures = Vec::new();
     for (name, source) in generated.manifest.textures.iter().zip(&sources) {
+        if !wanted() {
+            return Err("its build was superseded".into());
+        }
         let (path, _, input) = reader(name, document, network)?;
         let file = Path::new(&source.file);
         let baked = bake
@@ -828,17 +866,26 @@ pub mod tests {
         let first = latest.submit(7);
         let second = latest.submit(7);
         assert!(!latest.landed(7, first), "the older edit's build is stale");
-        assert_eq!(latest.jobs.len(), 1);
+        assert_eq!(latest.jobs().len(), 1);
         assert!(latest.landed(7, second));
-        assert!(latest.jobs.is_empty());
+        assert!(latest.jobs().is_empty());
         assert!(!latest.landed(7, second), "a build lands once");
 
         let other = latest.submit(8);
-        latest.jobs.remove(&8);
+        latest.jobs().remove(&8);
         assert!(
             !latest.landed(8, other),
             "a forgotten material's build is stale"
         );
+        // What a worker asks before and between a job's textures.
+        let third = latest.submit(9);
+        assert!(current(&latest.jobs, 9, third));
+        let fourth = latest.submit(9);
+        assert!(
+            !current(&latest.jobs, 9, third),
+            "a resubmitted job is skipped"
+        );
+        assert!(current(&latest.jobs, 9, fourth));
     }
 
     #[test]

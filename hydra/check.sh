@@ -121,7 +121,7 @@ fixture() {
     [ -f "$dir/$name.py" ] && script=(--postframe-script "$dir/$name.py")
     # A cache of its own, so the compile and bake counts below are its own
     # misses, not what the image scenes left behind.
-    PIKA_CACHE=$OUT/fixtures/$name.cache \
+    PIKA_CACHE=$OUT/fixtures/$name.cache PIKA_BUDGET=$(expected "$name" budget "") \
         PIKA_STORE_DUMP=$OUT/fixtures/$name.dump PIKA_STATS=$OUT/fixtures/$name.stats \
         husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
         "${script[@]}" -o "$OUT/fixtures/$name.\$F4.exr" "$1" >"$OUT/fixtures/$name.log" 2>&1 ||
@@ -171,7 +171,8 @@ fixture() {
     # its build lands, though husk renders a frame more than once, and
     # compiled again by its repair with no second warning; "# warned: M" is
     # one warning's message, after the material's path, which must name
-    # what to fix. The scenes that
+    # what to fix; "# budget: B" renders with B bytes standing in for the
+    # device's memory budget (PIKA_BUDGET). The scenes that
     # edit a material are each other's control, and each must compile within
     # its frame, so a counter that never moves fails. Every material with a
     # surface in frame 1's expected store is built off the render thread and

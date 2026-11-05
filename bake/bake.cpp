@@ -6,7 +6,8 @@
 //   bake libraries
 //   bake texture <space> <encoding> <cap> <config> <out> (<tile> <file>)...
 //
-// generate turns a material's document into Slang (generate.cpp), and
+// The cap is the texels a side the texture's levels are kept under, 0 for
+// none. generate turns a material's document into Slang (generate.cpp), and
 // libraries lists what it reads beyond the document; texture turns an
 // image, or the UDIM tiles listed after the output, into the one file the
 // renderer uploads (texture.cpp). The renderer keys its cache on every
@@ -30,9 +31,9 @@ int main(int argc, char **argv) {
         } else if (job == "texture" && argc >= 9 && argc % 2 == 1) {
             char *end = nullptr;
             unsigned long cap = strtoul(argv[4], &end, 10);
-            if (*argv[4] == 0 || *end != 0 || cap == 0)
+            if (*argv[4] == 0 || *end != 0 || cap > 0xffffffffu)
                 throw std::runtime_error(std::string("the cap ") + argv[4] +
-                                         " is not a positive number of texels");
+                                         " is not a number of texels, 0 for none");
             std::vector<Tile> set;
             for (int i = 7; i < argc; i += 2) {
                 unsigned long number = strtoul(argv[i], &end, 10);

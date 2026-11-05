@@ -300,6 +300,13 @@ impl Instance {
         let queue = unsafe { raw.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.
         let memory = unsafe { self.raw.get_physical_device_memory_properties(info.handle) };
+        let ceiling = match std::env::var("PIKA_BUDGET") {
+            Ok(s) if !s.is_empty() => Some(
+                (s.parse::<u64>())
+                    .map_err(|_| format!("PIKA_BUDGET {s} is not a number of bytes"))?,
+            ),
+            _ => None,
+        };
         Ok(Device {
             instance: self,
             physical: info.handle,
@@ -310,6 +317,7 @@ impl Instance {
             timestamp_period: info.timestamp_period,
             memory_types: memory.memory_types_as_slice().to_vec(),
             memory_budget: info.memory_budget,
+            ceiling,
         })
     }
 }
@@ -381,16 +389,19 @@ pub struct Device<'a> {
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
+    /// `PIKA_BUDGET`, bytes standing in for the driver's budget, so a check
+    /// can see textures refused without filling the device.
+    ceiling: Option<u64>,
 }
 
 impl Device<'_> {
     /// The bytes of device-local memory this process uses, and the bytes
     /// the driver lets it use before allocations fail or spill to host
     /// memory, summed over the device-local heaps. Both are 0 on a driver
-    /// without `VK_EXT_memory_budget`.
+    /// without `VK_EXT_memory_budget`; `PIKA_BUDGET` replaces the latter.
     pub fn budget(&self) -> (u64, u64) {
         if !self.memory_budget {
-            return (0, 0);
+            return (0, self.ceiling.unwrap_or(0));
         }
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
@@ -401,11 +412,12 @@ impl Device<'_> {
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
         };
         let heaps = properties.memory_properties.memory_heaps_as_slice();
-        (0..heaps.len())
+        let (used, allowed) = (0..heaps.len())
             .filter(|&i| heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
             .fold((0, 0), |(used, allowed), i| {
                 (used + budget.heap_usage[i], allowed + budget.heap_budget[i])
-            })
+            });
+        (used, self.ceiling.unwrap_or(allowed))
     }
 }
 
