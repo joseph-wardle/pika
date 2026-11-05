@@ -11,10 +11,22 @@ use crate::geometry::Bound;
 use crate::gpu::{self, Buffer};
 use crate::transform::Camera;
 
+/// `shaders/view.slang`'s `LightData`, as the generated light loop reads
+/// it: MaterialX's directional light, `kind` 1 as bake/generate.cpp binds
+/// it.
+#[repr(C)]
+struct Light {
+    kind: i32,
+    direction: [f32; 3],
+    color: [f32; 3],
+    intensity: f32,
+}
+
 /// `shaders/view.slang`'s `View`.
 #[repr(C)]
 struct Constants {
     camera: Camera,
+    lights: [Light; 1],
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
     smooth: vk::DeviceAddress,
@@ -80,13 +92,24 @@ impl View {
     }
 
     /// Records into `cb`, outside rendering, the start of the view's frame:
-    /// its constants from `camera` and `geometry`, its records copied from
+    /// its constants from `camera` and `geometry`, with the headlight along
+    /// the camera's forward, its records copied from
     /// `geometry`'s with no instances, and a barrier making both visible to
     /// its passes. `geometry` must fit, and no GPU work may be pending.
     pub fn begin(&mut self, cb: vk::CommandBuffer, camera: &Camera, geometry: &Bound) {
         self.drawn.bytes().fill(0);
+        let [x, y, z, _] = camera.forward;
+        // A Lambert surface reflects albedo / π of a light's intensity, so
+        // a headlight of π shows a facing surface's albedo.
+        let headlight = Light {
+            kind: 1,
+            direction: [x, y, z],
+            color: [1.0; 3],
+            intensity: std::f32::consts::PI,
+        };
         let constants = Constants {
             camera: *camera,
+            lights: [headlight],
             points: geometry.points,
             normals: geometry.normals,
             smooth: geometry.smooth,

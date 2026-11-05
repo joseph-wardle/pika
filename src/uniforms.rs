@@ -17,7 +17,7 @@ pub struct Layout {
     pub size: usize,
     /// The block's binding.
     pub block: u32,
-    /// Each uniform's byte offset, nested ones as `u_lightData[0].direction`.
+    /// Each uniform's byte offset, nested ones as `backsurfaceshader.color`.
     pub offsets: BTreeMap<String, usize>,
     pub textures: Vec<Bindings>,
 }
@@ -241,29 +241,6 @@ pub fn address_mode(token: &str) -> Result<Option<u32>, String> {
     }))
 }
 
-/// Writes what the generated light loop reads: the eye, and the headlight,
-/// the directional light bake.cpp bound as type 1, along `forward`.
-pub fn frame(layout: &Layout, bytes: &mut [u8], eye: [f32; 3], forward: [f32; 3]) {
-    let mut put = |name: &str, words: &[u32]| {
-        if let Some(&offset) = layout.offsets.get(name) {
-            for (i, word) in words.iter().enumerate() {
-                bytes[offset + 4 * i..offset + 4 * i + 4].copy_from_slice(&word.to_ne_bytes());
-            }
-        }
-    };
-    put("u_viewPosition", &eye.map(f32::to_bits));
-    put("u_numActiveLightSources", &[1]);
-    put("u_lightData[0].type", &[1]);
-    put("u_lightData[0].direction", &forward.map(f32::to_bits));
-    put("u_lightData[0].color", &[1.0f32; 3].map(f32::to_bits));
-    // A Lambert surface reflects albedo / π of a light's intensity, so a
-    // headlight of π shows a facing surface's albedo.
-    put(
-        "u_lightData[0].intensity",
-        &[std::f32::consts::PI.to_bits()],
-    );
-}
-
 /// A packable MaterialX type: how many 4-byte words, of what.
 enum Shape {
     Floats(usize),
@@ -341,11 +318,14 @@ mod tests {
     #[test]
     fn layout_follows_the_reflection() {
         let l = layout(REFLECTION).unwrap();
-        assert_eq!((l.block, l.size), (0, 272));
-        assert_eq!(l.offsets["n0_roughness"], 160);
-        assert_eq!(l.offsets["n1_fallback"], 80);
-        assert_eq!(l.offsets["u_lightData[0].direction"], 240);
-        assert_eq!(l.offsets["backsurfaceshader.transparency"], 32);
+        assert_eq!((l.block, l.size), (0, 208));
+        assert_eq!(l.offsets["n0_roughness"], 144);
+        assert_eq!(l.offsets["n1_fallback"], 64);
+        assert_eq!(l.offsets["backsurfaceshader.transparency"], 16);
+        assert!(
+            !l.offsets.contains_key("u_viewPosition"),
+            "the eye is the view's"
+        );
         assert_eq!(
             l.textures,
             [Bindings {
@@ -449,17 +429,6 @@ mod tests {
         });
         let error = pack(&extra, &extended, &document, &network, &mut bytes).unwrap_err();
         assert!(error.contains("not a node's input"), "{error}");
-
-        frame(&l, &mut bytes, [1.0, 2.0, 3.0], [0.0, 0.0, -1.0]);
-        assert_eq!(
-            f32_at(&bytes, l.offsets["u_lightData[0].direction"] + 8),
-            -1.0
-        );
-        assert_eq!(bytes[l.offsets["u_numActiveLightSources"]], 1);
-        assert_eq!(
-            f32_at(&bytes, l.offsets["u_lightData[0].intensity"]),
-            std::f32::consts::PI
-        );
 
         let mut wide = fixture();
         let roughness = |network: &mut Network, value| {

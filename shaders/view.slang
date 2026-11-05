@@ -1,13 +1,29 @@
-// One view, as its passes read it: the camera, src/geometry.rs's buffers and
-// the view's own. src/view.rs writes it each frame into a buffer whose
-// address is a pass's one push constant: push constants are 128 bytes at
-// minimum, which the camera and the addresses alone filled, so what
-// materials and lights add goes here.
+// One view, as its passes read it: the camera, the lights, src/geometry.rs's
+// buffers and the view's own. src/view.rs writes it each frame into a
+// buffer whose address is a pass's one push constant: push constants are
+// 128 bytes at minimum, which the camera and the addresses alone filled,
+// so what lights and materials add goes here.
+
+#pragma once
 
 // A vertex's normal index when its normal is its point's smooth normal.
 static const uint SMOOTH = 0xffffffff;
 // A vertex's texcoord index when its mesh has none.
 static const uint NONE = 0xffffffff;
+
+// The lights a view has: the headlight, until the lights milestone.
+static const int LIGHTS = 1;
+
+// A light as the generated light loop reads it (shaders/frame.slang):
+// MaterialX's directional light, bound as type 1 by bake/generate.cpp,
+// which declares the same members, in this order.
+struct LightData
+{
+    int type;
+    float3 direction;
+    float3 color;
+    float intensity;
+};
 
 struct View
 {
@@ -18,6 +34,8 @@ struct View
     float4 eye;
     // The unit direction the camera looks along.
     float4 forward;
+    // The headlight, along forward.
+    LightData lights[LIGHTS];
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).

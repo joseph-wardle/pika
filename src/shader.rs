@@ -65,6 +65,7 @@ pub fn surface(dir: &Path) -> Result<Compiled, String> {
     let sources = [
         read("surface.slang")?,
         read("pixel.slang")?,
+        fixed("frame.slang")?,
         fixed("vertex.slang")?,
         fixed("view.slang")?,
     ];

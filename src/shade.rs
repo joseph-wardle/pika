@@ -1,10 +1,11 @@
 //! The material pass: each surface's pipelines, built from the bake tool's
 //! pixel stage and the vertex stage written for it, each material's
 //! uniform block, textures and descriptor set, bound to its surface, and
-//! the draw of each material's meshes after the prepass, lit by a
-//! headlight. A material is built off the render thread (`bake`) and drawn
-//! clay until its first build lands, and as it was until an edit's does; a
-//! value edit writes its block in place and rebinds its samplers.
+//! the draw of each material's meshes after the prepass, lit by the view's
+//! headlight (`shaders/frame.slang`). A material is built off the render
+//! thread (`bake`) and drawn clay until its first build lands, and as it
+//! was until an edit's does; a value edit writes its block in place and
+//! rebinds its samplers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -19,7 +20,6 @@ use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::store::{Moved, Network, Store};
 use crate::target;
 use crate::texture::{Binding, Textures};
-use crate::transform::Camera;
 use crate::uniforms::{self, Layout};
 use crate::view::View;
 
@@ -139,17 +139,15 @@ impl Shade {
     /// values alone, and submits a build of each whose structure, textures
     /// or, when the texture cap `cap` changed, cap did, drawn as it was
     /// until it lands; installs the builds that landed, `INSTALL` bytes of
-    /// textures a frame; then writes every material's eye and headlight from
-    /// `camera`. A material that cannot be built is warned of and drawn
-    /// pink; the frame goes on. Records into `cb`, outside rendering, the
-    /// uploads. No GPU work may be pending.
+    /// textures a frame. A material that cannot be built is warned of and
+    /// drawn pink; the frame goes on. Records into `cb`, outside rendering,
+    /// the uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
         store: &Store,
         moved: &Moved,
         cap: u32,
-        camera: &Camera,
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
         if cap == 0 {
@@ -182,6 +180,9 @@ impl Shade {
         let ids: Vec<u64> = if cap == self.cap {
             moved.materials.iter().copied().collect()
         } else {
+            // Every material is built again under the new cap, so the
+            // tally warned of names the textures capped to it alone.
+            self.capped = 0;
             store.materials().keys().copied().collect()
         };
         self.cap = cap;
@@ -230,18 +231,6 @@ impl Shade {
                 self.capped, self.cap
             );
             self.capped = 0;
-        }
-
-        let [x, y, z, w] = camera.eye;
-        // An orthographic camera's eye is the direction toward the viewer:
-        // the generated code takes a position, so it is put far along it,
-        // where the view vector is that direction from everywhere drawn.
-        let far = if w == 0.0 { 1e7 } else { 1.0 };
-        let eye = [x * far, y * far, z * far];
-        let [a, b, c, _] = camera.forward;
-        for u in (self.materials.values_mut()).chain([&mut self.clay, &mut self.pink]) {
-            let layout = &self.surfaces[&u.hash].layout;
-            uniforms::frame(layout, u.buffer.bytes(), eye, [a, b, c]);
         }
         Ok(update)
     }

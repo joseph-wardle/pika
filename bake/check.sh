@@ -3,13 +3,14 @@
 #
 # Builds the tool and generates bake/fixtures/network.mtlx, the document
 # src/material.rs writes for hydra/fixtures/network.usda. The manifest must
-# match bake/fixtures/network.manifest, and the surface must compile as
-# Pika compiles it. A
-# document naming a nodedef the libraries lack, or reading a primvar the
-# renderer's vertices lack, or UV0 beside another primvar, must fail,
-# naming it. A surface reading UV0 alone reads the texcoord. The
-# libraries job must list the manifest's MaterialX version and the standard
-# library's definitions with their size and time.
+# match bake/fixtures/network.manifest, the pixel stage must read the eye
+# and the lights from the view (shaders/frame.slang) rather than declare
+# them, and the surface must compile as Pika compiles it. A document naming
+# a nodedef the libraries lack, or reading a primvar the renderer's vertices
+# lack, or UV0 beside another primvar, or a uniform the view does not
+# provide, must fail, naming it. A surface reading UV0 alone reads the
+# texcoord. The libraries job must list the manifest's MaterialX version
+# and the standard library's definitions with their size and time.
 #
 #   bake/check.sh
 set -euo pipefail
@@ -21,7 +22,8 @@ BAKE=$ROOT/target/bake/bake
 
 make -C "$ROOT/bake" --no-print-directory HFS="$HFS"
 rm -rf "$OUT"
-mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/uv0" "$OUT/perfuv" "$OUT/textures"
+mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/uv0" "$OUT/perfuv" "$OUT/time" \
+    "$OUT/textures"
 FIXTURES=$ROOT/bake/fixtures
 
 failed=0
@@ -34,6 +36,10 @@ fail() {
     fail "network: generate failed"
 diff "$ROOT/bake/fixtures/network.manifest" "$OUT/network/manifest" ||
     fail "network: the manifest differs from the reference"
+grep -qx '#include "frame.slang"' "$OUT/network/pixel.slang" ||
+    fail "network: the pixel stage does not read the frame through shaders/frame.slang"
+! grep -q "u_viewPosition;" "$OUT/network/pixel.slang" ||
+    fail "network: the pixel stage declares the eye in the material's block"
 # The generator declares textures inside its uniform block, and slangc warns
 # that it moves them to bindings of their own, which is where Pika binds them.
 # The reflection is bake/fixtures/network.reflection.json's source, copied
@@ -78,6 +84,14 @@ if "$BAKE" generate "$OUT/perfuv.mtlx" "$OUT/perfuv" 2> "$OUT/perfuv.err"; then
     fail "perfuv: a surface reading UV0 beside perfuv generated"
 fi
 grep -q "perfuv and st" "$OUT/perfuv.err" || fail "perfuv: the error does not name the primvars"
+# A time node asks the generator for u_time, which the view does not hold.
+sed -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="roughness" nodename="n3" />|' \
+    -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_time_float" />\n  <surfacematerial|' \
+    "$ROOT/bake/fixtures/network.mtlx" > "$OUT/time.mtlx"
+if "$BAKE" generate "$OUT/time.mtlx" "$OUT/time" 2> "$OUT/time.err"; then
+    fail "time: a surface reading u_time generated"
+fi
+grep -q "u_time" "$OUT/time.err" || fail "time: the error does not name the uniform"
 
 texture() {
     "$BAKE" texture "$2" "$3" "$4" "" "$OUT/textures/$5.texture" 0 "$FIXTURES/$1" || fail "$5: texture failed"

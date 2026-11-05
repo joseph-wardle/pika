@@ -4,7 +4,9 @@
 // the renderer's vertices, and <out>/manifest saying what the stage expects
 // of the renderer: its public uniforms with their types and initial values
 // and its textures. The libraries job lists what generate reads beyond the
-// document, for the renderer's cache key.
+// document, for the renderer's cache key. The eye and the lights the pixel
+// stage reads come from the renderer's view (shaders/frame.slang), not from
+// the material's block, which holds the public uniforms alone.
 
 #include "bake.h"
 
@@ -111,6 +113,64 @@ std::string vertex(mx::ShaderStage const &stage) {
     return text + "    return o;\n}\n";
 }
 
+// The generator with the pixel stage's block holding the public uniforms
+// alone: the private ones, the eye and the light count, and the light data
+// are read from the view (shaders/frame.slang), which is written once a
+// frame rather than once a material. A surface reading a private uniform
+// the view lacks (a time node's u_time) is refused.
+class Generator : public mx::SlangShaderGenerator {
+  public:
+    Generator() : mx::SlangShaderGenerator(mx::TypeSystem::create()) {}
+
+  protected:
+    void emitUniforms(mx::GenContext &context, mx::ShaderStage &stage,
+                      bool lighting) const override {
+        if (stage.getName() != mx::Stage::PIXEL)
+            return mx::SlangShaderGenerator::emitUniforms(context, stage, lighting);
+        // A private uniform is still its token here ($time), substituted
+        // with its name (u_time) once the stage is complete.
+        mx::VariableBlock const &priv = stage.getUniformBlock(mx::HW::PRIVATE_UNIFORMS);
+        for (size_t i = 0; i < priv.size(); ++i) {
+            std::string const &token = priv[i]->getVariable();
+            if (token == mx::HW::T_VIEW_POSITION || token == mx::HW::T_NUM_ACTIVE_LIGHT_SOURCES)
+                continue;
+            auto const named = _tokenSubstitutions.find(token);
+            std::string const name = named == _tokenSubstitutions.end() ? token : named->second;
+            throw std::runtime_error("the surface reads " + name +
+                                     ", which Pika's view does not provide");
+        }
+        if (lighting) {
+            // shaders/view.slang's LightData declares these.
+            std::vector<std::string> const view = {"type", "direction", "color", "intensity"};
+            std::vector<std::string> members;
+            mx::VariableBlock const &light = stage.getUniformBlock(mx::HW::LIGHT_DATA);
+            for (size_t i = 0; i < light.size(); ++i)
+                members.push_back(light[i]->getVariable());
+            if (members != view) {
+                std::string names;
+                for (std::string const &member : members)
+                    names += (names.empty() ? "" : ", ") + member;
+                throw std::runtime_error("the light shader reads " + names +
+                                         "; shaders/view.slang's LightData holds type, "
+                                         "direction, color and intensity");
+            }
+            unsigned int const lights = std::max(1u, context.getOptions().hwMaxActiveLightSources);
+            emitLine("#define " + mx::HW::LIGHT_DATA_MAX_LIGHT_SOURCES + " " +
+                         std::to_string(lights),
+                     stage, false);
+        }
+        emitLine("#include \"frame.slang\"", stage, false);
+        emitLineBreak(stage);
+        emitLine("cbuffer " + stage.getName() + "CB", stage, false);
+        emitScopeBegin(stage);
+        emitVariableDeclarations(stage.getUniformBlock(mx::HW::PUBLIC_UNIFORMS),
+                                 _syntax->getUniformQualifier(), mx::Syntax::SEMICOLON, context,
+                                 stage);
+        emitScopeEnd(stage);
+        emitLineBreak(stage);
+    }
+};
+
 } // namespace
 
 void generate(std::string const &path, std::string const &out) {
@@ -129,17 +189,17 @@ void generate(std::string const &path, std::string const &out) {
     if (!material)
         throw std::runtime_error("the document has no node named material");
 
-    mx::ShaderGeneratorPtr generator = mx::SlangShaderGenerator::create();
+    mx::ShaderGeneratorPtr generator = std::make_shared<Generator>();
     mx::GenContext context(generator);
     // A library file under bake/ shadows Houdini's of the same path.
     context.registerSourceCodeSearchPath(mx::FilePath(bake));
     context.registerSourceCodeSearchPath(mx::FilePath(materialx));
     mx::GenOptions &options = context.getOptions();
     options.hwSpecularEnvironmentMethod = mx::SPECULAR_ENVIRONMENT_NONE;
+    // shaders/view.slang's LIGHTS: the headlight is the one light, and the
+    // generated loop reads it from the view's lights.
     options.hwMaxActiveLightSources = 1;
     options.hwImplicitBitangents = true;
-    // The headlight is the one light; the generated loop reads it from
-    // u_lightData[0] with u_numActiveLightSources set to 1.
     mx::HwShaderGenerator::bindLightShader(*libraries->getNodeDef("ND_directional_light"), 1,
                                            context);
     mx::ShaderPtr shader = generator->generate("pika", material, context);
