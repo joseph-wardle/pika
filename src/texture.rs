@@ -30,6 +30,13 @@ pub struct Texture {
     pub file: Vec<u8>,
 }
 
+impl Texture {
+    /// Its levels' bytes: what loading it uploads.
+    pub fn bytes(&self) -> u64 {
+        self.levels.iter().map(|l| l.len() as u64).sum()
+    }
+}
+
 pub fn read(path: &Path) -> Result<Texture, String> {
     let file = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     parse(file).map_err(|e| format!("{} {e}", path.display()))
@@ -332,8 +339,9 @@ impl Textures {
     }
 
     /// The baked texture at `path`, read as `texture`, loaded now unless it
-    /// is. A bake smaller than its `source` was capped, which the load
-    /// warns of: once, as the texture stays loaded while a material uses it.
+    /// is, and the bytes that uploaded. A bake smaller than its `source`
+    /// was capped, which the load warns of: once, as the texture stays
+    /// loaded while a material uses it.
     pub fn load(
         &mut self,
         device: &gpu::Device,
@@ -341,9 +349,9 @@ impl Textures {
         path: &Path,
         texture: &Texture,
         source: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<u64, String> {
         if self.images.contains_key(path) {
-            return Ok(());
+            return Ok(0);
         }
         if texture.source != [texture.width, texture.height] {
             eprintln!(
@@ -359,7 +367,7 @@ impl Textures {
         image.record(cb, &staging, texture);
         self.staging.push(staging);
         self.images.insert(path.to_owned(), image);
-        Ok(())
+        Ok(texture.bytes())
     }
 
     /// What a surface binds for the texture at `path`, loaded and kept
@@ -438,12 +446,12 @@ impl Drop for Textures {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     /// The bake tool wrote this for bake/fixtures/ramp.exr, whose texels
     /// hold their own centres.
-    const RAMP: &[u8] = include_bytes!("../bake/fixtures/ramp.texture");
+    pub const RAMP: &[u8] = include_bytes!("../bake/fixtures/ramp.texture");
 
     #[test]
     fn reads_the_ramp_fixture() {

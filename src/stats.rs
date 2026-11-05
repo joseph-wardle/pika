@@ -66,6 +66,8 @@ pub struct Frame {
     pub compiled: usize,
     /// Textures the bake tool baked for this frame.
     pub baked: usize,
+    /// The baked bytes the textures loaded this frame uploaded.
+    pub loaded: u64,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
@@ -300,6 +302,7 @@ impl Frame {
             ("latent", u64::from(self.latent)),
             ("compiled_surfaces", self.compiled as u64),
             ("baked_textures", self.baked as u64),
+            ("texture_bytes", self.loaded),
             ("pending_materials", self.pending as u64),
         ];
         pairs.extend(counts.map(|(k, v)| (k.to_string(), v as f64)));
@@ -400,6 +403,7 @@ mod tests {
             latent: true,
             compiled: 0,
             baked: 2,
+            loaded: 3_145_728,
             pending: 1,
         }
     }
@@ -412,7 +416,7 @@ mod tests {
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
-             moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 pending_materials 1\n";
+             moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_bytes 3145728 pending_materials 1\n";
         assert_eq!(line("frame", 7, &frame(Some(29.0)).pairs()), expected);
         // A first frame has no period, so it is not the reference's line
         // with the period zeroed.

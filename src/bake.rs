@@ -8,13 +8,15 @@
 //! reads its textures, on one of `WORKERS` threads (`Builder`), and its
 //! result waits for the frame that installs it. Each job for a material is
 //! a later generation than the one before, and `drain` hands out only the
-//! latest's result, so an edit's build never replaces a newer edit's.
+//! latest's result, so an edit's build never replaces a newer edit's, and
+//! only so many bytes of results a frame, so a scene's textures arrive
+//! over frames the host can still answer.
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -397,6 +399,14 @@ pub struct Built {
 }
 
 impl Built {
+    /// The bytes installing it uploads: its baked textures'.
+    pub fn bytes(&self) -> u64 {
+        match &self.result {
+            Ok(output) => output.textures.iter().map(|b| b.texture.bytes()).sum(),
+            Err(_) => 0,
+        }
+    }
+
     /// `network`'s build, run now on this thread: Pika's own networks are
     /// built before the first frame, with no textures and so no cap.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
@@ -441,7 +451,10 @@ impl Builder {
     pub fn new(bake: Bake) -> Self {
         let (jobs, queue) = mpsc::channel();
         let queue = Arc::new(Mutex::new(queue));
-        let (finished, done) = mpsc::channel();
+        // A finished build holds its baked files until a frame installs
+        // it, and a frame installs so many: the workers wait with their
+        // results rather than run ahead to a scene's every texture.
+        let (finished, done) = mpsc::sync_channel(WORKERS);
         for _ in 0..WORKERS {
             let (bake, queue, finished) = (bake.clone(), queue.clone(), finished.clone());
             std::thread::spawn(move || work(&bake, &queue, &finished));
@@ -478,8 +491,11 @@ impl Builder {
     }
 
     /// Waits up to `timeout` for a build to finish, and says whether one
-    /// did; at once when none is out.
+    /// waits to be installed; at once when one does or none is out.
     pub fn wait(&mut self, timeout: Duration) -> Result<bool, String> {
+        if !self.arrived.is_empty() {
+            return Ok(true);
+        }
         if self.latest.jobs.is_empty() {
             return Ok(false);
         }
@@ -493,12 +509,25 @@ impl Builder {
         }
     }
 
-    /// The finished builds that are their material's latest; a stale one
-    /// is dropped here.
-    pub fn drain(&mut self) -> Vec<Built> {
-        let mut built = std::mem::take(&mut self.arrived);
-        built.extend(self.done.try_iter());
-        built.retain(|b| self.latest.landed(b.id, b.generation));
+    /// The finished builds that are their material's latest, as they
+    /// finished, until their bytes reach `bytes`: the first lands however
+    /// large, the rest wait for the next frame. A stale one is dropped
+    /// here.
+    pub fn drain(&mut self, bytes: u64) -> Vec<Built> {
+        let mut built = Vec::new();
+        let mut total = 0;
+        let mut arrived = std::mem::take(&mut self.arrived).into_iter();
+        while let Some(b) = arrived.next().or_else(|| self.done.try_recv().ok()) {
+            if !self.latest.landed(b.id, b.generation) {
+                continue;
+            }
+            total += b.bytes();
+            built.push(b);
+            if total >= bytes {
+                break;
+            }
+        }
+        self.arrived.extend(arrived);
         built
     }
 
@@ -542,7 +571,7 @@ impl Latest {
 /// A worker: builds each job from the queue until the builder is dropped.
 /// One dropped mid-build finishes it; the cache's temporary names keep a
 /// build cut short by the process exiting from leaving a partial entry.
-fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &Sender<Built>) {
+fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &SyncSender<Built>) {
     loop {
         let job = queue.lock().unwrap_or_else(PoisonError::into_inner).recv();
         let Ok(job) = job else {
@@ -791,5 +820,63 @@ pub mod tests {
             !latest.landed(8, other),
             "a forgotten material's build is stale"
         );
+    }
+
+    #[test]
+    fn a_frame_drains_so_many_bytes() {
+        let network = material::clay();
+        let mut builder = Builder::new(Bake {
+            materials: "materials".into(),
+            textures: "textures".into(),
+            config: String::new(),
+            tool: 1,
+        });
+        let mut finished = |id: u64, stale: bool| {
+            let generation = builder.latest.submit(id);
+            if stale {
+                builder.latest.submit(id);
+            }
+            let texture = crate::texture::parse(crate::texture::tests::RAMP.to_vec()).unwrap();
+            builder.arrived.push(Built {
+                id,
+                generation,
+                document: material::document(&network).unwrap().unwrap(),
+                network: network.clone(),
+                cap: 0,
+                result: Ok(Output {
+                    manifest: manifest(FIXTURE).unwrap(),
+                    compiled: None,
+                    sources: Vec::new(),
+                    textures: vec![Baked {
+                        path: "ramp".into(),
+                        source: "ramp.exr".into(),
+                        texture,
+                        fresh: false,
+                    }],
+                }),
+            });
+        };
+        finished(1, false);
+        finished(2, true);
+        finished(3, false);
+        finished(4, false);
+        let bytes = builder.arrived[0].bytes();
+        assert!(bytes > 0);
+        let ids = |built: &[Built]| built.iter().map(|b| b.id).collect::<Vec<_>>();
+
+        assert_eq!(ids(&builder.drain(0)), [1], "the first lands however large");
+        assert_eq!(builder.len(), 3);
+        assert!(
+            builder.wait(Duration::ZERO).unwrap(),
+            "builds wait to be installed"
+        );
+        assert_eq!(
+            ids(&builder.drain(bytes + 1)),
+            [3, 4],
+            "the stale one neither lands nor counts"
+        );
+        assert_eq!(builder.len(), 1, "material 2's latest build is still out");
+        assert!(builder.drain(u64::MAX).is_empty());
+        assert!(!builder.wait(Duration::ZERO).unwrap());
     }
 }

@@ -49,6 +49,15 @@ pub struct Shade {
     pink: Uniforms,
 }
 
+/// The baked bytes a frame installs, past which the builds that landed
+/// wait for the next. Each texture's image, memory and staging buffer are
+/// created and its levels copied on the render thread, about 0.8 ms a MiB
+/// on the RTX 4070 Ti SUPER: ALab's 2.4 GB at the 512 cap, installed as
+/// they landed, took frames of half a second (p95 of the install frames'
+/// CPU side 488 ms); at this bound, 57 ms, over 113 frames, converging in
+/// the same 32 s, which the workers' reads set.
+const INSTALL: u64 = 32 << 20;
+
 /// One shader structure: the pipelines of every material sharing a document.
 pub struct Surface {
     device: ash::Device,
@@ -84,6 +93,8 @@ pub struct Update {
     pub compiled: usize,
     /// Textures the bake tool baked, likewise.
     pub baked: usize,
+    /// The baked bytes the textures loaded uploaded.
+    pub loaded: u64,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
@@ -119,8 +130,8 @@ impl Shade {
     /// Rewrites the block of each material whose network changed its
     /// values alone, and submits a build of each whose structure, textures
     /// or, when the texture cap `cap` changed, cap did, drawn as it was
-    /// until it lands; installs the builds that landed, loading their
-    /// textures; then writes every material's eye and headlight from
+    /// until it lands; installs the builds that landed, `INSTALL` bytes of
+    /// textures a frame; then writes every material's eye and headlight from
     /// `camera`. A material that cannot be built is warned of and drawn
     /// pink; the frame goes on. Records into `cb`, outside rendering, the
     /// uploads. No GPU work may be pending.
@@ -181,7 +192,7 @@ impl Shade {
                 self.failed.insert(id);
             }
         }
-        for built in self.builder.drain() {
+        for built in self.builder.drain(INSTALL) {
             let Some(material) = store.materials().get(&built.id) else {
                 continue;
             };
@@ -281,7 +292,8 @@ impl Shade {
         )?;
         for baked in &output.textures {
             update.baked += usize::from(baked.fresh);
-            textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
+            update.loaded +=
+                textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
             uniforms.textures.push(baked.path.clone());
         }
         uniforms.bind(textures, surface, &built.document, &built.network)?;

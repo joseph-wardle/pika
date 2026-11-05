@@ -174,6 +174,7 @@ struct Pending {
     latent: bool,
     compiled: usize,
     baked: usize,
+    loaded: u64,
     pending: usize,
 }
 
@@ -398,6 +399,7 @@ impl Renderer {
             latent,
             compiled: shading.compiled,
             baked: shading.baked,
+            loaded: shading.loaded,
             pending: shading.pending,
         };
         if latent {
@@ -471,6 +473,7 @@ impl Renderer {
             latent: pending.latent,
             compiled: pending.compiled,
             baked: pending.baked,
+            loaded: pending.loaded,
             pending: pending.pending,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
