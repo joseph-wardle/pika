@@ -8,6 +8,9 @@
 # A material whose surface shader names a nodedef the MaterialX libraries do
 # not define cannot be built: the frame renders with it pink and one warning,
 # and the material is not tried again until its network moves.
+#
+# compiles: 0 then 1
+# warnings: 1
 def Xform "world"
 {
     def Camera "camera" {}

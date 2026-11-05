@@ -9,6 +9,9 @@
 # from clamp to repeat, which rewrites the material's block and rebinds its
 # sampler, compiling no surface and baking no texture (hydra/images/rewrapped.usda
 # shows the sampler following).
+#
+# compiles: 1 then 0
+# bakes: 1 then 0
 def Xform "world"
 {
     def Camera "camera" {}

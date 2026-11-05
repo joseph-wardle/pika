@@ -9,6 +9,9 @@
 # colour to its emissive colour. That is a new network, so Pika compiles a
 # new surface, while the texture, whose file did not change, is not baked
 # again.
+#
+# compiles: 1 then 1
+# bakes: 1 then 0
 def Xform "world"
 {
     def Camera "camera" {}

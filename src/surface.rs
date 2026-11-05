@@ -329,8 +329,8 @@ mod tests {
     use crate::bake;
     use crate::material::tests::fixture;
 
-    // bake/check.sh compiles the tool's output for bake/fixtures/network.mtlx
-    // and proves this reflection of it.
+    // slangc's reflection of the tool's output for bake/fixtures/network.mtlx,
+    // copied from bake/check.sh's run when slangc or the libraries change.
     const REFLECTION: &str = include_str!("../bake/fixtures/network.reflection.json");
 
     fn manifest() -> Manifest {

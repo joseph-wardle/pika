@@ -9,6 +9,9 @@
 # agrees across the first edge its faces share and not the second, a seam,
 # so its twelve corners weld to ten values; the edit closes the seam, to
 # eight. The quad's vertex st refines like its points.
+#
+# compiles: 1 then 0
+# bakes: 1 then 0
 def Xform "world"
 {
     def Camera "camera" {}

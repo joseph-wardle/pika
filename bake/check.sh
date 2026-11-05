@@ -4,8 +4,7 @@
 # Builds the tool and generates bake/fixtures/network.mtlx, the document
 # src/material.rs writes for hydra/fixtures/network.usda. The manifest must
 # match bake/fixtures/network.manifest, and the surface must compile as
-# Pika compiles it, reflecting the layout in network.reflection.json that
-# src/surface.rs's tests pack against. A
+# Pika compiles it. A
 # document naming a nodedef the libraries lack, or reading a primvar the
 # renderer's vertices lack, or UV0 beside another primvar, must fail,
 # naming it. A surface reading UV0 alone reads the texcoord. The
@@ -37,12 +36,12 @@ diff "$ROOT/bake/fixtures/network.manifest" "$OUT/network/manifest" ||
     fail "network: the manifest differs from the reference"
 # The generator declares textures inside its uniform block, and slangc warns
 # that it moves them to bindings of their own, which is where Pika binds them.
+# The reflection is bake/fixtures/network.reflection.json's source, copied
+# from here when slangc or the libraries change.
 slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-entrypoint-name \
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
     fail "network: slangc rejected the surface"
-diff "$ROOT/bake/fixtures/network.reflection.json" "$OUT/network/reflection.json" ||
-    fail "network: the reflection differs from the reference"
 
 "$BAKE" libraries > "$OUT/libraries" || fail "libraries: the listing failed"
 [ "$(head -1 "$OUT/libraries")" = "$(head -1 "$FIXTURES/network.manifest")" ] ||

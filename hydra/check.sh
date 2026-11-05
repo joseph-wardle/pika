@@ -90,6 +90,14 @@ counts() {
         END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
 }
 
+# expected <name> <count> <default>: what the scene's header expects of the
+# count, in its "# <count>: ..." line, or the default.
+expected() {
+    local line
+    line=$(sed -n "s/^# $2: //p" "$ROOT/hydra/fixtures/$1.usda" | head -n 1)
+    echo "${line:-$3}"
+}
+
 # redundant <stats> <edit>: the mesh bytes the edit's sync handed over that
 # the store held already.
 redundant() {
@@ -155,34 +163,33 @@ fixture() {
         fail "$name: the summary has no memory budget"
     # An edit to a value, a wrap mode among them, or an asset path compiles
     # nothing; one to the network's structure, the primvar a reader names
-    # included, compiles its surface; a texture is baked once per file. The scenes that edit a
-    # material are each other's control, and each must compile within its
-    # frame, so a counter that never moves fails. A material that cannot be
-    # built is warned of when its build lands, which is once, though husk
-    # renders a frame more than once; the repair compiles it, with no second
-    # warning. Every material with a surface in frame 1's expected store is
-    # built off the render thread and pending on the first frame, built or
-    # failed, and none is pending on the last; a scene without one is the
-    # control. An edit that touches a primvar the materials do not read
-    # hands over no mesh bytes the store holds already (`redundant`); the
-    # other edits are not held to a count, since Hydra resends what a
-    # changed topology or instancing covers.
-    local first=0 edited="0 0" warnings=0 redundant= built compiled _ second
-    case $name in
-        network) first=1 edited="0 1" ;;
-        rewired) first=1 edited="1 0" ;;
-        rewrapped) first=1 ;;
-        broken) edited="1 0" warnings=1 ;;
-        texcoord) first=1 edited="1 0" ;;
-        unrelated) first=1 redundant=0 ;;
-        welded) first=1 ;;
-    esac
+    # included, compiles its surface; a texture is baked once per file. The
+    # scene's header states its counts: "# compiles: A then B" and
+    # "# bakes: A then B" are the surfaces compiled and textures baked for
+    # frame 1 and for the edit, 0 when absent, and "# warnings: N" the
+    # warnings of materials that cannot be built, each warned of once when
+    # its build lands, though husk renders a frame more than once, and
+    # compiled again by its repair with no second warning. The scenes that
+    # edit a material are each other's control, and each must compile within
+    # its frame, so a counter that never moves fails. Every material with a
+    # surface in frame 1's expected store is built off the render thread and
+    # pending on the first frame, built or failed, and none is pending on the
+    # last; a scene without one is the control. An edit that touches a
+    # primvar the materials do not read hands over no mesh bytes the store
+    # holds already ("# redundant bytes: 0"); the other edits are not held to
+    # a count, since Hydra resends what a changed topology or instancing
+    # covers.
+    local compiles bakes warnings redundant built c1 b1 c2 b2
+    compiles=$(expected "$name" compiles "0 then 0")
+    bakes=$(expected "$name" bakes "0 then 0")
+    warnings=$(expected "$name" warnings 0)
+    redundant=$(expected "$name" "redundant bytes" "")
     built=$(awk '/^sync 2/{ exit } /^  surface / && $2 != "none" { n++ } END { print n + 0 }' "$dir/$name.dump")
-    read -r compiled _ second <<<"$(counts "$OUT/fixtures/$name.stats" "$edit")"
-    [ "$second" = "$edited" ] ||
-        fail "$name: frame 2 compiled and baked $second, not $edited"
-    [ "$compiled" = "$first" ] ||
-        fail "$name: frame 1 compiled $compiled surfaces, not $first"
+    read -r c1 b1 c2 b2 <<<"$(counts "$OUT/fixtures/$name.stats" "$edit")"
+    [ "$c1 then $c2" = "$compiles" ] ||
+        fail "$name: compiled $c1 surfaces for frame 1 then $c2 for the edit, not $compiles"
+    [ "$b1 then $b2" = "$bakes" ] ||
+        fail "$name: baked $b1 textures for frame 1 then $b2 for the edit, not $bakes"
     [ "$(pending "$OUT/fixtures/$name.stats")" = "$built 0" ] ||
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
@@ -213,7 +220,7 @@ done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 # Each fixture's check reports to a file of its own; one that stops short of
 # the end exits nonzero.
-export -f fixture clean store_after counts pending redundant fail
+export -f fixture clean store_after counts expected pending redundant fail
 export OUT ROOT
 printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \
     'set -euo pipefail; fixture "$1" >"$OUT/fixtures/$(basename "$1" .usda).report" 2>&1' _ {} ||

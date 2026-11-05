@@ -9,6 +9,9 @@
 # each shader's identifier, the values of its unconnected inputs with their
 # USD types and colour spaces, its connections, and the node the surface
 # output comes from. Asset paths arrive resolved.
+#
+# compiles: 1 then 0
+# bakes: 1 then 1
 def Xform "world"
 {
     def Camera "camera" {}

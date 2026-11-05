@@ -10,6 +10,10 @@
 # displayColor, which no material reads, is animated, as are its points, the
 # edit. The second frame's sync hands over the points and nothing twice: no
 # mesh bytes are redundant, and the texcoord is not refined again.
+#
+# compiles: 1 then 0
+# bakes: 1 then 0
+# redundant bytes: 0
 def Xform "world"
 {
     def Camera "camera" {}
