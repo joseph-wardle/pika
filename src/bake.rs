@@ -24,7 +24,7 @@ use crate::abi;
 use crate::cache;
 use crate::material::{self, Document, Source};
 use crate::shader;
-use crate::store::Network;
+use crate::store::{Network, Node};
 use crate::texture::{self, Texture};
 use crate::uniforms;
 
@@ -94,8 +94,6 @@ pub struct Generated {
 /// A texture as the renderer uploads it, read from the cache.
 pub struct Baked {
     pub path: PathBuf,
-    /// The image, or UDIM pattern, it was baked from.
-    pub source: PathBuf,
     pub texture: Texture,
     /// Whether the bake tool ran now rather than the cache answering.
     pub fresh: bool,
@@ -210,7 +208,6 @@ impl Bake {
                 Ok(texture) => {
                     return Ok(Baked {
                         path,
-                        source: source.to_owned(),
                         texture,
                         fresh: false,
                     });
@@ -241,7 +238,6 @@ impl Bake {
         Ok(Baked {
             texture: texture::read(&path)?,
             path,
-            source: source.to_owned(),
             fresh: true,
         })
     }
@@ -321,6 +317,11 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
 /// makes a bake miss.
 pub fn tiles(source: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
     let text = source.to_string_lossy();
+    // The delegate hands over the path as it resolved, so one that did
+    // not resolve arrives like one never authored.
+    if text.is_empty() {
+        return Err("its path is empty or did not resolve".into());
+    }
     let Some((before, after)) = text.split_once("<UDIM>") else {
         if !source.is_file() {
             return Err(format!("cannot find the texture {text}"));
@@ -602,9 +603,10 @@ fn work(bake: &Bake, queue: &Mutex<Receiver<Job>>, finished: &SyncSender<Built>)
     }
 }
 
-/// Generates `document`'s stages and, unless `held`, compiles its surface,
-/// then bakes and reads each texture `network` gives it, under the cap
-/// `cap`.
+/// Generates `document`'s stages, bakes and reads each texture `network`
+/// gives it, under the cap `cap`, and then, unless `held`, compiles its
+/// surface: a texture that cannot be read fails the build before the
+/// compile is paid for.
 fn build(
     bake: &Bake,
     document: &Document,
@@ -613,17 +615,21 @@ fn build(
     held: bool,
 ) -> Result<Output, String> {
     let generated = bake.generate(document)?;
+    let sources = sources(&generated.manifest, document, network)?;
+    let mut textures = Vec::new();
+    for (name, source) in generated.manifest.textures.iter().zip(&sources) {
+        let (path, _, input) = reader(name, document, network)?;
+        let file = Path::new(&source.file);
+        let baked = bake
+            .texture(file, &source.space, source.encoding, cap)
+            .map_err(|e| format!("{path}'s {input}: {e}"))?;
+        textures.push(baked);
+    }
     let compiled = if held {
         None
     } else {
         Some(shader::surface(&generated.dir)?)
     };
-    let sources = sources(&generated.manifest, document, network)?;
-    let mut textures = Vec::new();
-    for source in &sources {
-        let file = Path::new(&source.file);
-        textures.push(bake.texture(file, &source.space, source.encoding, cap)?);
-    }
     Ok(Output {
         manifest: generated.manifest,
         compiled,
@@ -632,8 +638,8 @@ fn build(
     })
 }
 
-/// The texture each of `manifest`'s textures reads, from `network`'s node
-/// the name stands for, by `document`'s node order.
+/// The texture each of `manifest`'s textures reads, from the node and
+/// input of `network` the name stands for.
 pub fn sources(
     manifest: &Manifest,
     document: &Document,
@@ -641,15 +647,26 @@ pub fn sources(
 ) -> Result<Vec<Source>, String> {
     let mut sources = Vec::new();
     for name in &manifest.textures {
-        let (index, input) = uniforms::node_input(name)?;
-        let path = (document.nodes.get(index))
-            .ok_or_else(|| format!("{name} names a node the document lacks"))?;
-        let node = &network.nodes[path];
-        let source = material::source(node, material::store_input(node, input))
-            .map_err(|e| format!("{path}'s {input} {e}"))?;
+        let (path, node, input) = reader(name, document, network)?;
+        let source = material::source(node, input).map_err(|e| format!("{path}'s {input} {e}"))?;
         sources.push(source);
     }
     Ok(sources)
+}
+
+/// The node of `network`, by path, and its input as the store names it,
+/// that `manifest`'s texture `name` stands for, by `document`'s node
+/// order.
+fn reader<'a>(
+    name: &'a str,
+    document: &'a Document,
+    network: &'a Network,
+) -> Result<(&'a str, &'a Node, &'a str), String> {
+    let (index, input) = uniforms::node_input(name)?;
+    let path = (document.nodes.get(index))
+        .ok_or_else(|| format!("{name} names a node the document lacks"))?;
+    let node = &network.nodes[path];
+    Ok((path, node, material::store_input(node, input)))
 }
 
 #[cfg(test)]
@@ -780,6 +797,8 @@ pub mod tests {
             ]
         );
         assert_eq!(tiles(&source).unwrap(), [(0, source.clone())]);
+        let error = tiles(Path::new("")).unwrap_err();
+        assert!(error.contains("did not resolve"), "{error}");
         let set = key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap();
         assert_eq!(
             set.parent().unwrap(),
@@ -849,7 +868,6 @@ pub mod tests {
                     sources: Vec::new(),
                     textures: vec![Baked {
                         path: "ramp".into(),
-                        source: "ramp.exr".into(),
                         texture,
                         fresh: false,
                     }],

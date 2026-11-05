@@ -35,6 +35,11 @@ impl Texture {
     pub fn bytes(&self) -> u64 {
         self.levels.iter().map(|l| l.len() as u64).sum()
     }
+
+    /// Whether the cap shrank it: its source was larger.
+    pub fn capped(&self) -> bool {
+        self.source != [self.width, self.height]
+    }
 }
 
 pub fn read(path: &Path) -> Result<Texture, String> {
@@ -339,29 +344,16 @@ impl Textures {
     }
 
     /// The baked texture at `path`, read as `texture`, loaded now unless it
-    /// is, and the bytes that uploaded. A bake smaller than its `source`
-    /// was capped, which the load warns of: once, as the texture stays
-    /// loaded while a material uses it.
+    /// is, and the bytes that uploaded: 0 when it was.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         path: &Path,
         texture: &Texture,
-        source: &Path,
     ) -> Result<u64, String> {
         if self.images.contains_key(path) {
             return Ok(0);
-        }
-        if texture.source != [texture.width, texture.height] {
-            eprintln!(
-                "pika: warning: texture {} is {}×{}, capped to {}×{} by pika:textureCap",
-                source.display(),
-                texture.source[0],
-                texture.source[1],
-                texture.width,
-                texture.height
-            );
         }
         let (image, staging) = Image::new(device, texture)?;
         image.record(cb, &staging, texture);

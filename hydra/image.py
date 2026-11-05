@@ -111,7 +111,8 @@ What the reference encodes:
   the texture cap, the render setting pika:textureCap, 1024 unless the
   render settings prim authors it (hydra/images/capped.usda); the
   reference refuses a level the file lacks and a cap no stored level fits.
-  Pika warns, once per texture it loads, of a source the cap shrank. husk
+  Pika warns of the textures the cap shrank in one line, with their count,
+  once every material has landed. husk
   reads the setting off the prim; usdrecord passes no render settings, so
   it draws under the default, and the reference knows. The step is the
   GPU's own on a surface facing the camera, where st is affine on screen;
@@ -177,7 +178,8 @@ SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
 # The delegate's default texture cap (hydra/plugin.cpp).
 CAP = 1024
-# The scenes whose texture the cap shrinks, which husk must warn of once.
+# The scenes whose texture the cap shrinks, which husk must warn of in one
+# line.
 CAPPED = {"capped": 1}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
@@ -1242,7 +1244,7 @@ def differs(stage, host):
 def warned(log, name, expected):
     """A failure unless `log` holds `expected` texture warnings."""
     with open(log) as f:
-        count = sum(line.startswith("pika: warning: texture ") for line in f)
+        count = sum(line.startswith("pika: warning: ") and "by pika:textureCap" in line for line in f)
     return [] if count == expected else [f"{name}: {count} texture warnings, not {expected}"]
 
 

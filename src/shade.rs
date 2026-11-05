@@ -43,6 +43,11 @@ pub struct Shade {
     stale: bool,
     /// The texture cap of the frame; 0 before the first.
     cap: u32,
+    /// The textures loaded since the last build landed whose source the
+    /// cap shrank, warned of in one line when every build has: a scene's
+    /// worth at once, rather than a line per texture, thousands on a
+    /// production asset.
+    capped: usize,
     /// `material::clay`, drawn where `materials` has no entry.
     clay: Uniforms,
     /// `material::pink`, drawn for `failed`.
@@ -95,6 +100,8 @@ pub struct Update {
     pub baked: usize,
     /// The baked bytes the textures loaded uploaded.
     pub loaded: u64,
+    /// The textures loaded whose source the cap shrank.
+    pub capped: usize,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
@@ -122,6 +129,7 @@ impl Shade {
             failed: BTreeSet::new(),
             stale: false,
             cap: 0,
+            capped: 0,
             clay,
             pink,
         })
@@ -211,6 +219,18 @@ impl Shade {
             }
         }
         update.pending = self.builder.len();
+        self.capped += update.capped;
+        if update.pending == 0 && self.capped > 0 {
+            let (textures, were) = match self.capped {
+                1 => ("texture", "was"),
+                _ => ("textures", "were"),
+            };
+            eprintln!(
+                "pika: warning: {} {textures} {were} capped to {} texels a side by pika:textureCap",
+                self.capped, self.cap
+            );
+            self.capped = 0;
+        }
 
         let [x, y, z, w] = camera.eye;
         // An orthographic camera's eye is the direction toward the viewer:
@@ -292,8 +312,9 @@ impl Shade {
         )?;
         for baked in &output.textures {
             update.baked += usize::from(baked.fresh);
-            update.loaded +=
-                textures.load(device, cb, &baked.path, &baked.texture, &baked.source)?;
+            let loaded = textures.load(device, cb, &baked.path, &baked.texture)?;
+            update.loaded += loaded;
+            update.capped += usize::from(loaded > 0 && baked.texture.capped());
             uniforms.textures.push(baked.path.clone());
         }
         uniforms.bind(textures, surface, &built.document, &built.network)?;

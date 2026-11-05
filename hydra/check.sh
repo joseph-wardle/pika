@@ -169,7 +169,9 @@ fixture() {
     # frame 1 and for the edit, 0 when absent, and "# warnings: N" the
     # warnings of materials that cannot be built, each warned of once when
     # its build lands, though husk renders a frame more than once, and
-    # compiled again by its repair with no second warning. The scenes that
+    # compiled again by its repair with no second warning; "# warned: M" is
+    # one warning's message, after the material's path, which must name
+    # what to fix. The scenes that
     # edit a material are each other's control, and each must compile within
     # its frame, so a counter that never moves fails. Every material with a
     # surface in frame 1's expected store is built off the render thread and
@@ -179,10 +181,11 @@ fixture() {
     # holds already ("# redundant bytes: 0"); the other edits are not held to
     # a count, since Hydra resends what a changed topology or instancing
     # covers.
-    local compiles bakes warnings redundant built c1 b1 c2 b2
+    local compiles bakes warnings warned redundant built c1 b1 c2 b2
     compiles=$(expected "$name" compiles "0 then 0")
     bakes=$(expected "$name" bakes "0 then 0")
     warnings=$(expected "$name" warnings 0)
+    warned=$(expected "$name" warned "")
     redundant=$(expected "$name" "redundant bytes" "")
     built=$(awk '/^sync 2/{ exit } /^  surface / && $2 != "none" { n++ } END { print n + 0 }' "$dir/$name.dump")
     read -r c1 b1 c2 b2 <<<"$(counts "$OUT/fixtures/$name.stats" "$edit")"
@@ -194,6 +197,8 @@ fixture() {
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
+    [ -z "$warned" ] || grep -qF "pika: warning: material $warned; drawn pink" "$OUT/fixtures/$name.log" ||
+        fail "$name: no warning reads \"material $warned; drawn pink\" (see $OUT/fixtures/$name.log)"
     [ -z "$redundant" ] || [ "$(redundant "$OUT/fixtures/$name.stats" "$edit")" = "$redundant" ] ||
         fail "$name: the edit handed over $(redundant "$OUT/fixtures/$name.stats" "$edit") redundant mesh bytes, not $redundant"
 }
