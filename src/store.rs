@@ -10,13 +10,17 @@ use std::fmt;
 
 pub struct Store {
     /// Ids are never reused, so a stale id is an error rather than a write to
-    /// a newer prim.
+    /// a newer prim; the exception is a material inserted again at its path
+    /// within a frame, the same prim resynced (`freed`).
     next_id: u64,
     meshes: BTreeMap<u64, Mesh>,
     instancers: BTreeMap<u64, Instancer>,
     materials: BTreeMap<u64, Material>,
     /// Material ids by path, which is how a mesh's bindings name them.
     material_ids: BTreeMap<String, u64>,
+    /// The materials removed since the last frame, by path: one inserted
+    /// again at its path before the frame keeps its id (`insert_material`).
+    freed: BTreeMap<String, u64>,
     curves: BTreeMap<u64, Curves>,
     counted: BTreeMap<u64, Counted>,
     /// Each mesh's triangles, its cage's then as drawn, counted when its
@@ -419,6 +423,7 @@ impl Store {
             instancers: BTreeMap::new(),
             materials: BTreeMap::new(),
             material_ids: BTreeMap::new(),
+            freed: BTreeMap::new(),
             curves: BTreeMap::new(),
             counted: BTreeMap::new(),
             triangles: HashMap::new(),
@@ -441,6 +446,7 @@ impl Store {
 
     /// What changed since the last call.
     pub fn take_moved(&mut self) -> Moved {
+        self.freed.clear();
         std::mem::take(&mut self.moved)
     }
 
@@ -731,7 +737,17 @@ impl Store {
     /// A material's meshes may be in the store before it: both rewrite the
     /// draw records.
     pub fn insert_material(&mut self, path: String) -> u64 {
-        let id = self.new_id();
+        // Houdini 21's UsdImagingGL resyncs a material whose connections
+        // change, removing it and inserting it again at its path before
+        // the next frame: it keeps its id, the one exception to `next_id`,
+        // so `shade` keeps drawing its look until its new build lands.
+        let id = match self.freed.remove(&path) {
+            Some(id) => {
+                self.stats.inserted += 1;
+                id
+            }
+            None => self.new_id(),
+        };
         self.material_ids.insert(path.clone(), id);
         self.materials.insert(
             id,
@@ -751,6 +767,7 @@ impl Store {
             .remove(&id)
             .ok_or_else(|| stale("material", id))?;
         self.material_ids.remove(&material.path);
+        self.freed.insert(material.path, id);
         self.stats.removed += 1;
         self.moved.draws = true;
         Ok(())
@@ -1163,6 +1180,22 @@ mod tests {
         store.remove_mesh(a).unwrap();
         let b = store.insert_mesh("/a".into());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_material_inserted_again_in_the_frame_keeps_its_id() {
+        let mut store = Store::new();
+        let id = store.insert_material("/m".into());
+        store.remove_material(id).unwrap();
+        assert_eq!(
+            store.insert_material("/m".into()),
+            id,
+            "resynced in the frame"
+        );
+        store.remove_material(id).unwrap();
+        assert_ne!(store.insert_material("/n".into()), id, "another path");
+        store.take_moved();
+        assert_ne!(store.insert_material("/m".into()), id, "a frame later");
     }
 
     #[test]

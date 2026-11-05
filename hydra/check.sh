@@ -24,7 +24,8 @@
 # Last it renders hydra/scenes/cube.usda and painted.usda through
 # UsdImagingGL in hython on the same display (hydra/engine.py), as usdview
 # renders, and checks that the host sees Pika's stats through Hydra's render
-# stats and clay where a material is still being built.
+# stats, clay where a material is first being built and the material as it
+# was while an edit's build is out.
 #
 # Materials need the bake tool, built against Houdini 22 whichever Houdini
 # hosts the delegate (BAKE_HFS), and the shaders it generates go to a cache
@@ -229,7 +230,7 @@ first=${fixtures[0]}
 
 DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" \
     "$ROOT/hydra/scenes/painted.usda" >"$OUT/engine.log" 2>&1 ||
-    fail "the host does not see Pika's stats, or a pending material is not clay (see $OUT/engine.log)"
+    fail "the host does not see Pika's stats, or a pending material is not clay or as it was (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

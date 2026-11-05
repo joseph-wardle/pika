@@ -6,7 +6,9 @@
 )
 
 # cube.usda's cube under a material, for hydra/engine.py: it is drawn clay,
-# as cube.usda's is, until the material's build lands.
+# as cube.usda's is, until the material's build lands. The surface's diffuse
+# colour is then connected to the green node, a structural edit, and the
+# cube keeps its red look until that build lands.
 def Xform "world"
 {
     def Mesh "cube" (prepend apiSchemas = ["MaterialBindingAPI"])
@@ -39,6 +41,13 @@ def Xform "world"
                 color3f inputs:diffuseColor = (0.8, 0.1, 0.1)
                 float inputs:roughness = 1
                 token outputs:surface
+            }
+
+            def Shader "green"
+            {
+                uniform token info:id = "ND_convert_vector3_color3"
+                float3 inputs:in = (0.1, 0.8, 0.1)
+                color3f outputs:out
             }
         }
     }

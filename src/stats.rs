@@ -66,7 +66,7 @@ pub struct Frame {
     pub compiled: usize,
     /// Textures the bake tool baked for this frame.
     pub baked: usize,
-    /// Materials whose build is out, drawn clay.
+    /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
 

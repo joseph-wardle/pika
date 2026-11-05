@@ -3,8 +3,8 @@
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by a
 //! headlight. A material is built off the render thread (`build`) and drawn
-//! clay until its build lands; a value edit writes its block in place and
-//! rebinds its samplers.
+//! clay until its first build lands, and as it was until an edit's does; a
+//! value edit writes its block in place and rebinds its samplers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -31,8 +31,9 @@ pub struct Shade {
     textures: Textures,
     /// By document hash.
     surfaces: BTreeMap<u64, Surface>,
-    /// By the store's material id; a material whose build is out has no
-    /// entry, and is drawn clay.
+    /// By the store's material id; a material whose first build is out
+    /// has no entry, and is drawn clay, and one whose edit's build is out
+    /// keeps the entry it had, drawn as it was until the build lands.
     materials: BTreeMap<u64, Uniforms>,
     /// The materials that failed to build, each warned of once when it
     /// did; `update` tries one again only when its network moves or the
@@ -84,7 +85,7 @@ pub struct Update {
     pub compiled: usize,
     /// Textures the bake tool baked, likewise.
     pub baked: usize,
-    /// Materials whose build is out, drawn clay.
+    /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
 
@@ -118,7 +119,7 @@ impl Shade {
 
     /// Rewrites the block of each material whose network changed its
     /// values alone, and submits a build of each whose structure, textures
-    /// or, when the texture cap `cap` changed, cap did, to be drawn clay
+    /// or, when the texture cap `cap` changed, cap did, drawn as it was
     /// until it lands; installs the builds that landed, loading their
     /// textures; then writes every material's eye and headlight from
     /// `camera`. A material that cannot be built is warned of and drawn
@@ -216,9 +217,9 @@ impl Shade {
     }
 
     /// Rewrites material `id`'s block from `network` when it keeps its
-    /// document, textures and cap, else submits its build and drops it,
-    /// drawn clay until the build lands. A network with no surface leaves
-    /// the material drawn clay.
+    /// document, textures and cap, else submits its build, leaving the
+    /// material as it was, clay before its first, until the build lands.
+    /// A network with no surface leaves the material drawn clay.
     fn material(&mut self, id: u64, network: &Network) -> Result<(), String> {
         let Some(document) = material::document(network)? else {
             self.builder.forget(id);
@@ -243,7 +244,6 @@ impl Shade {
                 return uniforms.bind(&mut self.textures, surface, &document, network);
             }
         }
-        self.materials.remove(&id);
         let held = self.surfaces.contains_key(&document.hash);
         (self.builder).submit(id, document, network.clone(), self.cap, held)
     }
