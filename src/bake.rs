@@ -333,9 +333,6 @@ struct Job {
     document: Document,
     network: Network,
     cap: u32,
-    /// Whether the renderer holds the document's surface, so the job skips
-    /// its compile.
-    held: bool,
 }
 
 /// A finished job, with what the frame installing it needs.
@@ -368,7 +365,7 @@ impl Built {
     /// `network`'s build, run now on this thread: Pika's own networks are
     /// built before the first frame, with no textures and so no cap.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
-        let result = build(bake, &document, &network, 0, false, &|| true);
+        let result = build(bake, &document, &network, 0, &|| true);
         Self {
             id: 0,
             generation: 0,
@@ -382,8 +379,8 @@ impl Built {
 
 pub struct Output {
     pub manifest: Manifest,
-    /// The surface's SPIR-V and reflection, unless the renderer holds it.
-    pub compiled: Option<shader::Compiled>,
+    /// The surface's SPIR-V and reflection.
+    pub compiled: shader::Compiled,
     /// What the textures were baked from, and the textures, in the
     /// manifest's order.
     pub sources: Vec<Source>,
@@ -432,15 +429,13 @@ impl Builder {
     }
 
     /// Queues a build of material `id`'s `network`, whose document is
-    /// `document`, under the texture cap `cap`; `held` says the renderer
-    /// holds the document's surface already.
+    /// `document`, under the texture cap `cap`.
     pub fn submit(
         &mut self,
         id: u64,
         document: Document,
         network: Network,
         cap: u32,
-        held: bool,
     ) -> Result<(), String> {
         let generation = self.latest.submit(id);
         let job = Job {
@@ -449,7 +444,6 @@ impl Builder {
             document,
             network,
             cap,
-            held,
         };
         (self.jobs.send(job)).map_err(|_| "the build workers have exited".to_string())
     }
@@ -565,14 +559,7 @@ fn work(
         // A panic here would leave the material pending for good, with no
         // frame to report it: it is the build's failure, warned of like one.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            build(
-                bake,
-                &job.document,
-                &job.network,
-                job.cap,
-                job.held,
-                &wanted,
-            )
+            build(bake, &job.document, &job.network, job.cap, &wanted)
         }))
         .unwrap_or_else(|payload| {
             let message = (payload.downcast_ref::<&str>().copied())
@@ -596,14 +583,14 @@ fn work(
 
 /// Generates `document`'s stages, bakes and reads each texture `network`
 /// gives it, under the cap `cap`, while `wanted` says the build still is,
-/// and then, unless `held`, compiles its surface: a texture that cannot
-/// be read fails the build before the compile is paid for.
+/// and then compiles its surface, which the cache answers once any
+/// material of the document has: a texture that cannot be read fails the
+/// build before the compile is paid for.
 fn build(
     bake: &Bake,
     document: &Document,
     network: &Network,
     cap: u32,
-    held: bool,
     wanted: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
     let generated = bake.generate(document)?;
@@ -628,11 +615,7 @@ fn build(
             .map_err(|e| format!("{path}'s {input}: {e}"))?;
         textures.push(baked);
     }
-    let compiled = if held {
-        None
-    } else {
-        Some(shader::surface(&generated.dir)?)
-    };
+    let compiled = shader::surface(&generated.dir)?;
     Ok(Output {
         manifest: generated.manifest,
         compiled,
@@ -851,7 +834,14 @@ mod tests {
                 cap: 0,
                 result: Ok(Output {
                     manifest: uniforms::tests::fixture_manifest(),
-                    compiled: None,
+                    compiled: shader::Compiled {
+                        shader: shader::Shader {
+                            slangc_version: String::new(),
+                            spirv: Vec::new(),
+                        },
+                        reflection: String::new(),
+                        fresh: false,
+                    },
                     sources: Vec::new(),
                     textures: vec![Baked {
                         path: "ramp".into(),

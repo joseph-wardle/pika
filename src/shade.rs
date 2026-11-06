@@ -7,6 +7,7 @@
 //! was until an edit's does; a value edit writes its block in place and
 //! rebinds its samplers.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
@@ -268,15 +269,15 @@ impl Shade {
                 return uniforms.bind(&mut self.textures, surface, document, network);
             }
         }
-        let held = self.surfaces.contains_key(&document.hash);
-        (self.builder).submit(id, document.clone(), network.clone(), cap, held)
+        (self.builder).submit(id, document.clone(), network.clone(), cap)
     }
 
     /// Installs a build that landed: its surface into `surfaces` unless
-    /// held, its uniforms, and its textures, loaded now into `textures`
-    /// with their uploads recorded into `cb`, unless the ones not loaded
-    /// yet would take the process past the device's memory budget; counts
-    /// into `update` what the build did.
+    /// another material's build put it there, its uniforms, and its
+    /// textures, loaded now into `textures` with their uploads recorded
+    /// into `cb`, unless the ones not loaded yet would take the process
+    /// past the device's memory budget; counts into `update` what the
+    /// build did.
     fn install(
         device: &gpu::Device,
         surfaces: &mut BTreeMap<u64, Surface>,
@@ -287,15 +288,16 @@ impl Shade {
     ) -> Result<Uniforms, String> {
         let output = built.result?;
         let hash = built.document.hash;
-        if let Some(compiled) = output.compiled
-            && !surfaces.contains_key(&hash)
-        {
-            update.compiled += usize::from(compiled.fresh);
-            let layout = uniforms::layout(&compiled.reflection)?;
-            let surface = Surface::new(device, &compiled.shader.spirv, output.manifest, layout)?;
-            surfaces.insert(hash, surface);
-        }
-        let surface = &surfaces[&hash];
+        let surface = match surfaces.entry(hash) {
+            Entry::Occupied(existing) => existing.into_mut(),
+            Entry::Vacant(entry) => {
+                let compiled = output.compiled;
+                update.compiled += usize::from(compiled.fresh);
+                let layout = uniforms::layout(&compiled.reflection)?;
+                let spirv = &compiled.shader.spirv;
+                entry.insert(Surface::new(device, spirv, output.manifest, layout)?)
+            }
+        };
         update.baked += output.textures.iter().filter(|b| b.fresh).count();
         // A refused allocation leaves the device usable, but ALab filling
         // it at the 1024 cap lost the device, so the budget is never crossed.
