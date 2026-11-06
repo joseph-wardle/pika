@@ -20,68 +20,16 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
-use crate::abi;
 use crate::cache;
-use crate::material::{self, Document, Network, Node, Source};
+use crate::material::{self, Document, Network, Source};
 use crate::shader;
 use crate::texture::{self, Texture};
-use crate::uniforms;
+use crate::uniforms::{self, Manifest};
 
 // Built by `make -C bake` from the checkout, like the shaders.
 const TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/bake");
 // The library files that shadow Houdini's, which the generator inlines.
 const LIBRARIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bake/libraries");
-
-/// What the pixel stage expects of the renderer, as the tool lists it:
-/// its public uniforms and textures.
-#[derive(Debug, Default, PartialEq)]
-pub struct Manifest {
-    pub materialx: String,
-    pub uniforms: Vec<Uniform>,
-    pub textures: Vec<String>,
-}
-
-/// A public uniform: its variable, its MaterialX type and the initial
-/// value the generator gave it, as MaterialX writes values ("0, 0, 1").
-#[derive(Debug, PartialEq)]
-pub struct Uniform {
-    pub name: String,
-    pub kind: String,
-    pub initial: String,
-}
-
-pub fn manifest(text: &str) -> Result<Manifest, String> {
-    let mut m = Manifest::default();
-    for line in text.lines() {
-        let mut words = line.splitn(3, ' ');
-        let (Some(kind), Some(second)) = (words.next(), words.next()) else {
-            return Err(format!("the manifest line {line:?} has no value"));
-        };
-        let rest = words.next().unwrap_or("");
-        match kind {
-            "materialx" => m.materialx = second.to_owned(),
-            "texture" => m.textures.push(second.to_owned()),
-            "uniform" => {
-                let mut rest = rest.splitn(2, ' ');
-                let name = rest.next().unwrap_or("").to_owned();
-                if name.is_empty() {
-                    return Err(format!("the manifest line {line:?} names no variable"));
-                }
-                m.uniforms.push(Uniform {
-                    name,
-                    kind: second.to_owned(),
-                    initial: rest.next().unwrap_or("").to_owned(),
-                });
-            }
-            _ => {
-                return Err(format!(
-                    "the manifest line {line:?} is not one the renderer knows"
-                ));
-            }
-        }
-    }
-    Ok(m)
-}
 
 /// The tool's output for one document: the directory holding its
 /// `pixel.slang`, `surface.slang` and `manifest`.
@@ -352,7 +300,7 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
             return Err(format!("{} has no {name}", dir.display()));
         }
     }
-    manifest(&text)
+    uniforms::manifest(&text)
 }
 
 fn tool() -> Command {
@@ -627,10 +575,10 @@ fn work(
             )
         }))
         .unwrap_or_else(|payload| {
-            Err(format!(
-                "its build panicked: {}",
-                abi::panic_message(payload.as_ref())
-            ))
+            let message = (payload.downcast_ref::<&str>().copied())
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("unknown payload");
+            Err(format!("its build panicked: {message}"))
         });
         let built = Built {
             id: job.id,
@@ -662,11 +610,11 @@ fn build(
     let sources = sources(&generated.manifest, document, network)?;
     let mut textures = Vec::new();
     let mut missing = Vec::new();
-    for (name, source) in generated.manifest.textures.iter().zip(&sources) {
+    for source in &sources {
         if !wanted() {
             return Err("its build was superseded".into());
         }
-        let (path, _, input) = reader(name, document, network)?;
+        let (path, input) = (&source.node, &source.input);
         if source.file.is_empty() {
             missing.push(format!(
                 "{path}'s {input}: its path is empty or did not resolve"
@@ -715,57 +663,17 @@ pub fn sources(
     document: &Document,
     network: &Network,
 ) -> Result<Vec<Source>, String> {
-    let mut sources = Vec::new();
-    for name in &manifest.textures {
-        let (path, node, input) = reader(name, document, network)?;
-        let source = material::source(node, input).map_err(|e| format!("{path}'s {input} {e}"))?;
-        sources.push(source);
-    }
-    Ok(sources)
-}
-
-/// The node of `network`, by path, and its input as the store names it,
-/// that `manifest`'s texture `name` stands for, by `document`'s node
-/// order.
-fn reader<'a>(
-    name: &'a str,
-    document: &'a Document,
-    network: &'a Network,
-) -> Result<(&'a str, &'a Node, &'a str), String> {
-    let (index, input) = uniforms::node_input(name)?;
-    let path = (document.nodes.get(index))
-        .ok_or_else(|| format!("{name} names a node the document lacks"))?;
-    let node = &network.nodes[path];
-    Ok((path, node, material::store_input(node, input)))
+    (manifest.textures.iter())
+        .map(|name| {
+            let (path, node, input) = document.reader(network, name)?;
+            material::source(path, node, input)
+        })
+        .collect()
 }
 
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-
-    /// The bake tool wrote this for bake/fixtures/network.mtlx.
-    pub const FIXTURE: &str = include_str!("../bake/fixtures/network.manifest");
-
-    #[test]
-    fn reads_the_fixture_manifest() {
-        let m = manifest(FIXTURE).unwrap();
-        assert_eq!(m.materialx, "1.39.5");
-        assert_eq!(m.textures, ["n1_file"]);
-        assert_eq!(m.uniforms.len(), 21);
-        assert_eq!(
-            m.uniforms[4],
-            Uniform {
-                name: "n1_fallback".into(),
-                kind: "color4".into(),
-                initial: "0, 0, 0, 1".into(),
-            }
-        );
-        assert_eq!(m.uniforms[0].initial, "", "a struct uniform has no value");
-
-        assert!(manifest("uniform float").is_err());
-        assert!(manifest("varying vector2 i_geomprop_st").is_err());
-        assert!(manifest("sampler n1_file").is_err());
-    }
 
     #[test]
     fn library_files_are_listed_in_order() {
@@ -942,7 +850,7 @@ pub mod tests {
                 network: network.clone(),
                 cap: 0,
                 result: Ok(Output {
-                    manifest: manifest(FIXTURE).unwrap(),
+                    manifest: uniforms::tests::fixture_manifest(),
                     compiled: None,
                     sources: Vec::new(),
                     textures: vec![Baked {

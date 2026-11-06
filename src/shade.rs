@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use ash::vk;
 
-use crate::bake::{self, Bake, Builder, Built, Manifest};
+use crate::bake::{self, Bake, Builder, Built};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Network, Source};
@@ -21,7 +21,7 @@ use crate::stats;
 use crate::store::{Moved, Store};
 use crate::target;
 use crate::texture::{Binding, Textures};
-use crate::uniforms::{self, Layout};
+use crate::uniforms::{self, Layout, Manifest};
 use crate::view::View;
 
 pub struct Shade {
@@ -570,7 +570,7 @@ impl Uniforms {
     /// Writes the set: the block, and each of `self.textures`, in the
     /// surface's order, through a sampler of the address modes its node
     /// in `network`, by `document`'s node order, and its file say
-    /// (`uniforms::address_modes`). The GPU must not be reading the set.
+    /// (`material::address_modes`). The GPU must not be reading the set.
     fn bind(
         &self,
         textures: &mut Textures,
@@ -582,11 +582,10 @@ impl Uniforms {
         assert_eq!(self.textures.len(), layout.textures.len());
         let mut bindings: Vec<(Binding, vk::Sampler)> = Vec::new();
         for (name, path) in surface.manifest.textures.iter().zip(&self.textures) {
-            let (index, _) = uniforms::node_input(name)?;
-            let node = &network.nodes[&document.nodes[index]];
+            let (node_path, node, _) = document.reader(network, name)?;
             let binding = textures.binding(path)?;
-            let modes = uniforms::address_modes(node, binding.wrap)
-                .map_err(|e| format!("{}'s {e}", document.nodes[index]))?;
+            let modes = material::address_modes(node, binding.wrap)
+                .map_err(|e| format!("{node_path}'s {e}"))?;
             bindings.push((binding, textures.sampler(modes)?));
         }
         let buffer_info = [vk::DescriptorBufferInfo::default()

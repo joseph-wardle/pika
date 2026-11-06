@@ -5,9 +5,59 @@
 
 use std::collections::BTreeMap;
 
-use crate::bake::Manifest;
 use crate::json::{self, Json};
-use crate::material::{self, Document, Network, Node, Value};
+use crate::material::{Document, Network, Value};
+
+/// What the pixel stage expects of the renderer, as the tool lists it:
+/// its public uniforms and textures.
+#[derive(Debug, Default, PartialEq)]
+pub struct Manifest {
+    pub materialx: String,
+    pub uniforms: Vec<Uniform>,
+    pub textures: Vec<String>,
+}
+
+/// A public uniform: its variable, its MaterialX type and the initial
+/// value the generator gave it, as MaterialX writes values ("0, 0, 1").
+#[derive(Debug, PartialEq)]
+pub struct Uniform {
+    pub name: String,
+    pub kind: String,
+    pub initial: String,
+}
+
+pub fn manifest(text: &str) -> Result<Manifest, String> {
+    let mut m = Manifest::default();
+    for line in text.lines() {
+        let mut words = line.splitn(3, ' ');
+        let (Some(kind), Some(second)) = (words.next(), words.next()) else {
+            return Err(format!("the manifest line {line:?} has no value"));
+        };
+        let rest = words.next().unwrap_or("");
+        match kind {
+            "materialx" => m.materialx = second.to_owned(),
+            "texture" => m.textures.push(second.to_owned()),
+            "uniform" => {
+                let mut rest = rest.splitn(2, ' ');
+                let name = rest.next().unwrap_or("").to_owned();
+                if name.is_empty() {
+                    return Err(format!("the manifest line {line:?} names no variable"));
+                }
+                m.uniforms.push(Uniform {
+                    name,
+                    kind: second.to_owned(),
+                    initial: rest.next().unwrap_or("").to_owned(),
+                });
+            }
+            _ => {
+                return Err(format!(
+                    "the manifest line {line:?} is not one the renderer knows"
+                ));
+            }
+        }
+    }
+    Ok(m)
+}
 
 /// The uniform block's byte layout and its textures' bindings, in
 /// descriptor set 0, as slangc laid them out.
@@ -155,23 +205,12 @@ pub fn pack(
         let words = if uniform.name.starts_with("geomprop_") {
             shape.initial(&uniform.initial)?
         } else {
-            let (index, input) = node_input(&uniform.name)?;
-            let path = (document.nodes.get(index)).ok_or_else(|| {
-                format!("uniform {} names a node the document lacks", uniform.name)
-            })?;
-            let node = &network.nodes[path];
-            match node.params.get(material::store_input(node, input)) {
-                // An address mode's token is its integer; useMetadata, the
-                // file's own, leaves the nodedef's (the sampler reads the
-                // file: `address_modes`).
-                Some(Value::Text(token)) if material::ADDRESS_MODES.contains(&input) => {
-                    match address_mode(token).map_err(|e| format!("{path}'s {input} {e}"))? {
-                        Some(mode) => vec![mode],
-                        None => shape.initial(&uniform.initial)?,
-                    }
-                }
-                // Any other text value (a geomprop name) went into the
-                // document, and the generator resolved it into the initial.
+            let (path, node, input) = document.reader(network, &uniform.name)?;
+            match node.params.get(input) {
+                // A text value went into the document, and the generator
+                // resolved it into the initial (a geomprop name), or is an
+                // address mode, which only the sampler reads
+                // (`material::address_modes`).
                 Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
                 Some(value) => shape
                     .words(value)
@@ -183,61 +222,6 @@ pub fn pack(
         }
     }
     Ok(())
-}
-
-/// The node and input a generated variable stands for: `n1_file` is node
-/// 1's `file`.
-pub fn node_input(name: &str) -> Result<(usize, &str), String> {
-    (name.strip_prefix('n'))
-        .and_then(|rest| rest.split_once('_'))
-        .and_then(|(i, input)| Some((i.parse::<usize>().ok()?, input)))
-        .ok_or_else(|| format!("uniform {name} is not a node's input"))
-}
-
-/// The address modes `node` samples its texture through, u then v, in the
-/// image nodedefs' enumeration: its UsdUVTexture `wrapS`/`wrapT` or image
-/// `uaddressmode`/`vaddressmode` tokens. A UsdUVTexture's `useMetadata`,
-/// USD's default when none is authored, asks for the `file`'s own, as the
-/// bake read them (`texture::Texture::wrap`); an image node authoring none
-/// is periodic, its nodedef's initial value.
-pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
-    let usd = node.node_type == "UsdUVTexture";
-    let mode = |names: [&str; 2], axis: usize| -> Result<u32, String> {
-        let authored = names.iter().find_map(|name| match node.params.get(*name) {
-            Some(Value::Text(token)) => Some((name, token)),
-            _ => None,
-        });
-        match authored {
-            Some((name, token)) => {
-                let mode = address_mode(token).map_err(|e| format!("{name} {e}"))?;
-                Ok(mode.unwrap_or(file[axis]))
-            }
-            None if usd => Ok(file[axis]),
-            None => Ok(2),
-        }
-    };
-    Ok([
-        mode(["wrapS", "uaddressmode"], 0)?,
-        mode(["wrapT", "vaddressmode"], 1)?,
-    ])
-}
-
-/// The integer the image nodedefs' enumeration gives the address mode
-/// `token`, USD's names included (black is constant, repeat periodic), or
-/// none for `useMetadata`, which asks for the file's own.
-pub fn address_mode(token: &str) -> Result<Option<u32>, String> {
-    Ok(Some(match token {
-        "black" | "constant" => 0,
-        "clamp" => 1,
-        "repeat" | "periodic" => 2,
-        "mirror" => 3,
-        "useMetadata" => return Ok(None),
-        _ => {
-            return Err(format!(
-                "is {token}, not black (constant), clamp, repeat (periodic), mirror or useMetadata"
-            ));
-        }
-    }))
 }
 
 /// A packable MaterialX type: how many 4-byte words, of what.
@@ -301,17 +285,40 @@ impl Shape {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
-    use crate::bake;
-    use crate::material::tests::fixture;
+    use crate::material::{self, tests::fixture};
+
+    /// The bake tool wrote this for bake/fixtures/network.mtlx.
+    pub const MANIFEST: &str = include_str!("../bake/fixtures/network.manifest");
 
     // slangc's reflection of the tool's output for bake/fixtures/network.mtlx,
     // copied from bake/check.sh's run when slangc or the libraries change.
     const REFLECTION: &str = include_str!("../bake/fixtures/network.reflection.json");
 
-    fn manifest() -> Manifest {
-        bake::manifest(bake::tests::FIXTURE).unwrap()
+    pub fn fixture_manifest() -> Manifest {
+        manifest(MANIFEST).unwrap()
+    }
+
+    #[test]
+    fn reads_the_fixture_manifest() {
+        let m = fixture_manifest();
+        assert_eq!(m.materialx, "1.39.5");
+        assert_eq!(m.textures, ["n1_file"]);
+        assert_eq!(m.uniforms.len(), 21);
+        assert_eq!(
+            m.uniforms[4],
+            Uniform {
+                name: "n1_fallback".into(),
+                kind: "color4".into(),
+                initial: "0, 0, 0, 1".into(),
+            }
+        );
+        assert_eq!(m.uniforms[0].initial, "", "a struct uniform has no value");
+
+        assert!(manifest("uniform float").is_err());
+        assert!(manifest("varying vector2 i_geomprop_st").is_err());
+        assert!(manifest("sampler n1_file").is_err());
     }
 
     #[test]
@@ -345,7 +352,7 @@ mod tests {
 
     #[test]
     fn pack_takes_the_store_values_over_the_initial_ones() {
-        let (manifest, l, network) = (manifest(), layout(REFLECTION).unwrap(), fixture());
+        let (manifest, l, network) = (fixture_manifest(), layout(REFLECTION).unwrap(), fixture());
         let document = material::document(&network).unwrap().unwrap();
         let mut bytes = vec![0; l.size];
         pack(&manifest, &l, &document, &network, &mut bytes).unwrap();
@@ -361,30 +368,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // The wrap token is packed as the nodedef's integer; wrapT,
-        // unauthored, keeps the initial value.
-        assert_eq!(bytes[l.offsets["n1_wrapS"]], 1);
-        assert_eq!(bytes[l.offsets["n1_wrapT"]], 2);
-        let tex = &network.nodes["tex"];
-        assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
-        let mut metadata = tex.clone();
-        (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
-        assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
-        let mut edited = network.clone();
-        let wrap_s = |network: &mut Network, token: &str| {
-            let tex = network.nodes.get_mut("tex").unwrap();
-            tex.params.insert("wrapS".into(), Value::Text(token.into()));
-        };
-        wrap_s(&mut edited, "mirror");
-        pack(&manifest, &l, &document, &edited, &mut bytes).unwrap();
-        assert_eq!(bytes[l.offsets["n1_wrapS"]], 3);
-        wrap_s(&mut edited, "bogus");
-        let error = pack(&manifest, &l, &document, &edited, &mut bytes).unwrap_err();
-        assert!(error.starts_with("tex's wrapS is bogus"), "{error}");
+        // An address mode is the sampler's alone: its uniform, which the
+        // generated code never reads, keeps the initial value.
+        assert_eq!(bytes[l.offsets["n1_wrapS"]], 2);
 
         // The generator's node for a default geomprop keeps its initial
         // value; any other uniform is a node's input.
-        let mut extra = bake::manifest(bake::tests::FIXTURE).unwrap();
+        let mut extra = fixture_manifest();
         let mut extended = layout(REFLECTION).unwrap();
         extended
             .offsets
@@ -394,14 +384,14 @@ mod tests {
             .insert("u_viewPosition".into(), extended.size + 4);
         extended.size += 8;
         let mut bytes = vec![0; extended.size];
-        extra.uniforms.push(bake::Uniform {
+        extra.uniforms.push(Uniform {
             name: "geomprop_UV0_index".into(),
             kind: "integer".into(),
             initial: "7".into(),
         });
         pack(&extra, &extended, &document, &network, &mut bytes).unwrap();
         assert_eq!(bytes[l.size], 7);
-        extra.uniforms.push(bake::Uniform {
+        extra.uniforms.push(Uniform {
             name: "u_viewPosition".into(),
             kind: "vector3".into(),
             initial: "0, 0, 0".into(),
@@ -422,40 +412,5 @@ mod tests {
         );
         roughness(&mut wide, Value::Int(1));
         assert!(pack(&manifest, &l, &document, &wide, &mut bytes).is_err());
-    }
-
-    #[test]
-    fn address_modes_follow_the_node_then_the_file() {
-        let network = fixture();
-        let tex = &network.nodes["tex"];
-        // wrapT, unauthored, is useMetadata: the file's, as is a wrapS
-        // saying so.
-        assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
-        let mut metadata = tex.clone();
-        (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
-        assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
-        // An image node authoring none is periodic; its tokens are the
-        // enumeration's own.
-        let mut image = tex.clone();
-        image.node_type = "ND_image_color3".into();
-        image.params.remove("wrapS");
-        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [2, 2]);
-        (image.params).insert("uaddressmode".into(), Value::Text("constant".into()));
-        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [0, 2]);
-        (image.params).insert("vaddressmode".into(), Value::Text("bogus".into()));
-        let error = address_modes(&image, [3, 0]).unwrap_err();
-        assert!(error.starts_with("vaddressmode is bogus"), "{error}");
-        let surface = &network.nodes["surface"];
-        assert_eq!(
-            address_modes(surface, [3, 0]).unwrap(),
-            [2, 2],
-            "no texture: periodic"
-        );
-    }
-
-    #[test]
-    fn node_input_reads_the_generated_name() {
-        assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
-        assert!(node_input("u_viewPosition").is_err());
     }
 }

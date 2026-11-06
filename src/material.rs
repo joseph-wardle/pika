@@ -13,9 +13,6 @@ use std::fmt::Write;
 
 use crate::cache;
 
-/// A texture as a node's input declares it: the file, the colour space the
-/// file is in, the encoding the bake tool stores it with, and, when the
-/// file is missing, the value the node draws instead.
 /// `HdMaterialNetwork2`: shader nodes by path, and the node whose output is
 /// the material's surface, when it has one.
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -77,8 +74,15 @@ impl Network {
     }
 }
 
+/// A texture as a node's input declares it: the file, the colour space the
+/// file is in, the encoding the bake tool stores it with, and, when the
+/// file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
 pub struct Source {
+    /// The node reading it, by path.
+    pub node: String,
+    /// The input it is read through, as the store names it.
+    pub input: String,
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
@@ -89,24 +93,26 @@ pub struct Source {
     pub default: Vec<f32>,
 }
 
-/// The texture `node`'s input `input` reads. The encoding follows the
-/// node's output type: colour compresses as BC7 sRGB, or as plain BC7 when
-/// its space is raw; a float as BC4; a vector3 or vector4 as BC7; a
-/// vector2 stays float, so a coordinate map stays exact (the oracles' uv
-/// ramp). The space is the asset's `colorSpace` metadata, else
+/// The texture `node`, at `path`, reads through its input `input`. The
+/// encoding follows the node's output type: colour compresses as BC7
+/// sRGB, or as plain BC7 when its space is raw; a float as BC4; a vector3
+/// or vector4 as BC7; a vector2 stays float, so a coordinate map stays
+/// exact (the oracles' uv ramp). The space is the asset's `colorSpace` metadata, else
 /// UsdUVTexture's `sourceColorSpace`, in OpenColorIO's names, else `auto`
 /// for a colour and raw for the rest.
-pub fn source(node: &Node, input: &str) -> Result<Source, String> {
+pub fn source(path: &str, node: &Node, input: &str) -> Result<Source, String> {
     let file = match node.params.get(input) {
-        Some(Value::Asset(path)) => path.clone(),
-        Some(_) => return Err(format!("{input} is not an asset")),
-        None => return Err(format!("{input} has no asset")),
+        Some(Value::Asset(file)) => file.clone(),
+        Some(_) => return Err(format!("{path}'s {input} is not an asset")),
+        None => return Err(format!("{path}'s {input} has no asset")),
     };
     let kind = match node.node_type.as_str() {
         "UsdUVTexture" => "color4",
         name => (name.strip_prefix("ND_image_"))
             .or_else(|| name.strip_prefix("ND_tiledimage_"))
-            .ok_or_else(|| format!("{name} reads a texture Pika does not know how to bake"))?,
+            .ok_or_else(|| {
+                format!("{path} is {name}, which reads a texture Pika does not know how to bake")
+            })?,
     };
     let declared = (node.params.get(&format!("colorSpace:{input}")))
         .or_else(|| node.params.get("sourceColorSpace"));
@@ -124,7 +130,12 @@ pub fn source(node: &Node, input: &str) -> Result<Source, String> {
         "float" => "single",
         "vector2" => "float",
         "vector3" | "vector4" => "data",
-        _ => return Err(format!("{} reads a texture of type {kind}", node.node_type)),
+        _ => {
+            return Err(format!(
+                "{path} is {}, which reads a texture of type {kind}",
+                node.node_type
+            ));
+        }
     };
     // The delegate hands over the path as it resolved, so a file that does
     // not exist arrives empty, as one never authored does, and the node's
@@ -137,6 +148,8 @@ pub fn source(node: &Node, input: &str) -> Result<Source, String> {
         _ => vec![0.0; 4],
     };
     Ok(Source {
+        node: path.to_owned(),
+        input: input.to_owned(),
         file,
         space,
         encoding,
@@ -159,13 +172,84 @@ pub struct Document {
     pub texcoord: String,
 }
 
+impl Document {
+    /// The node of `network`, by path, and its input as the store names
+    /// it, that the generated variable `name` stands for.
+    pub fn reader<'a>(
+        &'a self,
+        network: &'a Network,
+        name: &'a str,
+    ) -> Result<(&'a str, &'a Node, &'a str), String> {
+        let (index, input) = node_input(name)?;
+        let path = (self.nodes.get(index))
+            .ok_or_else(|| format!("{name} names a node the document lacks"))?;
+        let node = &network.nodes[path];
+        Ok((path, node, store_input(node, input)))
+    }
+}
+
+/// The node and input a generated variable stands for: `n1_file` is node
+/// 1's `file`.
+fn node_input(name: &str) -> Result<(usize, &str), String> {
+    (name.strip_prefix('n'))
+        .and_then(|rest| rest.split_once('_'))
+        .and_then(|(i, input)| Some((i.parse::<usize>().ok()?, input)))
+        .ok_or_else(|| format!("{name} is not a node's input"))
+}
+
 /// The inputs that choose a texture's sampler, u then v: a UsdUVTexture's
 /// and an image node's. The generator compiles a text input in, but these
 /// land as integer uniforms the generated code never reads, since the
 /// sampler addresses the texture, so they are values: left out of the
-/// document, packed from their tokens (`uniforms::pack`) and read into the
-/// sampler (`uniforms::address_modes`), and an edit to one compiles nothing.
+/// document and read into the sampler (`address_modes`), and an edit to
+/// one compiles nothing.
 pub const ADDRESS_MODES: [&str; 4] = ["wrapS", "wrapT", "uaddressmode", "vaddressmode"];
+
+/// The address modes `node` samples its texture through, u then v, in the
+/// image nodedefs' enumeration: its UsdUVTexture `wrapS`/`wrapT` or image
+/// `uaddressmode`/`vaddressmode` tokens. A UsdUVTexture's `useMetadata`,
+/// USD's default when none is authored, asks for the `file`'s own, as the
+/// bake read them (`texture::Texture::wrap`); an image node authoring none
+/// is periodic, its nodedef's initial value.
+pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
+    let usd = node.node_type == "UsdUVTexture";
+    let mode = |names: [&str; 2], axis: usize| -> Result<u32, String> {
+        let authored = names.iter().find_map(|name| match node.params.get(*name) {
+            Some(Value::Text(token)) => Some((name, token)),
+            _ => None,
+        });
+        match authored {
+            Some((name, token)) => {
+                let mode = address_mode(token).map_err(|e| format!("{name} {e}"))?;
+                Ok(mode.unwrap_or(file[axis]))
+            }
+            None if usd => Ok(file[axis]),
+            None => Ok(2),
+        }
+    };
+    Ok([
+        mode(["wrapS", "uaddressmode"], 0)?,
+        mode(["wrapT", "vaddressmode"], 1)?,
+    ])
+}
+
+/// The integer the image nodedefs' enumeration gives the address mode
+/// `token`, USD's names included (black is constant, repeat periodic), or
+/// none for `useMetadata`, which asks for the file's own.
+fn address_mode(token: &str) -> Result<Option<u32>, String> {
+    Ok(Some(match token {
+        "black" | "constant" => 0,
+        "clamp" => 1,
+        "repeat" | "periodic" => 2,
+        "mirror" => 3,
+        "useMetadata" => return Ok(None),
+        _ => {
+            return Err(format!(
+                "is {token}, not black (constant), clamp, repeat (periodic), mirror or useMetadata"
+            ));
+        }
+    }))
+}
 
 /// A USD shader id and the MaterialX nodedef that implements it, with the
 /// inputs and outputs whose names differ and the inputs the nodedef lacks.
@@ -700,8 +784,10 @@ pub mod tests {
     fn sources_follow_the_node_and_its_colour_space() {
         let tex = &fixture().nodes["tex"];
         assert_eq!(
-            source(tex, "file").unwrap(),
+            source("tex", tex, "file").unwrap(),
             Source {
+                node: "tex".into(),
+                input: "file".into(),
                 file: "bake/fixtures/swatch.png".into(),
                 space: "raw".into(),
                 encoding: "data",
@@ -714,28 +800,28 @@ pub mod tests {
             .params
             .insert("file".into(), Value::Asset(String::new()));
         assert_eq!(
-            source(&missing, "file").unwrap().default,
+            source("tex", &missing, "file").unwrap().default,
             [0.0, 0.0, 0.0, 1.0]
         );
         (missing.params).insert("fallback".into(), Value::Float(vec![0.2, 0.4, 0.6, 1.0]));
         assert_eq!(
-            source(&missing, "file").unwrap().default,
+            source("tex", &missing, "file").unwrap().default,
             [0.2, 0.4, 0.6, 1.0]
         );
         missing.node_type = "ND_image_float".into();
-        assert_eq!(source(&missing, "file").unwrap().default, [0.0; 4]);
+        assert_eq!(source("tex", &missing, "file").unwrap().default, [0.0; 4]);
         missing
             .params
             .insert("default".into(), Value::Float(vec![0.5]));
-        assert_eq!(source(&missing, "file").unwrap().default, [0.5]);
+        assert_eq!(source("tex", &missing, "file").unwrap().default, [0.5]);
         let mut srgb = tex.clone();
         srgb.params.remove("colorSpace:file");
         srgb.params
             .insert("sourceColorSpace".into(), Value::Text("sRGB".into()));
-        let s = source(&srgb, "file").unwrap();
+        let s = source("tex", &srgb, "file").unwrap();
         assert_eq!((s.space.as_str(), s.encoding), ("srgb_texture", "color"));
         srgb.params.remove("sourceColorSpace");
-        assert_eq!(source(&srgb, "file").unwrap().space, "auto");
+        assert_eq!(source("tex", &srgb, "file").unwrap().space, "auto");
 
         // Declaring nothing, a colour is sRGB when 8-bit, the rest raw.
         let image = |kind: &str| {
@@ -743,7 +829,7 @@ pub mod tests {
             node.node_type = format!("ND_image_{kind}");
             node.params.remove("colorSpace:file");
             node.params.remove("sourceColorSpace");
-            source(&node, "file").map(|s| (s.space, s.encoding))
+            source("tex", &node, "file").map(|s| (s.space, s.encoding))
         };
         assert_eq!(image("vector2"), Ok(("raw".into(), "float")));
         assert_eq!(image("float"), Ok(("raw".into(), "single")));
@@ -752,8 +838,8 @@ pub mod tests {
         assert!(image("matrix33").is_err());
         let mut other = tex.clone();
         other.node_type = "ND_triplanarprojection_color3".into();
-        assert!(source(&other, "file").is_err());
-        assert!(source(tex, "st").is_err());
+        assert!(source("tex", &other, "file").is_err());
+        assert!(source("tex", tex, "st").is_err());
     }
 
     #[test]
@@ -763,5 +849,51 @@ pub mod tests {
         st.params
             .insert("varname".into(), Value::Text("a<\"b\">&c".into()));
         assert!(text(&quoted).contains("value=\"a&lt;&quot;b&quot;&gt;&amp;c\""));
+    }
+
+    #[test]
+    fn address_modes_follow_the_node_then_the_file() {
+        let network = fixture();
+        let tex = &network.nodes["tex"];
+        // wrapT, unauthored, is useMetadata: the file's, as is a wrapS
+        // saying so.
+        assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
+        let mut metadata = tex.clone();
+        (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
+        assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
+        // An image node authoring none is periodic; its tokens are the
+        // enumeration's own.
+        let mut image = tex.clone();
+        image.node_type = "ND_image_color3".into();
+        image.params.remove("wrapS");
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [2, 2]);
+        (image.params).insert("uaddressmode".into(), Value::Text("constant".into()));
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [0, 2]);
+        (image.params).insert("vaddressmode".into(), Value::Text("bogus".into()));
+        let error = address_modes(&image, [3, 0]).unwrap_err();
+        assert!(error.starts_with("vaddressmode is bogus"), "{error}");
+        let surface = &network.nodes["surface"];
+        assert_eq!(
+            address_modes(surface, [3, 0]).unwrap(),
+            [2, 2],
+            "no texture: periodic"
+        );
+    }
+
+    #[test]
+    fn reader_reads_the_generated_name() {
+        let network = fixture();
+        let doc = document(&network).unwrap().unwrap();
+        let (path, node, input) = doc.reader(&network, "n1_file").unwrap();
+        assert_eq!(
+            (path, node.node_type.as_str(), input),
+            ("tex", "UsdUVTexture", "file")
+        );
+        assert!(
+            doc.reader(&network, "n9_file")
+                .unwrap_err()
+                .contains("lacks")
+        );
+        assert!(doc.reader(&network, "u_viewPosition").is_err());
     }
 }

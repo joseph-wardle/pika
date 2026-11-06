@@ -21,7 +21,7 @@ pub struct Texture {
     /// The wrap modes the source's metadata states, u then v, in the image
     /// nodedefs' enumeration (black, clamp, periodic, mirror), black where
     /// it states none: what a UsdUVTexture's useMetadata reads
-    /// (`uniforms::address_modes`).
+    /// (`material::address_modes`).
     pub wrap: [u32; 2],
     /// The layer of each tile, which the shader reads (`mx_texture.slang`).
     pub tiles: Vec<u32>,
@@ -172,7 +172,7 @@ struct Image {
 /// whose range is the table's own length, which the shader reads to tell a
 /// plain image from a set (a buffer itself is at least 16 bytes), and the
 /// wrap modes its file states (`Texture::wrap`), which choose its sampler
-/// with its node's (`uniforms::address_modes`).
+/// with its node's (`material::address_modes`).
 #[derive(Clone, Copy)]
 pub struct Binding {
     pub view: vk::ImageView,
@@ -340,7 +340,7 @@ fn range(texture: &Texture) -> vk::ImageSubresourceRange {
 pub struct Textures {
     device: ash::Device,
     images: BTreeMap<PathBuf, Image>,
-    /// By address modes, u then v (`uniforms::address_modes`).
+    /// By address modes, u then v (`material::address_modes`).
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
     staging: Vec<Buffer>,
 }

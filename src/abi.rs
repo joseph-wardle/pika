@@ -203,7 +203,7 @@ fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
 }
 
 /// What a caught panic said: its payload as text.
-pub fn panic_message(payload: &(dyn Any + Send)) -> String {
+fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
         .map(|s| s.to_string())
