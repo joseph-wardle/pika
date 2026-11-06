@@ -28,7 +28,7 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
-// The lights a view has: the headlight, until the lights milestone.
+// The lights a view has: the headlight.
 static const int LIGHTS = 1;
 
 // A light as the generated light loop reads it (shaders/frame.slang):

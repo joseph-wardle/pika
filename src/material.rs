@@ -93,14 +93,9 @@ pub struct Document {
     pub hash: u64,
     /// The store's node paths in document order: node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
-    /// The float2 primvar the surface reads: the one its
-    /// UsdPrimvarReader_float2 and ND_geompropvalue_vector2 nodes name,
-    /// else `st`, which is UV0, the texcoord MaterialX's nodes read by
-    /// default (an image's texcoord, UsdUVTexture's st, the texcoord
-    /// node), as Storm and Karma read it. Only the nodedefs say which
-    /// inputs read UV0, so every network naming no primvar carries `st`,
-    /// and the bake tool refuses a surface reading UV0 beside another
-    /// name.
+    /// The float2 primvar the surface reads: the one its reader nodes
+    /// name, else `st`, which is UV0 (bake/generate.cpp says which inputs
+    /// read UV0 and refuses it beside another name).
     pub texcoord: String,
 }
 

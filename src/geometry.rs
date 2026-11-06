@@ -992,12 +992,9 @@ fn triangulate(
         None => point_corners(&faces, topology.left_handed, first.point, tables),
     }
 
-    // A faceVarying texcoord's corners agreeing on a value are one vertex,
-    // as the delegate welds a subdivided mesh's before refining it, so the
-    // tangent pass sums the triangles on both sides of an edge the faces
-    // agree across; where they disagree, the seam keeps them apart. Each
-    // corner reads the first corner's value equal to its own (bitwise, as
-    // the delegate compares); the point is the vertex's own.
+    // A faceVarying texcoord's corners agreeing on a value (bitwise, as the
+    // delegate welds a subdivided mesh's) are one vertex, so the tangent
+    // pass sums both sides of the edge; a seam keeps them apart.
     let welded_texcoord: Vec<u32> = match texcoord {
         Some(t) if t.refined.is_none() && t.interpolation == Interpolation::FaceVarying => {
             let mut first_of: HashMap<[u32; 2], u32> = HashMap::new();
@@ -1023,7 +1020,6 @@ fn triangulate(
             (tables.vertices.len() - 1 - first_vertex) as u32
         })
     };
-    // Which value a corner reads, by the primvar's interpolation.
     let index =
         |interpolation: Interpolation, point: i32, c: usize, face: usize| match interpolation {
             Interpolation::Vertex | Interpolation::Varying => point as usize,
@@ -1031,7 +1027,6 @@ fn triangulate(
             Interpolation::Uniform => face,
             Interpolation::Constant => 0,
         };
-    // A refined texcoord says which refined value each refined corner reads.
     let texcoord_index = |t: &Texcoord, point: i32, c: usize, face: usize| match &t.refined {
         Some(r) => r.face_vertex_indices[c] as usize,
         None if t.interpolation == Interpolation::FaceVarying => welded_texcoord[c] as usize,

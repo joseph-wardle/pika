@@ -69,9 +69,7 @@ if "$BAKE" generate "$OUT/primvar.mtlx" "$OUT/primvar" 2> "$OUT/primvar.err"; th
     fail "primvar: a surface reading a color3 primvar generated"
 fi
 grep -q "i_geomprop_displayColor" "$OUT/primvar.err" || fail "primvar: the error does not name the varying"
-# UV0, the texcoord the nodes read by default, is the primvar st: a texture
-# whose st is unconnected reads the mesh's texcoord, and a surface reading
-# UV0 beside another primvar has no vertex stage.
+# UV0 is st; UV0 beside another primvar has no vertex stage.
 sed -e '/<input name="st" nodename="n2" \/>/d' "$ROOT/bake/fixtures/network.mtlx" > "$OUT/uv0.mtlx"
 "$BAKE" generate "$OUT/uv0.mtlx" "$OUT/uv0" || fail "uv0: a surface reading UV0 failed to generate"
 grep -q "o.texcoord_0 = p.texcoord;" "$OUT/uv0/surface.slang" ||

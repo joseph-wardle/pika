@@ -1,35 +1,19 @@
 #!/usr/bin/env bash
 # The delegate's check, run on a GPU host with Houdini (not in CI).
 #
-# Builds the delegate for HFS into a directory of its own under
-# target/hydra/check, named after the Houdini, where everything else the run
-# writes goes too, so the check of one Houdini runs beside the other's and
-# neither touches the delegate target/hydra holds for usdview. Then it runs
-# hydra/image.py, which renders each scene in hydra/images/ in husk (color as
-# HdFormatFloat32Vec4, depth and normal) and in usdrecord (HdFormatFloat16Vec4
-# color), and compares the images with a ray cast from USD. usdrecord draws on
-# a private Xvnc display, started here. The validation layer must be on and
-# report nothing from Pika.
-#
-# Then it syncs each scene in hydra/fixtures/ for two frames, RENDERS at a
-# time as hydra/image.py renders, running the
-# scene's .py script (if any) on husk's stage between them, and compares
-# Pika's store dump with the scene's .dump, which was written by hand. Each
-# run's PIKA_STATS file must summarise with hydra/stats.py, with every GPU
-# pass timed and the driver's memory budget read, frame 2 must have
-# compiled a surface and baked a texture only where the edit calls for one,
-# a material must be pending while its build is out and not after, and a
-# material that cannot be built must be warned of once.
-#
-# Last it renders hydra/scenes/cube.usda and painted.usda through
-# UsdImagingGL in hython on the same display (hydra/engine.py), as usdview
-# renders, and checks that the host sees Pika's stats through Hydra's render
-# stats, clay where a material is first being built and the material as it
-# was while an edit's build is out.
+# Builds the delegate for HFS into target/hydra/check/<houdini>/, where
+# everything the run writes goes, so the two Houdinis' checks run side by
+# side and neither touches target/hydra. Then, in order: hydra/image.py
+# (husk and usdrecord renders against the ray cast), the store-dump
+# fixtures in hydra/fixtures/ (two frames each, the scene's .py edit between
+# them, RENDERS at a time; see fixture() for the header keys), and
+# hydra/engine.py (UsdImagingGL in hython, as usdview renders). usdrecord
+# and hython draw on a private Xvnc display started here. The validation
+# layer must be on and report nothing from Pika.
 #
 # Materials need the bake tool, built against Houdini 22 whichever Houdini
-# hosts the delegate (BAKE_HFS), and the shaders it generates go to a cache
-# of this run's own.
+# hosts the delegate (BAKE_HFS); the shaders it generates go to a cache of
+# this run's own.
 #
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
 #   HFS=/opt/hfs22.0 VULKAN_SDK=... hydra/check.sh   # the other Houdini, at the same time
@@ -161,28 +145,25 @@ fixture() {
         fail "$name: the summary has no GPU readback time, so a pass went untimed"
     grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
         fail "$name: the summary has no memory budget"
-    # An edit to a value, a wrap mode among them, or an asset path compiles
+    # An edit to a value, a wrap mode or an asset path among them, compiles
     # nothing; one to the network's structure, the primvar a reader names
     # included, compiles its surface; a texture is baked once per file. The
-    # scene's header states its counts: "# compiles: A then B" and
-    # "# bakes: A then B" are the surfaces compiled and textures baked for
-    # frame 1 and for the edit, 0 when absent, and "# warnings: N" the
-    # material warnings, a material that cannot be built or a texture file
-    # that is missing, each warned of once when its build lands, though
-    # husk renders a frame more than once, and built again by its repair
-    # with no second warning; "# warned: M" is one warning's message, after
-    # the material's path, which must name what to fix and say what is
-    # drawn; "# budget: B" renders with B bytes standing in for the
-    # device's memory budget (PIKA_BUDGET). The scenes that
-    # edit a material are each other's control, and each must compile within
-    # its frame, so a counter that never moves fails. Every material with a
-    # surface in frame 1's expected store is built off the render thread and
-    # pending on the first frame, built or failed, and none is pending on the
-    # last; a scene without one is the control. An edit that touches a
-    # primvar the materials do not read hands over no mesh bytes the store
-    # holds already ("# redundant bytes: 0"); the other edits are not held to
-    # a count, since Hydra resends what a changed topology or instancing
-    # covers.
+    # scene's header states what the run must count ("# key: value"; the
+    # default, when absent, in brackets):
+    #   compiles: A then B   surfaces compiled for frame 1, then for the edit (0 then 0)
+    #   bakes: A then B      textures baked, likewise (0 then 0)
+    #   warnings: N          material warnings, each once though husk renders a
+    #                        frame more than once, and none for a repair (0)
+    #   warned: M            one warning's text after "material ", which must
+    #                        name what to fix and say what is drawn (unchecked)
+    #   redundant bytes: R   mesh bytes the edit handed over that the store held;
+    #                        0 for an edit touching no primvar the materials read
+    #                        (unchecked: Hydra resends what a changed topology covers)
+    #   budget: B            bytes standing in for the device's memory budget,
+    #                        PIKA_BUDGET (none)
+    # The scenes that edit a material are each other's control. Every material
+    # with a surface in frame 1's expected store must be pending on the first
+    # frame and none on the last; a scene without one is the control.
     local compiles bakes warnings warned redundant built c1 b1 c2 b2
     compiles=$(expected "$name" compiles "0 then 0")
     bakes=$(expected "$name" bakes "0 then 0")

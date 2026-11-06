@@ -56,12 +56,8 @@ pub struct Shade {
 }
 
 /// The baked bytes a frame installs, past which the builds that landed
-/// wait for the next. Each texture's image, memory and staging buffer are
-/// created and its levels copied on the render thread, about 0.8 ms a MiB
-/// on the RTX 4070 Ti SUPER: ALab's 2.4 GB at the 512 cap, installed as
-/// they landed, took frames of half a second (p95 of the install frames'
-/// CPU side 488 ms); at this bound, 57 ms, over 113 frames, converging in
-/// the same 32 s, which the workers' reads set.
+/// wait for the next: creating and copying a texture's levels costs the
+/// render thread about 0.8 ms a MiB on the RTX 4070 Ti SUPER.
 const INSTALL: u64 = 32 << 20;
 
 /// One shader structure: the pipelines of every material sharing a document.
@@ -295,10 +291,8 @@ impl Shade {
         }
         let surface = &surfaces[&hash];
         update.baked += output.textures.iter().filter(|b| b.fresh).count();
-        // An allocation the driver refuses returns an error and leaves the
-        // device usable (measured on the 580 driver: allocations fail at
-        // the budget, and submits after one succeed), but ALab filling the
-        // device at the 1024 cap lost it, so the budget is never crossed.
+        // A refused allocation leaves the device usable, but ALab filling
+        // it at the 1024 cap lost the device, so the budget is never crossed.
         let fresh: u64 = (output.textures.iter())
             .filter(|b| !textures.holds(&b.path))
             .map(|b| b.texture.bytes())

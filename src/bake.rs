@@ -356,7 +356,6 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
     manifest(&text)
 }
 
-/// The tool, ready for its job's arguments.
 fn tool() -> Command {
     let mut command = Command::new(TOOL);
     // The tool's rpath beats a host's library path for its own libraries
@@ -598,12 +597,9 @@ fn current(jobs: &Mutex<BTreeMap<u64, u64>>, id: u64, generation: u64) -> bool {
 }
 
 /// A worker: builds each job from the queue until the builder is dropped.
-/// A job the material has resubmitted since, under another cap or
-/// network, is skipped, or dropped between its textures: a scene's every
-/// material is queued at the cap usdview opens with before the artist sets
-/// another, and ALab's at no cap would be built through for hours first.
-/// One dropped mid-build finishes it; the cache's temporary names keep a
-/// build cut short by the process exiting from leaving a partial entry.
+/// A job the material has resubmitted since is skipped, or dropped between
+/// its textures; one dropped mid-build finishes it, and the cache's
+/// temporary names keep a build cut short by exit from leaving a partial entry.
 fn work(
     bake: &Bake,
     queue: &Mutex<Receiver<Job>>,
@@ -699,11 +695,9 @@ fn build(
     })
 }
 
-/// What an image whose file is missing is drawn as: a texel of `default`,
-/// the node's fallback, zero past its channels, bound in place of the
-/// texture as MaterialX's render library binds one for a file it cannot
-/// load, since the image node's own default input goes unread by the Slang
-/// implementation it shares with GLSL. Materials of one fallback share it.
+/// What an image whose file is missing is drawn as: a 1×1 texel of
+/// `default`, bound in place of the texture, since the Slang image
+/// implementation never reads the node's own `default` input.
 fn fallback(default: &[f32]) -> Baked {
     let mut texel = [0.0; 4];
     let n = default.len().min(4);

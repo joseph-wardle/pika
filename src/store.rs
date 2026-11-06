@@ -1018,7 +1018,6 @@ impl fmt::Display for Mesh {
             Some(Some(t)) => {
                 let (name, kind) = (&t.name, t.interpolation.token());
                 write!(f, "  texcoord {name} {kind} {}", t.values.len())?;
-                // Its refinement is dumped by size, as the faces' is.
                 if let Some(r) = &t.refined {
                     write!(f, " refined values {}", r.stencils.count())?;
                 }

@@ -45,109 +45,23 @@ What the reference encodes:
   its moved geometric normal points to, reversed when left-handed; seen from
   behind, the normal is negated.
 - Color is the material's albedo under the headlight plus its emission,
-  with alpha 1: the albedo times the normal against the direction toward
-  the eye, clamped, the normal turned toward the eye first as MaterialX's
-  BSDFs turn it, under a headlight of π along the camera's axis, as
-  src/uniforms.rs sets it, so a facing surface shows its albedo. A mesh
-  with no material bound is clay: albedo 18 % grey, no emission. An
-  OpenPBR surface (hydra/images/pbr.usda) has albedo base_weight ×
-  base_color and emission emission_luminance × emission_color, a Standard
-  Surface base × base_color and emission × emission_color, unauthored
-  inputs at the defaults the host's libraries give them; their specular
-  weight must be 0 and no other input authored or connected, since the
-  rest has no closed form. A UsdPreviewSurface (hydra/images/wrapped.usda)
-  has albedo diffuseColor and emission emissiveColor, a value or the rgb a
-  UsdUVTexture samples, under the specular workflow with a black
-  specularColor and nothing else authored; MaterialX layers a Schlick lobe
-  with F90 white over its diffuse, so it is checked within 30° of facing.
-  An OpenPBR surface is checked only within 35°
-  of facing the eye: at specular weight 0 its dielectric layer has an IOR
-  of 1, but MaterialX still attenuates the base by the layer's directional
-  albedo, an analytic fit with F90 = 1 whatever the IOR, which takes 0.2 %
-  of the base at facing (within the colour tolerance for a base under 1),
-  nothing near 25° and 13 % at 67°, so a pixel seen from further round is
-  refused. Either surface's normal (Standard Surface's normal, OpenPBR's
-  geometry_normal) may be a normalmap node of an image node's vector3
-  sample at a primvar (hydra/images/normalmap.usda), which perturbs the
-  normal it is lit with: the sample, each channel × 2 − 1 (a zero sample
-  standing for (0, 0, 1)), taken as x along the tangent, y along the
-  bitangent and z along the normal, normalized, the frame interpolated
-  across the face from its vertices' and each direction normalized first.
-  A vertex's tangent is Lengyel's, as shaders/tangent.slang computes it:
-  the directions its mesh's st u and v increase in, solved from each of
-  its drawn triangles' edges and st deltas in the mesh's own space and
-  summed over them, a vertex being a unique point, normal and st, as Pika
-  welds them, a faceVarying st by value, so an edge whose faces agree on
-  it sums both faces' triangles and a seam keeps them apart
-  (hydra/images/bent.usda); the tangent is the u direction made orthogonal to the
-  vertex's normal, and the bitangent the normal's cross with it, negated
-  where the mapping is mirrored (the summed v direction is against the
-  cross). Both move with the mesh's transform, not its normals' inverse
-  transpose. A triangle without st area adds nothing, and a vertex whose
-  u directions cancel, or without st, gets the y axis crossed with its
-  normal (the x axis when the normal is near y), normalized, and
-  handedness 1. The map is read as Pika bakes a vector3 image, at 8 bits,
-  so the fixture's values are multiples of 1/255. A mesh
-  bound to a MaterialX surface whose
-  emission is a uniform EDF of an image sampled at a primvar
-  (hydra/images/textured.usda) emits the image's sample at the hit's
-  primvar, the one the material's reader names (hydra/images/primvar.usda)
-  or st when the image's texcoord is unconnected or a texcoord node of
-  index 0: UV0, the texcoord MaterialX's nodes read by default, which
-  Storm and Karma read as st (hydra/images/uv0.usda),
-  under the image node's address modes, or a UsdUVTexture's wrapS and
-  wrapT, read at the frame (hydra/images/rewrapped.usda), whose
-  useMetadata, USD's default when none is authored, is what the file's
-  wrapmodes metadata states, black where it states none, as Storm reads it
-  (hydra/images/wrapped.usda); with st (0, 0) at the image's
-  bottom-left corner as USD and MaterialX read it, the channels padded
-  with 0 to three. The sample is bilinear within a level, at the level the
-  hit's footprint picks as a Vulkan sampler with linear mip filtering and
-  no anisotropy picks it (hydra/images/mips.usda): the footprint is the st
-  step from the pixel's centre to the next pixel's, right and down, on the
-  hit's plane; the longer step, in texels of level 0, is 2^λ, and levels
-  ⌊λ⌋ and ⌈λ⌉ are blended by λ's fraction, level 0 alone where the image is
-  magnified. The levels are the file's stored ones from the first within
-  the texture cap, the render setting pika:textureCap, none unless the
-  render settings prim authors it (hydra/images/capped.usda); the
-  reference refuses a level the file lacks and a cap no stored level fits.
-  Pika warns of the textures the cap shrank in one line, with their count,
-  once every material has landed. husk
-  reads the setting off the prim; usdrecord passes no render settings, so
-  it draws under the default, and the reference knows. The step is the
-  GPU's own on a surface facing the camera, where st is affine on screen;
-  no scene minifies any other kind.
-  A file naming <UDIM> is a set of
-  tiles (hydra/images/udim.usda): the hit samples tile 1001 + ⌊u⌋ + 10 ⌊v⌋
-  at (u − ⌊u⌋, v − ⌊v⌋), under the same modes within the tile, 0 where the
-  set has no such file, as USD numbers tiles and Storm and Karma read
-  them. A color3 image's sample
-  (hydra/images/colorspace.usda) is emitted in the working space, linear
-  Rec.709, from the colour space its file input declares: srgb_texture
-  decoded by the sRGB curve, acescg by the matrix from AP1 through CIE
-  XYZ, with a Bradford adaptation from the ACES white to D65, to Rec.709,
-  as the ACES configs define it, raw as read, and none (auto, USD's
-  default) as sRGB for an 8-bit source and as read for a float one, the
-  texels converted before they are filtered. A vector2, vector3 or float
-  image declaring none is read as it is whatever its depth, as Karma reads
-  it: the auto rule is for colour. Other spaces are refused. On a subdivided mesh the primvar is
-  refined with the points (hydra/images/subdivided.usda): a vertex primvar
-  by the points' rules, a faceVarying one by the same rules over its own
-  values, welded by point and value first, so it is smooth across an edge
-  whose faces agree on it and creased along a seam, as USD's default
-  faceVaryingLinearInterpolation, cornersPlus1, reads it; a value of a
-  single face stays put. That is the reading of Houdini's subdivision,
-  Karma and Blender; Storm keeps every corner apart, which interpolates
-  each cage face linearly. Seams ending inside the surface or meeting
-  another seam or a boundary at a vertex are refused. A mesh bound to a material whose surface
-  shader names a MaterialX nodedef (ND_...) the host's libraries do not
-  define emits pink, (1, 0, 1), as Pika draws a material it cannot build,
-  when the host hands the network over: husk and UsdImaging's scene-index
-  path do, UsdImaging's legacy path drops a network whose surface shader
-  the shader registry does not know, so Pika sees no surface and draws
-  clay. usdrecord takes the path USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX
-  names, off by default in Houdini 21 and on in 22. Other materials are
-  refused, not approximated.
+  alpha 1: albedo × max(0, n · toward the eye), the normal turned toward
+  the eye first as MaterialX's BSDFs turn it, under a headlight of π along
+  the camera's axis (src/view.rs), so a facing surface shows its albedo.
+  `look` says which materials have a closed form: clay (none bound), pink
+  (a nodedef the libraries lack, when the host delivers it), a
+  UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
+  Surface with its specular off (`lit`, within the facing angle each
+  holds), and an unlit emission of an image sampled at a primvar. The
+  sample (`sample`) is trilinear at the level a Vulkan sampler picks from
+  the pixel's st footprint, from the file's stored levels within
+  pika:textureCap, in the working space from the declared colour space
+  (`working`), under the node's address modes (`wrap`, `metadata`), a
+  <UDIM> set by USD's tile numbering, st (0, 0) at the bottom-left; a
+  normal map (`lit`'s normal) perturbs the normal over the tangent frame
+  `frame` and `tangent_sums` compute as shaders/tangent.slang does; a
+  subdivided mesh's primvar is refined with its points (`texcoord`,
+  `weld`). Other materials and spaces are refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared

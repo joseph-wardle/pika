@@ -1,16 +1,10 @@
 // The bake tool: the one Pika process that links MaterialX and OpenImageIO.
 // The renderer spawns it, so neither library loads into the host beside the
-// host's own.
-//
-//   bake generate <document.mtlx> <out>
-//   bake libraries
-//   bake texture <space> <encoding> <cap> <config> <out> (<tile> <file>)...
-//
-// The cap is the texels a side the texture's levels are kept under, 0 for
-// none. generate turns a material's document into Slang (generate.cpp), and
-// libraries lists what it reads beyond the document; texture turns an
-// image, or the UDIM tiles listed after the output, into the one file the
-// renderer uploads (texture.cpp). The renderer keys its cache on every
+// host's own. generate turns a material's document into Slang
+// (generate.cpp), and libraries lists what it reads beyond the document;
+// texture turns an image, or the UDIM tiles listed after the output, into
+// the one file the renderer uploads (texture.cpp), its levels kept under
+// the cap, texels a side, 0 for none. The renderer keys its cache on every
 // argument and on that listing, so the tool decides nothing.
 
 #include "bake.h"
