@@ -1,0 +1,58 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A mesh carries one texcoord: the float2 primvar its material reads, by
+# name. This one has two, perfuv and st, and its material reads perfuv; the
+# edit makes it read st, which reaches the mesh through its material.
+#
+# compiles: 1 then 1
+# bakes: 1 then 0
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:perfuv = [(0.5, 0.5), (1, 0.5), (0.5, 1)] (interpolation = "faceVarying")
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </world/mtl/paint/tex.outputs:rgb>
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
+                float2 inputs:st.connect = </world/mtl/paint/uv.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "uv"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "perfuv"
+                float2 outputs:result
+            }
+        }
+    }
+}

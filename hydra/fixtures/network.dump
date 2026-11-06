@@ -1,0 +1,86 @@
+sync 1
+material /world/mtl/paint
+  surface surface
+  node st UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+  node surface UsdPreviewSurface
+    roughness float 0.25
+    typeName:roughness text "float"
+    typeName:useSpecularWorkflow text "int"
+    useSpecularWorkflow int 1
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    scale float 2 2 2 1
+    typeName:file text "asset"
+    typeName:scale text "float4"
+    typeName:wrapS text "token"
+    wrapS text "clamp"
+    st from st result
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 3
+    0 0
+    1 0
+    0 1
+sync 2
+material /world/mtl/paint
+  surface surface
+  node st UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+  node surface UsdPreviewSurface
+    roughness float 0.75
+    typeName:roughness text "float"
+    typeName:useSpecularWorkflow text "int"
+    useSpecularWorkflow int 1
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/mips.exr"
+    scale float 2 2 2 1
+    typeName:file text "asset"
+    typeName:scale text "float4"
+    typeName:wrapS text "token"
+    wrapS text "clamp"
+    st from st result
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 3
+    0 0
+    1 0
+    0 1

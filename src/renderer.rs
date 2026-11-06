@@ -1,6 +1,6 @@
 //! What one Hydra render delegate owns on the Rust side: its scene store,
-//! the GPU copy of its meshes, its Vulkan device, the target it reads
-//! frames back from and the stats it measures.
+//! the GPU copy of its meshes and materials, its Vulkan device, the target
+//! it reads frames back from and the stats it measures.
 
 use std::fs::File;
 use std::io::Write;
@@ -14,6 +14,7 @@ use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::raster::{self, Raster};
+use crate::shade::Shade;
 use crate::shader;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
@@ -80,10 +81,18 @@ pub struct Frame<'a> {
     pub normal: Option<Aov<'a>>,
     /// The render tags the pass draws; none means every tag.
     pub render_tags: Vec<String>,
+    /// The texels a texture's longest side is capped at (`pika:textureCap`),
+    /// 0 for none.
+    pub texture_cap: u32,
 }
 
 /// The depth AOV's clear value: OpenGL's far plane.
 const FAR: f32 = 1.0;
+
+/// How long a call with nothing else to draw waits for a material build to
+/// land: a host rendering until converged draws the clay frames at most
+/// this often, and usdview stays responsive while paused.
+const WAIT: Duration = Duration::from_millis(16);
 
 // One instance per process: plugins are never unloaded, and each render
 // delegate's device borrows it.
@@ -99,6 +108,7 @@ pub struct Renderer {
     /// The camera's view: its constants, records and visible instances.
     view: Option<View>,
     raster: Raster,
+    shade: Shade,
     cull: Cull,
     geometry: Geometry,
     device: gpu::Device<'static>,
@@ -120,6 +130,7 @@ struct Inputs {
     projection: [f64; 16],
     clear_color: [f32; 4],
     render_tags: Vec<String>,
+    texture_cap: u32,
 }
 
 /// The render buffers a frame is placed into, known only by size, data
@@ -162,6 +173,10 @@ struct Pending {
     moved: usize,
     transforms: usize,
     latent: bool,
+    compiled: usize,
+    baked: usize,
+    loaded: u64,
+    pending: usize,
 }
 
 impl Renderer {
@@ -186,6 +201,7 @@ impl Renderer {
         let cull = shader::compile("cull")?;
         let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
+        let tangent = shader::compile("tangent")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -193,8 +209,9 @@ impl Renderer {
             target: None,
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
+            shade: Shade::new(&device)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv)?,
+            geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
             dump,
@@ -224,7 +241,7 @@ impl Renderer {
 
     /// Draws the store's meshes into the frame's data window, and copies
     /// each bound AOV into its render buffer. Returns whether the buffers
-    /// now hold this frame.
+    /// now hold this frame, with no material build still out.
     ///
     /// While frames change, each call hands back the frame before and leaves
     /// this one on the GPU, so its work overlaps the host's until the next
@@ -232,7 +249,8 @@ impl Renderer {
     /// series with the host's own frame time. A call that changes nothing
     /// waits for the frame on the GPU and returns true. A frame drawn into
     /// buffers that do not hold the last frame is drawn and waited for at
-    /// once.
+    /// once. While a build is out, a call that changes nothing else waits
+    /// `WAIT` for it, draws if it landed and returns false.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
@@ -289,6 +307,7 @@ impl Renderer {
             projection: frame.projection,
             clear_color: frame.clear_color,
             render_tags: frame.render_tags.clone(),
+            texture_cap: frame.texture_cap,
         };
         let mut aovs = [frame.color, frame.depth, frame.normal];
 
@@ -297,8 +316,11 @@ impl Renderer {
             self.collect(pending, &buffers, &mut aovs)?;
         }
         let placed = self.placed.as_ref();
-        if moved == Moved::default() && placed == Some(&(buffers, inputs.clone())) {
-            return Ok(true);
+        if moved == Moved::default()
+            && placed == Some(&(buffers, inputs.clone()))
+            && !self.shade.builder.wait(WAIT)?
+        {
+            return Ok(self.shade.builder.is_empty());
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
@@ -315,6 +337,8 @@ impl Renderer {
         let update =
             self.geometry
                 .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
+        let shading =
+            (self.shade).update(&self.device, &self.store, &moved, inputs.texture_cap, cb)?;
         self.commands.mark("update")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
@@ -341,11 +365,17 @@ impl Renderer {
                 clears[1],
             ],
         );
-        if let (Some(geometry), Some(view)) = (&bound, view.as_deref()) {
+        let drawn = bound.as_ref().zip(view.as_deref());
+        if let Some((geometry, view)) = drawn {
             (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
-        target.end_rendering(cb);
         self.commands.mark("draw")?;
+        if let Some((geometry, view)) = drawn {
+            let groups = self.geometry.groups();
+            (self.shade).draw(cb, formats[0].0, target.area(), geometry, groups, view);
+        }
+        target.end_rendering(cb);
+        self.commands.mark("shade")?;
         let read = aovs.each_ref().map(Option::is_some);
         target.readback(cb, &read);
         self.commands.mark("readback")?;
@@ -362,13 +392,17 @@ impl Renderer {
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
             latent,
+            compiled: shading.compiled,
+            baked: shading.baked,
+            loaded: shading.loaded,
+            pending: shading.pending,
         };
         if latent {
             self.pending = Some(pending);
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(true)
+        Ok(self.shade.builder.is_empty())
     }
 
     /// Waits for the pending frame and copies it into `aovs`, if they are
@@ -414,6 +448,7 @@ impl Renderer {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
             targets: target.memory(),
+            materials: self.shade.memory(),
             vram_used,
             vram_budget,
         };
@@ -431,6 +466,10 @@ impl Renderer {
             moved: pending.moved,
             transforms: pending.transforms,
             latent: pending.latent,
+            compiled: pending.compiled,
+            baked: pending.baked,
+            loaded: pending.loaded,
+            pending: pending.pending,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

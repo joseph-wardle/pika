@@ -20,6 +20,7 @@ mesh /world/tri
     0 0 1
     0 0 1
     0 0 -1
+  texcoord none
 sync 2
 mesh /world/tri
   render_tag geometry
@@ -42,3 +43,4 @@ mesh /world/tri
     0 0 -1
     0 0 -1
     0 0 1
+  texcoord none

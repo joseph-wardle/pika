@@ -1,0 +1,67 @@
+#usda 1.0
+(
+    doc = "One quad facing the camera, bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb sampled at its st, which runs half an image past the image on every side. The texture, bake/fixtures/acescg.exr, states no wrap mode; its wrapS and wrapT are repeat at frame 1 and clamp at frame 2. A wrap mode is a value, so the edit rewrites the material's block and rebinds its sampler without compiling (hydra/fixtures/rewrapped.usda counts that), and frame 2 must stretch the edge where frame 1 repeated. The texture is magnified, as the reference reads only the levels a file stores."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.8, -0.7, -5), (0.8, -0.7, -5), (0.8, 0.7, -5), (-0.8, 0.7, -5)]
+    texCoord2f[] primvars:st = [(-0.5, -0.5), (1.5, -0.5), (1.5, 1.5), (-0.5, 1.5)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </rewrapped>
+}
+
+def Material "rewrapped"
+{
+    token outputs:surface.connect = </rewrapped/surface.outputs:surface>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor = (0, 0, 0)
+        color3f inputs:emissiveColor.connect = </rewrapped/image.outputs:rgb>
+        int inputs:useSpecularWorkflow = 1
+        color3f inputs:specularColor = (0, 0, 0)
+        token outputs:surface
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @../../bake/fixtures/acescg.exr@ (colorSpace = "acescg")
+        token inputs:wrapS.timeSamples = {
+            1: "repeat",
+            2: "clamp",
+        }
+        token inputs:wrapT.timeSamples = {
+            1: "repeat",
+            2: "clamp",
+        }
+        float2 inputs:st.connect = </rewrapped/st.outputs:result>
+        float3 outputs:rgb
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "UsdPrimvarReader_float2"
+        string inputs:varname = "st"
+        float2 outputs:result
+    }
+}

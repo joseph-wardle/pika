@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    doc = "A strip of two quads bent along their shared edge, tilted toward the camera, under the normal map bake/fixtures/normal.exr. Its st is faceVarying: at frame 1 the right face's st is shifted, a seam along the edge, so each face keeps its own tangent there; at frame 2 both faces agree along it, so its vertices weld and their tangents sum the triangles of both faces. The right face's st is sheared, so a tangent summed over both faces differs from either face's own."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "bent" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4, 4]
+    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4]
+    point3f[] points = [(-1, -0.6, 0), (0, -0.6, 0.8), (1, -0.6, 0), (-1, 0.6, 0), (0, 0.6, 0.8), (1, 0.6, 0)]
+    texCoord2f[] primvars:st (
+        interpolation = "faceVarying"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (0.5, 0), (0.5, 1), (0, 1), (0.75, 0), (1.25, 0.4), (1.25, 1.4), (0.75, 1)],
+        2: [(0, 0), (0.5, 0), (0.5, 1), (0, 1), (0.5, 0), (1, 0.4), (1, 1.4), (0.5, 1)],
+    }
+    rel material:binding = </standard>
+    double3 xformOp:translate = (0, 0, -5)
+    float3 xformOp:rotateXYZ = (-20, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Material "standard"
+{
+    token outputs:surface.connect = </standard/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.8, 0.7, 0.6)
+        float inputs:specular = 0
+        float3 inputs:normal.connect = </standard/map.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "map"
+    {
+        uniform token info:id = "ND_normalmap_float"
+        float3 inputs:in.connect = </standard/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector3"
+        asset inputs:file = @../../bake/fixtures/normal.exr@
+        float2 inputs:texcoord.connect = </standard/st.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}

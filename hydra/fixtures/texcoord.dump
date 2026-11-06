@@ -1,0 +1,70 @@
+sync 1
+material /world/mtl/paint
+  surface surface
+  node surface UsdPreviewSurface
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    typeName:file text "asset"
+    st from uv result
+  node uv UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "perfuv"
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord perfuv faceVarying 3
+    0.5 0.5
+    1 0.5
+    0.5 1
+sync 2
+material /world/mtl/paint
+  surface surface
+  node surface UsdPreviewSurface
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    typeName:file text "asset"
+    st from uv result
+  node uv UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 3
+    0 0
+    1 0
+    0 1

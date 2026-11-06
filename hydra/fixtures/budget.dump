@@ -1,0 +1,63 @@
+sync 1
+material /world/mtl/skin
+  surface surface
+  node st UsdPrimvarReader_float2
+    typeName:varname text "string"
+    varname text "st"
+  node surface UsdPreviewSurface
+    diffuseColor from tex rgb
+  node tex UsdUVTexture
+    colorSpace:file text "raw"
+    file asset "bake/fixtures/swatch.png"
+    typeName:file text "asset"
+    st from st result
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/skin"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 3
+    0 0
+    1 0
+    0 1
+sync 2
+material /world/mtl/skin
+  surface surface
+  node surface UsdPreviewSurface
+    diffuseColor float 0.2 0.4 0.6
+    typeName:diffuseColor text "color3f"
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/skin"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord st faceVarying 3
+    0 0
+    1 0
+    0 1

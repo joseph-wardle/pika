@@ -1,48 +1,32 @@
-// The mesh pass: every mesh instance into the color, depth and normal AOVs.
-// Vertices are pulled from src/geometry.rs's buffers by address, and each
-// instance through the view's visible list (shaders/cull.slang); only the
-// index buffer and the view's draw records are bound.
+// The prepass: every mesh instance into the depth buffer and the depth and
+// normal AOVs, pulled through vertex.slang. The material pass draws the
+// same instances again with depth EQUAL, so its vertex stage must run the
+// same pull() and project() code: slangc 2026.9 ignores `precise` and has
+// no invariant attribute, and hydra/images shows holes if they diverge.
 
-#include "view.slang"
-
-[[vk::push_constant]]
-View *view;
-
-// A vertex's normal index when its normal is its point's smooth normal.
-static const uint SMOOTH = 0xffffffff;
+#include "vertex.slang"
 
 struct Varyings
 {
     float4 position : SV_Position;
-    float3 world : WORLD;
     float3 normal : NORMAL;
     nointerpolation uint flip : FLIP;
 };
 
-float3 load3(float *values, uint i)
-{
-    return float3(values[3 * i], values[3 * i + 1], values[3 * i + 2]);
-}
-
-// SV_VulkanVertexID and SV_VulkanInstanceID include the draw's vertex offset
-// and first instance, which select the mesh's vertices and its visible slot.
 [shader("vertex")]
 Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    uint2 v = view->vertices[vertex];
-    float4 *m = view->instances + 7 * view->visible[slot];
-    float4 p = float4(load3(view->points, v.x), 1);
-    float4 world = float4(dot(m[0], p), dot(m[1], p), dot(m[2], p), 1);
-    float3 n = v.y == SMOOTH ? load3(view->smooth, v.x) : load3(view->normals, v.y);
-
+    Vertex p = pull(vertex, slot);
     Varyings o;
-    o.position = project(view, world);
-    o.world = world.xyz;
-    o.normal = float3(dot(m[3].xyz, n), dot(m[4].xyz, n), dot(m[5].xyz, n));
-    o.flip = asuint(m[6].x) & 1;
+    o.position = p.position;
+    o.normal = p.normal;
+    o.flip = p.flip;
     return o;
 }
 
+// slangc 2026.9 numbers the outputs from 0 in declaration order, whatever
+// SV_Target says, so the color AOV keeps its slot here although the
+// pipeline's write mask leaves it to the material pass.
 struct Targets
 {
     float4 color : SV_Target0;
@@ -59,11 +43,9 @@ Targets fs(Varyings v, bool front : SV_IsFrontFace)
     // left-handed mesh or a mirroring transform reverses.
     if (front == (v.flip != 0))
         n = -n;
-    float3 toward = normalize(view->eye.xyz - v.world * view->eye.w);
-    float grey = saturate(dot(n, toward));
 
     Targets t;
-    t.color = float4(grey, grey, grey, 1);
+    t.color = float4(0);
     // Hydra's depth is OpenGL's window depth, 0 at the near plane.
     t.depth = 1 - v.position.z;
     t.normal = float4(n, 0);

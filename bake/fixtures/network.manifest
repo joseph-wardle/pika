@@ -1,0 +1,23 @@
+materialx 1.39.5
+uniform surfaceshader backsurfaceshader
+uniform displacementshader displacementshader1
+texture n1_file
+uniform integer n1_wrapS 2
+uniform integer n1_wrapT 2
+uniform color4 n1_fallback 0, 0, 0, 1
+uniform color4 n1_scale 1, 1, 1, 1
+uniform color4 n1_bias 0, 0, 0, 0
+uniform color3 n0_emissiveColor 0, 0, 0
+uniform integer n0_useSpecularWorkflow 0
+uniform color3 n0_specularColor 0, 0, 0
+uniform float n0_metallic 0
+uniform float n0_roughness 0.5
+uniform float n0_clearcoat 0
+uniform float n0_clearcoatRoughness 0.01
+uniform float n0_opacity 1
+uniform integer n0_opacityMode 0
+uniform float n0_opacityThreshold 0
+uniform float n0_ior 1.5
+uniform vector3 n0_normal 0, 0, 1
+uniform float n0_displacement 0
+uniform float n0_occlusion 1

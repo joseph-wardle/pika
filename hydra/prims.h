@@ -6,8 +6,11 @@
 
 #include <pxr/imaging/hd/basisCurves.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/sprim.h>
+
+#include <optional>
 
 PXR_NAMESPACE_OPEN_SCOPE
 
@@ -21,6 +24,13 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
+    // Fetches the float2 primvar the mesh's materials read, which Pika
+    // names from the networks, and hands it over when it is not the one
+    // handed over last. Sync calls it; so does a material's, when its
+    // network reads another primvar (PikaMaterial::Sync).
+    void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer);
+    // Whether the mesh or one of its GeomSubsets is bound to the material.
+    bool Binds(SdfPath const &material) const;
 
 protected:
     HdDirtyBits _PropagateDirtyBits(HdDirtyBits bits) const override {
@@ -32,9 +42,24 @@ private:
     void _SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer);
+    // The interpolation of the mesh's primvar `name`, if it has one.
+    bool _FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
+                      HdInterpolation &interpolation) const;
     void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
     Pika &_pika;
+    // The materials the GeomSubsets bind, from the last topology.
+    std::vector<SdfPath> _subset_materials;
+    // The texcoord handed over last, as fetched (an empty name: none), so
+    // a primvar change that left it as it was, an animated primvar no
+    // material reads, neither refines it again nor hands it over. Reset
+    // with the topology, which the refinement follows.
+    struct Texcoord {
+        std::string name;
+        HdInterpolation interpolation = HdInterpolationConstant;
+        VtVec2fArray values;
+    };
+    std::optional<Texcoord> _texcoord;
     uint64_t _id = 0;
 };
 
@@ -50,6 +75,23 @@ public:
 private:
     void _SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer);
 
+    Pika &_pika;
+    uint64_t _id = 0;
+};
+
+// A material copies its whole network into the store whenever Hydra marks
+// it dirty; Pika finds what changed.
+class PikaMaterial final : public HdMaterial {
+public:
+    // Hydra's fallback material has no path and stands for nothing in the
+    // scene: it is accepted and never synced.
+    PikaMaterial(SdfPath const &id, Pika &pika);
+    ~PikaMaterial() override;
+
+    HdDirtyBits GetInitialDirtyBitsMask() const override { return AllDirty; }
+    void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
+
+private:
     Pika &_pika;
     uint64_t _id = 0;
 };

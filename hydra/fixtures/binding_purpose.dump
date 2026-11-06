@@ -1,7 +1,10 @@
 sync 1
-counted material /world/mtl/base
-counted material /world/mtl/full
-counted material /world/mtl/preview
+material /world/mtl/base
+  surface none
+material /world/mtl/full
+  surface none
+material /world/mtl/preview
+  surface none
 mesh /world/tri
   render_tag geometry
   visible true
@@ -21,6 +24,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
+  texcoord none
 mesh /world/whole
   render_tag geometry
   visible true
@@ -40,10 +44,14 @@ mesh /world/whole
     1 0 0
     0 1 0
   normals none
+  texcoord none
 sync 2
-counted material /world/mtl/base
-counted material /world/mtl/full
-counted material /world/mtl/preview
+material /world/mtl/base
+  surface none
+material /world/mtl/full
+  surface none
+material /world/mtl/preview
+  surface none
 mesh /world/tri
   render_tag geometry
   visible true
@@ -62,6 +70,7 @@ mesh /world/tri
     1 0 0
     0 1 0
   normals none
+  texcoord none
 mesh /world/whole
   render_tag geometry
   visible true
@@ -80,3 +89,4 @@ mesh /world/whole
     1 0 0
     0 1 0
   normals none
+  texcoord none

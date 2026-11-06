@@ -15,7 +15,7 @@ instancer /world/scatter
   instance_scales 2
     1 1 1
     2 2 2
-mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
+mesh /world/scatter/prototypes/tri/ForInstancer#
   render_tag geometry
   visible true
   instancer /world/scatter indices 0 1
@@ -33,6 +33,7 @@ mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
     1 0 0
     0 1 0
   normals none
+  texcoord none
 sync 2
 instancer /world/scatter
   parent none
@@ -50,7 +51,7 @@ instancer /world/scatter
   instance_scales 2
     1 1 1
     2 2 2
-mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
+mesh /world/scatter/prototypes/tri/ForInstancer#
   render_tag geometry
   visible true
   instancer /world/scatter indices 0 1
@@ -68,3 +69,4 @@ mesh /world/scatter/prototypes/tri/ForInstancer12c9f8cd6edba73a
     1 0 0
     0 1 0
   normals none
+  texcoord none

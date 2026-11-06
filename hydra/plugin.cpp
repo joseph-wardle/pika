@@ -10,6 +10,7 @@
 #include "prims.h"
 #include "report.h"
 
+#include <pxr/base/tf/staticTokens.h>
 #include <pxr/imaging/cameraUtil/framing.h>
 #include <pxr/imaging/hd/camera.h>
 #include <pxr/imaging/hd/instancer.h>
@@ -29,6 +30,11 @@
 PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
+
+// Pika's render settings: husk reads them off the render settings prim's
+// attributes of these names, usdview offers them in its Renderer Settings
+// dialog, usdrecord passes none.
+TF_DEFINE_PRIVATE_TOKENS(_tokens, ((textureCap, "pika:textureCap")));
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -52,6 +58,11 @@ protected:
         }
         pika_frame frame = {};
         std::copy_n(state->GetWorldToViewMatrix().data(), 16, frame.world_to_view);
+        // A host may author the cap as any number; 0, and so one that is
+        // none, is no cap.
+        HdRenderDelegate const *delegate = GetRenderIndex()->GetRenderDelegate();
+        int cap = delegate->GetRenderSetting<int>(_tokens->textureCap, 0);
+        frame.texture_cap = uint32_t(std::max(cap, 0));
         std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
         GfVec4f clear(0.0f);
         PikaRenderBuffer *first = nullptr;
@@ -133,9 +144,15 @@ private:
 
 class PikaRenderDelegate final : public HdRenderDelegate {
 public:
-    PikaRenderDelegate() = default;
+    PikaRenderDelegate() { _PopulateDefaultSettings(_settings); }
     explicit PikaRenderDelegate(HdRenderSettingsMap const &settings)
-        : HdRenderDelegate(settings) {}
+        : HdRenderDelegate(settings) {
+        _PopulateDefaultSettings(_settings);
+    }
+
+    HdRenderSettingDescriptorList GetRenderSettingDescriptors() const override {
+        return _settings;
+    }
 
     // Supporting a type changes what Hydra hands over, so the counted types
     // leave out the implicit surfaces (cube, sphere...), which Hydra
@@ -223,6 +240,8 @@ public:
     HdSprim *CreateSprim(TfToken const &typeId, SdfPath const &id) override {
         if (typeId == HdPrimTypeTokens->camera)
             return new HdCamera(id);
+        if (typeId == HdPrimTypeTokens->material)
+            return new PikaMaterial(id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {
@@ -255,6 +274,11 @@ private:
     Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
+    // The texels a texture's longest side is capped at, for a show whose
+    // textures do not fit beside its geometry; none by default, as textures
+    // are expected at their own size (design.md).
+    HdRenderSettingDescriptorList _settings = {
+        {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)}};
 };
 
 } // namespace
@@ -273,6 +297,9 @@ public:
     }
     // Pika brings its own Vulkan device, so the host's GPU setting is irrelevant.
     bool IsSupported(bool) const override { return true; }
+#if PXR_VERSION >= 2605
+    bool IsSupported(HdRendererCreateArgs const &, std::string *) const override { return true; }
+#endif
 };
 
 TF_REGISTRY_FUNCTION(TfType) {

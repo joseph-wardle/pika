@@ -1,28 +1,40 @@
-"""Renders a scene through UsdImagingGL in this process, as usdview does,
-and checks what the host then sees of Pika: the render stats dictionary
-with the last frame's pairs and gpuMemoryUsed, which usdview's HUD shows.
+"""Renders two scenes through UsdImagingGL in this process, as usdview
+does, and checks what the host then sees of Pika: the render stats
+dictionary with the last frame's pairs and gpuMemoryUsed, which usdview's
+HUD shows, and, for the second scene, whose geometry is the first's under a
+material, that its first frame is not converged and shows the first scene's
+clay while the material's build is out, that the converged frame does not,
+and that a structural edit, which builds the material again, keeps the
+converged look while its build is out, neither clay nor the new one,
+whether the host edits the material in place (Houdini 22) or resyncs it,
+removing it and inserting it again at its path (Houdini 21).
 
-    hython hydra/engine.py <scene.usda>
+    hython hydra/engine.py <clay.usda> <painted.usda>
 
 Needs a display (check.sh runs it on its Xvnc) and the delegate on
-PXR_PLUGINPATH_NAME. The control is the dictionary before the first frame:
-it has no frame pairs, so the check must fail on it.
+PXR_PLUGINPATH_NAME. The controls are the dictionary before the first
+frame, which has no frame pairs, the converged frame's pixel, which must
+differ from the clay, and the edit's converged pixel, which must differ
+from the look it kept.
 """
 
 import sys
+import time
 
 from PySide6.QtCore import QSize
 from PySide6.QtGui import QOffscreenSurface, QOpenGLContext, QSurfaceFormat
 from PySide6.QtOpenGL import QOpenGLFramebufferObject
 from PySide6.QtWidgets import QApplication
-from pxr import Gf, Usd, UsdGeom, UsdImagingGL
+from pxr import Gf, Usd, UsdGeom, UsdImagingGL, UsdShade
 
 SIZE = 64
+# How long a material's build may take before the check gives up.
+PATIENCE = 60
 
 
 def gl_context():
-    """A current GL context with a bound framebuffer, which the engine's
-    present task needs even though the frame never reaches a window."""
+    """A current GL context with a bound framebuffer the engine's present
+    task draws into, as a window's would be."""
     application = QApplication(sys.argv)
     surface = QOffscreenSurface()
     surface.setFormat(QSurfaceFormat())
@@ -30,7 +42,7 @@ def gl_context():
     context = QOpenGLContext()
     context.create()
     context.makeCurrent(surface)
-    fbo = QOpenGLFramebufferObject(QSize(1, 1))
+    fbo = QOpenGLFramebufferObject(QSize(SIZE, SIZE))
     fbo.bind()
     return application, surface, context, fbo
 
@@ -42,8 +54,15 @@ def stats_hold_a_frame(stats):
             and stats.get("gpuMemoryUsed", 0) > 0 and stats.get("drawn_triangles", 0) >= 1)
 
 
-def main(path):
-    keep = gl_context()  # noqa: F841
+def centre(fbo):
+    """The framebuffer's centre pixel as the 8-bit (r, g, b) it holds."""
+    pixel = fbo.toImage().pixelColor(SIZE // 2, SIZE // 2)
+    return pixel.red(), pixel.green(), pixel.blue()
+
+
+def scene(path):
+    """The engine rendering the scene with Pika, its stage and the params
+    of its frames, framed as usdview frames a new stage."""
     stage = Usd.Stage.Open(path)
     engine = UsdImagingGL.Engine()
     plugin = next(p for p in engine.GetRendererPlugins()
@@ -52,7 +71,6 @@ def main(path):
         sys.exit("engine: cannot use the Pika renderer plugin")
     engine.SetRenderViewport(Gf.Vec4d(0, 0, SIZE, SIZE))
     engine.SetRendererAov("color")
-    # A camera framing the stage's bounds, as usdview frames a new stage.
     bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
     frustum = Gf.Camera().frustum
     frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
@@ -60,22 +78,82 @@ def main(path):
     engine.SetCameraState(frustum.ComputeViewMatrix(), frustum.ComputeProjectionMatrix())
     params = UsdImagingGL.RenderParams()
     params.frame = Usd.TimeCode(1)
+    return engine, stage, params
 
+
+def frame(engine, stage, params, fbo):
+    """Renders once and gives the centre pixel."""
+    engine.Render(stage.GetPseudoRoot(), params)
+    return centre(fbo)
+
+
+def converge(engine, stage, params, fbo):
+    """Renders until converged and gives each frame's centre pixel."""
+    pixels = []
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        pixels.append(frame(engine, stage, params, fbo))
+        if engine.IsConverged():
+            return pixels
+        if time.monotonic() > deadline:
+            sys.exit(f"engine: the scene did not converge in {PATIENCE} s")
+
+
+def main(clay, painted):
+    keep = gl_context()  # noqa: F841
+    fbo = keep[3]
+    engine, stage, params = scene(clay)
     before = engine.GetRenderStats()
     if stats_hold_a_frame(before):
         sys.exit(f"engine: the stats held a frame before one was drawn: {before}")
-    for _ in range(10):
-        engine.Render(stage.GetPseudoRoot(), params)
-        if engine.IsConverged():
-            break
+    pixels = converge(engine, stage, params, fbo)
     after = engine.GetRenderStats()
     if not stats_hold_a_frame(after):
         sys.exit(f"engine: the host does not see the frame in Pika's stats: {after}")
     print("engine: the host sees %d stats, %d frames, %.0f triangles drawn, gpuMemoryUsed %.0f" % (
         len(after), after["frames"], after["drawn_triangles"], after["gpuMemoryUsed"]))
+    grey = pixels[-1]
+    if max(grey) - min(grey) > 1 or grey[0] < 16:
+        sys.exit(f"engine: the clay is not grey: {grey}")
+
+    engine, stage, params = scene(painted)
+    pixel = frame(engine, stage, params, fbo)
+    first = engine.GetRenderStats()
+    if engine.IsConverged() or first.get("pending_materials") != 1:
+        sys.exit(f"engine: the painted cube's first frame did not wait for its material: {first}")
+    if pixel != grey:
+        sys.exit(f"engine: the painted cube is {pixel} while its material builds, not clay {grey}")
+    pixels = converge(engine, stage, params, fbo)
+    last = engine.GetRenderStats()
+    if last.get("pending_materials") != 0 or pixels[-1] == grey:
+        sys.exit(f"engine: the painted cube stayed clay {pixels[-1]} once built: {last}")
+    print("engine: the painted cube was clay %s for %d frames, then %s" % (grey, len(pixels), pixels[-1]))
+
+    # Connecting the surface's diffuse colour to the green node changes the
+    # material's structure, so it is built again: meanwhile the cube keeps
+    # its look.
+    red = pixels[-1]
+    surface = UsdShade.Shader.Get(stage, "/world/mtl/paint/surface")
+    green = UsdShade.Shader.Get(stage, "/world/mtl/paint/green")
+    surface.GetInput("diffuseColor").ConnectToSource(green.ConnectableAPI(), "out")
+    # While frames change, a render delivers the frame before and leaves
+    # its own on the GPU: the first after the edit delivers the converged
+    # frame, and the next delivers the first drawn with the build out.
+    frame(engine, stage, params, fbo)
+    pixel = frame(engine, stage, params, fbo)
+    edited = engine.GetRenderStats()
+    if engine.IsConverged() or edited.get("pending_materials") != 1:
+        sys.exit(f"engine: the edited cube's first frame did not wait for its material: {edited}")
+    if pixel != red:
+        sys.exit(f"engine: the edited cube is {pixel} while its material builds, not its {red}: {edited}")
+    pixels = converge(engine, stage, params, fbo)
+    last = engine.GetRenderStats()
+    if last.get("pending_materials") != 0 or pixels[-1] == red or pixels[-1] == grey:
+        sys.exit(f"engine: the edited cube stayed {pixels[-1]} once built: {last}")
+    print("engine: the edited cube kept %s for %d frames, then %s" % (red, len(pixels), pixels[-1]))
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) != 3:
         sys.exit(__doc__)
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2])

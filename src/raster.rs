@@ -1,6 +1,7 @@
-//! The mesh pass: one pipeline per color format, drawing the mesh instances
-//! the cull pass kept with a single multi-draw into the color, depth and
-//! normal AOVs.
+//! The prepass: one pipeline per color format, drawing the mesh instances
+//! the cull pass kept with a single multi-draw into the depth buffer and
+//! the depth and normal AOVs. The material pass (`shade`) then colors the
+//! surface it left at each pixel.
 
 use ash::vk;
 
@@ -10,6 +11,7 @@ use crate::target;
 use crate::view::View;
 
 /// The AOV attachments after color, in `shaders/mesh.slang`'s target order.
+/// Color is the material pass's; the prepass leaves it clear.
 /// Vulkan devices need not render to three-channel formats, so normals are
 /// drawn with a fourth.
 pub const DEPTH_AOV: (vk::Format, usize) = (vk::Format::R32_SFLOAT, 4);
@@ -47,8 +49,27 @@ impl Raster {
         // SAFETY: `d` is live and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
+        let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(true)
+            .depth_compare_op(vk::CompareOp::GREATER);
         let built: Vec<_> = (COLOR_FORMATS.iter())
-            .map(|&format| pipeline(d, r.layout, module, format))
+            .map(|&format| {
+                let colors = [
+                    (format, vk::ColorComponentFlags::empty()),
+                    (DEPTH_AOV.0, vk::ColorComponentFlags::RGBA),
+                    (NORMAL_AOV.0, vk::ColorComponentFlags::RGBA),
+                ];
+                gpu::graphics(
+                    d,
+                    r.layout,
+                    module,
+                    [c"vs", c"fs"],
+                    &colors,
+                    target::DEPTH_FORMAT,
+                    depth,
+                )
+            })
             .collect();
         // SAFETY: pipeline creation is complete, so the module is no longer used.
         unsafe { d.destroy_shader_module(module, None) };
@@ -60,7 +81,8 @@ impl Raster {
 
     /// Records the draws of `view`, after the cull pass, into `cb`, inside
     /// rendering into a target of `color` (one of `COLOR_FORMATS`),
-    /// `DEPTH_AOV` and `NORMAL_AOV`.
+    /// `DEPTH_AOV` and `NORMAL_AOV`. The material pass draws after it,
+    /// inside the same rendering.
     pub fn draw(
         &self,
         cb: vk::CommandBuffer,
@@ -116,70 +138,4 @@ impl Drop for Raster {
             self.device.destroy_pipeline_layout(self.layout, None);
         }
     }
-}
-
-/// The mesh pipeline for one color format: two-sided, reversed depth.
-fn pipeline(
-    d: &ash::Device,
-    layout: vk::PipelineLayout,
-    module: vk::ShaderModule,
-    color: vk::Format,
-) -> Result<vk::Pipeline, String> {
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(module)
-            .name(c"vs"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(module)
-            .name(c"fs"),
-    ];
-    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-    let viewport = vk::PipelineViewportStateCreateInfo::default()
-        .viewport_count(1)
-        .scissor_count(1);
-    // Nothing is culled. USD's front faces wind counter-clockwise in a
-    // right-handed frame, and the camera's y is not flipped (rows go bottom
-    // up), so they wind clockwise in Vulkan's framebuffer coordinates.
-    // hydra/images/behind.usda fails if this is reversed.
-    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-        .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
-        .front_face(vk::FrontFace::CLOCKWISE)
-        .line_width(1.0);
-    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(true)
-        .depth_write_enable(true)
-        .depth_compare_op(vk::CompareOp::GREATER);
-    let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
-        .color_write_mask(vk::ColorComponentFlags::RGBA); 3];
-    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
-        .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
-    let formats = [color, DEPTH_AOV.0, NORMAL_AOV.0];
-    let mut rendering = vk::PipelineRenderingCreateInfo::default()
-        .color_attachment_formats(&formats)
-        .depth_attachment_format(target::DEPTH_FORMAT);
-    let info = vk::GraphicsPipelineCreateInfo::default()
-        .stages(&stages)
-        .vertex_input_state(&vertex_input)
-        .input_assembly_state(&input_assembly)
-        .viewport_state(&viewport)
-        .rasterization_state(&rasterization)
-        .multisample_state(&multisample)
-        .depth_stencil_state(&depth)
-        .color_blend_state(&blend)
-        .dynamic_state(&dynamic)
-        .layout(layout)
-        .push_next(&mut rendering);
-    // SAFETY: `d` is live, `module` and `layout` were created on it, and
-    // `info` and what it points to outlive the call.
-    unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
-        .map(|p| p[0])
-        .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({color:?}) failed: {e}"))
 }

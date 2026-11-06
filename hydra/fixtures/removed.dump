@@ -17,6 +17,7 @@ mesh /world/deleted
     1 0 0
     0 1 0
   normals none
+  texcoord none
 mesh /world/kept
   render_tag geometry
   visible true
@@ -35,6 +36,7 @@ mesh /world/kept
     1 0 0
     0 1 0
   normals none
+  texcoord none
 sync 2
 mesh /world/kept
   render_tag geometry
@@ -54,3 +56,4 @@ mesh /world/kept
     1 0 0
     0 1 0
   normals none
+  texcoord none

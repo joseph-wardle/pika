@@ -1,6 +1,7 @@
-//! The stencil pass: a compute pipeline writing each refined point of a
-//! subdivision surface as the weighted sum of the cage points its stencil
-//! names. OpenSubdiv built the stencils, in the delegate.
+//! The stencil pass: a compute pipeline writing each refined value of a
+//! subdivision surface, a point's xyz or a texcoord's xy, as the weighted
+//! sum of the cage values its stencil names. OpenSubdiv built the stencils,
+//! in the delegate.
 
 use std::ops::Range;
 
@@ -20,7 +21,7 @@ pub struct Addresses {
     pub offsets: vk::DeviceAddress,
     pub indices: vk::DeviceAddress,
     pub weights: vk::DeviceAddress,
-    pub points: vk::DeviceAddress,
+    pub refined: vk::DeviceAddress,
 }
 
 /// `shaders/subdiv.slang`'s push constants.
@@ -31,7 +32,7 @@ struct Push {
     first: u32,
     count: u32,
     stride: u32,
-    unused: u32,
+    width: u32,
 }
 
 impl Subdiv {
@@ -40,15 +41,22 @@ impl Subdiv {
         Ok(Self { compute })
     }
 
-    /// Records into `cb`, outside rendering, the refined points in `ranges`.
-    /// The buffers must be live and as large as their table says.
-    pub fn record(&self, cb: vk::CommandBuffer, addresses: Addresses, ranges: &[Range<u32>]) {
+    /// Records into `cb`, outside rendering, the refined values in `ranges`,
+    /// each `width` floats (3 for points, 2 for texcoords). The buffers
+    /// must be live and as large as their table says.
+    pub fn record(
+        &self,
+        cb: vk::CommandBuffer,
+        addresses: Addresses,
+        width: u32,
+        ranges: &[Range<u32>],
+    ) {
         (self.compute).record(cb, ranges, |first, count, stride| Push {
             addresses,
             first,
             count,
             stride,
-            unused: 0,
+            width,
         });
     }
 }

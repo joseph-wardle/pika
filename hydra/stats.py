@@ -7,8 +7,10 @@ against its budget, and the last frame's memory.
 Pika appends one line per Hydra sync and per rendered frame: the kind and
 index, then `key value` pairs (src/stats.rs). A key ending in `_ms` is
 milliseconds; any other value is a count. The warm window is the last <warm>
-syncs and frames; without it, all but the first, or the only one. A loop
-played twice over 54 frames summarises with 54.
+syncs and frames, claimed warm: one with a material still pending, or a
+surface compiled or a texture baked, fails. Without it, the window is all
+but the first, or the only one. A loop played twice over 54 frames
+summarises with 54.
 """
 
 import sys
@@ -20,11 +22,14 @@ BUDGET_MS = 41.67
 # a line over its budget moves work up the order (design.md).
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
+    ("shade", ("gpu_shade_ms",), 8.0),
     ("update", ("gpu_update_ms",), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
     ("cpu", ("record_ms", "wait_ms"), 2.0),
     ("period", ("period_ms",), BUDGET_MS),
 )
+# Frame counts of material work going on: none may be in a warm window.
+BUILDING = ("pending_materials", "compiled_surfaces", "baked_textures")
 
 
 def read(path):
@@ -91,6 +96,9 @@ def main(path, warm=None):
     host, device, syncs, frames = read(path)
     window = (lambda rows: rows[-int(warm):]) if warm else (lambda rows: rows[1:] or rows)
     s, f = window(syncs), window(frames)
+    busy = [k for k in BUILDING if warm and any(r.get(k, 0) for r in f)]
+    if busy:
+        sys.exit(f"{path}: the warm window is not warm: {', '.join(busy)} in its frames")
     print(f"{path}: {len(syncs)} syncs, {len(frames)} frames on {device} ({host})")
     print(f"warm window: {len(s)} syncs, {len(f)} frames; ms as p50/p95/max")
     for rows, prefix in ((s, "sync_"), (f, "")):

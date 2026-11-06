@@ -1,0 +1,83 @@
+#usda 1.0
+(
+    doc = "A quad facing the camera, bound to a MaterialX surface that emits a two-tile UDIM set (bake/fixtures/udim.<UDIM>.exr) sampled at its st, which spans tiles 1001 to 1003 and 1011 to 1013: 1001 and 1012 hold ramps, the rest are missing and read black. Its st shifts at frame 2."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.5, -0.9, -5), (1.5, -0.9, -5), (1.5, 0.9, -5), (-1.5, 0.9, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (3, 0), (3, 2), (0, 2)],
+        2: [(0.15, 0.1), (3.15, 0.1), (3.15, 2.1), (0.15, 2.1)],
+    }
+    rel material:binding = </tiles>
+}
+
+def Material "tiles"
+{
+    token outputs:surface.connect = </tiles/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </tiles/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </tiles/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </tiles/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </tiles/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/udim.<UDIM>.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </tiles/st.outputs:out>
+        float2 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}

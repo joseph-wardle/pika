@@ -1,0 +1,61 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A texture whose file does not resolve arrives with an empty path, as one
+# authored empty does: the node's fallback is drawn in its place, as Storm
+# draws it, with one warning naming the node and input, and the surface
+# compiles. The edit names a file that resolves, which is baked, and the
+# surface, the same document, is held.
+#
+# compiles: 1 then 0
+# bakes: 0 then 1
+# warnings: 1
+# warned: /world/mtl/skin: tex's file: its path is empty or did not resolve; drawn with its fallback
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/skin>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "skin"
+        {
+            token outputs:surface.connect = </world/mtl/skin/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </world/mtl/skin/tex.outputs:rgb>
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @nowhere.png@ (colorSpace = "raw")
+                float2 inputs:st.connect = </world/mtl/skin/st.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "st"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+}

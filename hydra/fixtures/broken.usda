@@ -1,0 +1,57 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A material whose surface shader names a nodedef the MaterialX libraries do
+# not define cannot be built: the frame renders with it pink and one warning,
+# and the material is not tried again until its network moves.
+#
+# compiles: 0 then 1
+# warnings: 1
+# warned: /world/mtl/glow: the bake tool failed: bake: error: node n0 names the nodedef ND_surfac, which Houdini's MaterialX libraries do not define; drawn pink
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/glow>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "glow"
+        {
+            token outputs:surface.connect = </world/mtl/glow/surface.outputs:out>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "ND_surfac"
+                token inputs:bsdf.connect = </world/mtl/glow/bsdf.outputs:out>
+                token inputs:edf.connect = </world/mtl/glow/edf.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "bsdf"
+            {
+                uniform token info:id = "ND_oren_nayar_diffuse_bsdf"
+                color3f inputs:color = (0.5, 0.25, 0.125)
+                token outputs:out
+            }
+
+            def Shader "edf"
+            {
+                uniform token info:id = "ND_uniform_edf"
+                color3f inputs:color = (0, 0.5, 0)
+                token outputs:out
+            }
+        }
+    }
+}

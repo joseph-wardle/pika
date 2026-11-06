@@ -265,7 +265,9 @@ impl Instance {
             .queue_priorities(&priorities)];
         // Dynamic rendering, synchronization2 and buffer device addresses are
         // mandatory in Vulkan 1.3. The rest are optional, but every desktop
-        // GPU has them.
+        // GPU has them. Independent blend lets the prepass and the material
+        // pass each write some of the same attachments; the textures are
+        // block compressed.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -273,7 +275,9 @@ impl Instance {
             vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
-            .draw_indirect_first_instance(true);
+            .draw_indirect_first_instance(true)
+            .independent_blend(true)
+            .texture_compression_bc(true);
         let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
         let extensions = &extensions[..usize::from(info.memory_budget)];
         let create_info = vk::DeviceCreateInfo::default()
@@ -287,8 +291,8 @@ impl Instance {
         let raw =
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
-                    "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect and \
-                 drawIndirectFirstInstance.",
+                    "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
+                 drawIndirectFirstInstance, independentBlend and textureCompressionBC.",
                     info.name
                 )
             })?;
@@ -296,6 +300,13 @@ impl Instance {
         let queue = unsafe { raw.get_device_queue(queue_family, 0) };
         // SAFETY: the physical device belongs to this live instance.
         let memory = unsafe { self.raw.get_physical_device_memory_properties(info.handle) };
+        let ceiling = match std::env::var("PIKA_BUDGET") {
+            Ok(s) if !s.is_empty() => Some(
+                (s.parse::<u64>())
+                    .map_err(|_| format!("PIKA_BUDGET {s} is not a number of bytes"))?,
+            ),
+            _ => None,
+        };
         Ok(Device {
             instance: self,
             physical: info.handle,
@@ -306,6 +317,7 @@ impl Instance {
             timestamp_period: info.timestamp_period,
             memory_types: memory.memory_types_as_slice().to_vec(),
             memory_budget: info.memory_budget,
+            ceiling,
         })
     }
 }
@@ -377,16 +389,19 @@ pub struct Device<'a> {
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
+    /// `PIKA_BUDGET`, bytes standing in for the driver's budget, so a check
+    /// can see textures refused without filling the device.
+    ceiling: Option<u64>,
 }
 
 impl Device<'_> {
     /// The bytes of device-local memory this process uses, and the bytes
     /// the driver lets it use before allocations fail or spill to host
     /// memory, summed over the device-local heaps. Both are 0 on a driver
-    /// without `VK_EXT_memory_budget`.
+    /// without `VK_EXT_memory_budget`; `PIKA_BUDGET` replaces the latter.
     pub fn budget(&self) -> (u64, u64) {
         if !self.memory_budget {
-            return (0, 0);
+            return (0, self.ceiling.unwrap_or(0));
         }
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
@@ -397,11 +412,12 @@ impl Device<'_> {
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
         };
         let heaps = properties.memory_properties.memory_heaps_as_slice();
-        (0..heaps.len())
+        let (used, allowed) = (0..heaps.len())
             .filter(|&i| heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
             .fold((0, 0), |(used, allowed), i| {
                 (used + budget.heap_usage[i], allowed + budget.heap_budget[i])
-            })
+            });
+        (used, self.ceiling.unwrap_or(allowed))
     }
 }
 
@@ -588,6 +604,75 @@ impl Drop for Buffer {
             self.device.free_memory(self.memory, None);
         }
     }
+}
+
+/// A graphics pipeline of `module`'s vertex and fragment entry points,
+/// `entries`, rendering triangles into `colors` (each attachment's format
+/// and the channels it writes) and a `depth_format` attachment with
+/// `depth`'s test, viewport and scissor dynamic.
+pub fn graphics(
+    d: &ash::Device,
+    layout: vk::PipelineLayout,
+    module: vk::ShaderModule,
+    entries: [&std::ffi::CStr; 2],
+    colors: &[(vk::Format, vk::ColorComponentFlags)],
+    depth_format: vk::Format,
+    depth: vk::PipelineDepthStencilStateCreateInfo,
+) -> Result<vk::Pipeline, String> {
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(module)
+            .name(entries[0]),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(module)
+            .name(entries[1]),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    // Nothing is culled. USD's front faces wind counter-clockwise in a
+    // right-handed frame, and the camera's y is not flipped (rows go bottom
+    // up), so they wind clockwise in Vulkan's framebuffer coordinates.
+    // hydra/images/behind.usda fails if this is reversed.
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .line_width(1.0);
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let blend_attachments: Vec<_> = (colors.iter())
+        .map(|&(_, mask)| vk::PipelineColorBlendAttachmentState::default().color_write_mask(mask))
+        .collect();
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
+    let formats: Vec<_> = colors.iter().map(|&(format, _)| format).collect();
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+        .dynamic_states(&[vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR]);
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&formats)
+        .depth_attachment_format(depth_format);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+    // SAFETY: `d` is live, `module` and `layout` were created on it, and
+    // `info` and what it points to outlive the call.
+    unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
+        .map(|p| p[0])
+        .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({colors:?}) failed: {e}"))
 }
 
 /// A compute pipeline whose only input is its push constants: buffer

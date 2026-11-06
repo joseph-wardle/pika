@@ -1,0 +1,70 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A subdivided mesh's texcoord is refined with it. The strip's faceVarying st
+# agrees across the first edge its faces share and not the second, a seam,
+# so its twelve corners weld to ten values; the edit closes the seam, to
+# eight. The quad's vertex st refines like its points.
+#
+# compiles: 1 then 0
+# bakes: 1 then 0
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "strip" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4, 4, 4]
+        int[] faceVertexIndices = [0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (3, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (0.3, 0), (0.3, 1), (0, 1), (0.3, 0), (0.6, 0), (0.6, 1), (0.3, 1), (0.7, 0), (1, 0), (1, 1), (0.7, 1)] (
+            interpolation = "faceVarying"
+        )
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(0, 2, 0), (1, 2, 0), (1, 3, 0), (0, 3, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor.connect = </world/mtl/paint/tex.outputs:rgb>
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
+                float2 inputs:st.connect = </world/mtl/paint/uv.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "uv"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+}

@@ -1,0 +1,62 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A structural edit: frame 2 moves the texture from the surface's diffuse
+# colour to its emissive colour. That is a new network, so Pika compiles a
+# new surface, while the texture, whose file did not change, is not baked
+# again.
+#
+# compiles: 1 then 1
+# bakes: 1 then 0
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (0, 1)] (interpolation = "faceVarying")
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.5, 0.25, 0.125)
+                color3f inputs:diffuseColor.connect = </world/mtl/paint/tex.outputs:rgb>
+                float inputs:roughness = 0.25
+                int inputs:useSpecularWorkflow = 1
+                token outputs:surface
+            }
+
+            def Shader "tex"
+            {
+                uniform token info:id = "UsdUVTexture"
+                asset inputs:file = @../../bake/fixtures/swatch.png@ (colorSpace = "raw")
+                float4 inputs:scale = (2, 2, 2, 1)
+                float2 inputs:st.connect = </world/mtl/paint/st.outputs:result>
+                float3 outputs:rgb
+            }
+
+            def Shader "st"
+            {
+                uniform token info:id = "UsdPrimvarReader_float2"
+                string inputs:varname = "st"
+                float2 outputs:result
+            }
+        }
+    }
+}

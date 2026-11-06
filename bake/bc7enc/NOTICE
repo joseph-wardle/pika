@@ -1,0 +1,6 @@
+bc7enc.cpp and bc7enc.h are the BC7 encoder from Richard Geldreich's bc7enc_rdo,
+https://github.com/richgel999/bc7enc_rdo at commit b9438627eef73a1157e84201b6fa6eb2ffd6d9f0,
+copied unchanged. They are offered under the MIT licence or as public domain,
+at the user's choice (LICENSE, from the same repository); Pika takes the MIT
+licence. The repository's other files (bc7e.ispc under Apache 2.0, LodePNG,
+the RDO encoder) are not used.

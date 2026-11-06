@@ -3,17 +3,25 @@
 //! and `target` directly.
 
 mod abi;
+mod bake;
+mod cache;
 pub mod commands;
 mod cull;
 mod geometry;
 pub mod gpu;
+mod json;
+pub mod material;
 mod raster;
 mod renderer;
+mod shade;
 pub mod shader;
 mod smooth;
 mod stats;
 mod store;
 mod subdiv;
+mod tangent;
 pub mod target;
+mod texture;
 mod transform;
+mod uniforms;
 mod view;

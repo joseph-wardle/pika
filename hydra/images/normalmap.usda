@@ -1,0 +1,155 @@
+#usda 1.0
+(
+    doc = "Four tilted quads under one normal map, bake/fixtures/normal.exr, or for the last its 8-bit copy normal.png, read as it is and not as sRGB, whose every texel is the same tangent-space normal, so each quad is lit by the tangent frame its st gives it: st along x and y, mirrored at frame 2; st turned a quarter, on a subdivided quad; st mirrored; and, near facing, an OpenPBR quad with the 8-bit map on its geometry normal. The rest are Standard Surfaces."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "plain" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (1, 0), (1, 1), (0, 1)],
+        2: [(1, 0), (0, 0), (0, 1), (1, 1)],
+    }
+    rel material:binding = </standard>
+    double3 xformOp:translate = (-1.1, 0.6, -6)
+    float3 xformOp:rotateXYZ = (-35, 25, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Mesh "turned" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "catmullClark"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+    texCoord2f[] primvars:st = [(0, 1), (0, 0), (1, 0), (1, 1)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </standard>
+    double3 xformOp:translate = (1.1, 0.6, -6)
+    float3 xformOp:rotateXYZ = (30, -20, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Mesh "mirrored" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+    texCoord2f[] primvars:st = [(1, 0), (0, 0), (0, 1), (1, 1)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </standard>
+    double3 xformOp:translate = (-1.1, -0.6, -6)
+    float3 xformOp:rotateXYZ = (-30, -30, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Mesh "facing" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.5, -0.5, 0), (0.5, -0.5, 0), (0.5, 0.5, 0), (-0.5, 0.5, 0)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </openpbr>
+    double3 xformOp:translate = (1.1, -0.6, -6)
+    float3 xformOp:rotateXYZ = (12, -12, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Material "standard"
+{
+    token outputs:surface.connect = </standard/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.8
+        color3f inputs:base_color = (0.8, 0.7, 0.6)
+        float inputs:specular = 0
+        float3 inputs:normal.connect = </standard/map.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "map"
+    {
+        uniform token info:id = "ND_normalmap_float"
+        float3 inputs:in.connect = </standard/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector3"
+        asset inputs:file = @../../bake/fixtures/normal.exr@
+        float2 inputs:texcoord.connect = </standard/st.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+
+def Material "openpbr"
+{
+    token outputs:surface.connect = </openpbr/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:base_weight = 0.9
+        color3f inputs:base_color = (0.4, 0.7, 0.3)
+        float inputs:specular_weight = 0
+        float3 inputs:geometry_normal.connect = </openpbr/map.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "map"
+    {
+        uniform token info:id = "ND_normalmap_float"
+        float3 inputs:in.connect = </openpbr/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector3"
+        asset inputs:file = @../../bake/fixtures/normal.png@
+        float2 inputs:texcoord.connect = </openpbr/st.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}

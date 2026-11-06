@@ -1,8 +1,46 @@
-// One view, as its passes read it: the camera, src/geometry.rs's buffers and
-// the view's own. src/view.rs writes it each frame into a buffer whose
-// address is a pass's one push constant: push constants are 128 bytes at
-// minimum, which the camera and the addresses alone filled, so what
-// materials and lights add goes here.
+// One view, as its passes read it: the camera, the lights, src/geometry.rs's
+// buffers and the view's own. src/view.rs writes it each frame into a
+// buffer whose address is a pass's one push constant: push constants are
+// 128 bytes at minimum, which the camera and the addresses alone filled,
+// so what lights and materials add goes here.
+
+#pragma once
+
+// A vertex's normal index when its normal is its point's smooth normal.
+static const uint SMOOTH = 0xffffffff;
+// A vertex's texcoord index when its mesh has none.
+static const uint NONE = 0xffffffff;
+
+// A vertex's tangent in 4 bytes: x, y and z as signed 10-bit fractions of
+// 511 from the low bits up, and its handedness, 1 or -1, in the top two
+// (Vulkan's A2B10G10R10_SNORM). 10 bits turn a unit vector by at most 0.1
+// degree, under what a normal map's 8-bit texels resolve.
+uint pack_tangent(float4 t)
+{
+    uint3 xyz = uint3(int3(round(clamp(t.xyz, -1, 1) * 511))) & 0x3ff;
+    uint w = t.w < 0 ? 3 : 1;
+    return xyz.x | xyz.y << 10 | xyz.z << 20 | w << 30;
+}
+
+float4 unpack_tangent(uint packed)
+{
+    int3 xyz = (int3(packed) << int3(22, 12, 2)) >> 22;
+    return float4(float3(xyz) / 511, float(int(packed) >> 30));
+}
+
+// The lights a view has: the headlight.
+static const int LIGHTS = 1;
+
+// A light as the generated light loop reads it (shaders/frame.slang):
+// MaterialX's directional light, bound as type 1 by bake/generate.cpp,
+// which declares the same members, in this order.
+struct LightData
+{
+    int type;
+    float3 direction;
+    float3 color;
+    float intensity;
+};
 
 struct View
 {
@@ -11,11 +49,20 @@ struct View
     float4 view_projection[4];
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
+    // The unit direction the camera looks along.
+    float4 forward;
+    // The headlight, along forward.
+    LightData lights[LIGHTS];
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).
     float *smooth;
     uint2 *vertices;
+    // Per texcoord value, and the texcoord index (or NONE) per vertex.
+    float *texcoord;
+    uint *vertex_texcoord;
+    // Per vertex: its tangent and handedness, packed (shaders/tangent.slang).
+    uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
     // Each instance's draw record.

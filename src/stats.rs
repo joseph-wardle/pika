@@ -62,6 +62,14 @@ pub struct Frame {
     pub transforms: usize,
     /// The frame was placed a call later than it was drawn.
     pub latent: bool,
+    /// Surfaces slangc compiled for this frame.
+    pub compiled: usize,
+    /// Textures the bake tool baked for this frame.
+    pub baked: usize,
+    /// The baked bytes the textures loaded this frame uploaded.
+    pub loaded: u64,
+    /// Materials whose build is out, drawn clay or as they were.
+    pub pending: usize,
 }
 
 /// What each owner holds on the GPU, and what the driver says the process
@@ -71,6 +79,7 @@ pub struct Memory {
     pub geometry: gpu::Memory,
     pub views: gpu::Memory,
     pub targets: gpu::Memory,
+    pub materials: gpu::Memory,
     pub vram_used: u64,
     pub vram_budget: u64,
 }
@@ -230,6 +239,8 @@ impl Sync {
             ("mesh_redundant_bytes", p.mesh.redundant),
             ("instancer_bytes", p.instancer.pulled),
             ("instancer_redundant_bytes", p.instancer.redundant),
+            ("material_bytes", p.material.pulled),
+            ("material_redundant_bytes", p.material.redundant),
             ("curve_bytes", p.curve_bytes),
             ("meshes", c.meshes),
             ("mesh_instances", c.mesh_instances),
@@ -277,9 +288,10 @@ impl Frame {
             ("geometry_bytes", m.geometry.device),
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
+            ("material_bytes", m.materials.device),
             (
                 "host_bytes",
-                m.geometry.host + m.views.host + m.targets.host,
+                m.geometry.host + m.views.host + m.targets.host + m.materials.host,
             ),
             ("vram_used_bytes", m.vram_used),
             ("vram_budget_bytes", m.vram_budget),
@@ -288,6 +300,10 @@ impl Frame {
             ("layout", u64::from(self.update.layout)),
             ("draws", u64::from(self.update.draws)),
             ("latent", u64::from(self.latent)),
+            ("compiled_surfaces", self.compiled as u64),
+            ("baked_textures", self.baked as u64),
+            ("texture_uploaded_bytes", self.loaded),
+            ("pending_materials", self.pending as u64),
         ];
         pairs.extend(counts.map(|(k, v)| (k.to_string(), v as f64)));
         pairs
@@ -326,7 +342,7 @@ fn misses(periods: impl Iterator<Item = f64>) -> (usize, usize) {
 }
 
 /// Bytes in the unit that reads best.
-fn size(bytes: u64) -> String {
+pub fn size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1e9 {
         format!("{:.2} GB", b / 1e9)
@@ -378,12 +394,17 @@ mod tests {
                     device: 14_000_000,
                     host: 21_000_000,
                 },
+                materials: gpu::Memory::default(),
                 vram_used: 2_000_000_000,
                 vram_budget: 15_000_000_000,
             },
             moved: 338,
             transforms: 12,
             latent: true,
+            compiled: 0,
+            baked: 2,
+            loaded: 3_145_728,
+            pending: 1,
         }
     }
 
@@ -394,8 +415,8 @@ mod tests {
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
-             host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
-             moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1\n";
+             material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
+             moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1\n";
         assert_eq!(line("frame", 7, &frame(Some(29.0)).pairs()), expected);
         // A first frame has no period, so it is not the reference's line
         // with the period zeroed.

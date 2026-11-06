@@ -1,0 +1,134 @@
+#usda 1.0
+(
+    doc = "Two subdivided grids facing the camera, bound to the uv ramp (bake/fixtures/ramp.exr), their interior points pushed off the grid. The left grid's faceVarying st is a sheet with one face cut out as an island, a seam all round, and its sheet shifts at frame 2; the right grid's st is per vertex. Both are spaced unevenly, so st refined any other way than with the points shows."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "sheet" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "catmullClark"
+    int[] faceVertexCounts = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 6, 5, 1, 2, 7, 6, 2, 3, 8, 7, 3, 4, 9, 8, 5, 6, 11, 10, 6, 7, 12, 11, 7, 8, 13, 12, 8, 9, 14, 13, 10, 11, 16, 15, 11, 12, 17, 16, 12, 13, 18, 17, 13, 14, 19, 18]
+    point3f[] points = [
+        (-1.7, -0.75, -5), (-1.3, -0.75, -5), (-0.9, -0.75, -5), (-0.5, -0.75, -5), (-0.1, -0.75, -5),
+        (-1.7, -0.25, -5), (-1.18, -0.17, -5), (-1, -0.31, -5), (-0.45, -0.15, -5), (-0.1, -0.25, -5),
+        (-1.7, 0.25, -5), (-1.38, 0.3, -5), (-0.8, 0.16, -5), (-0.56, 0.21, -5), (-0.1, 0.25, -5),
+        (-1.7, 0.75, -5), (-1.3, 0.75, -5), (-0.9, 0.75, -5), (-0.5, 0.75, -5), (-0.1, 0.75, -5),
+    ]
+    texCoord2f[] primvars:st (
+        interpolation = "faceVarying"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [
+            (0.02, 0.03), (0.18, 0.03), (0.18, 0.3), (0.02, 0.3),
+            (0.18, 0.03), (0.4, 0.03), (0.4, 0.3), (0.18, 0.3),
+            (0.4, 0.03), (0.72, 0.03), (0.72, 0.3), (0.4, 0.3),
+            (0.72, 0.03), (0.98, 0.03), (0.98, 0.3), (0.72, 0.3),
+            (0.02, 0.3), (0.18, 0.3), (0.18, 0.62), (0.02, 0.62),
+            (0.55, 0.3), (0.65, 0.3), (0.65, 0.7), (0.55, 0.7),
+            (0.4, 0.3), (0.72, 0.3), (0.72, 0.62), (0.4, 0.62),
+            (0.72, 0.3), (0.98, 0.3), (0.98, 0.62), (0.72, 0.62),
+            (0.02, 0.62), (0.18, 0.62), (0.18, 0.97), (0.02, 0.97),
+            (0.18, 0.62), (0.4, 0.62), (0.4, 0.97), (0.18, 0.97),
+            (0.4, 0.62), (0.72, 0.62), (0.72, 0.97), (0.4, 0.97),
+            (0.72, 0.62), (0.98, 0.62), (0.98, 0.97), (0.72, 0.97),
+        ],
+        2: [
+            (0.02, 0.05), (0.18, 0.05), (0.18, 0.32), (0.02, 0.32),
+            (0.18, 0.05), (0.4, 0.05), (0.4, 0.32), (0.18, 0.32),
+            (0.4, 0.05), (0.72, 0.05), (0.72, 0.32), (0.4, 0.32),
+            (0.72, 0.05), (0.98, 0.05), (0.98, 0.32), (0.72, 0.32),
+            (0.02, 0.32), (0.18, 0.32), (0.18, 0.64), (0.02, 0.64),
+            (0.55, 0.3), (0.65, 0.3), (0.65, 0.7), (0.55, 0.7),
+            (0.4, 0.32), (0.72, 0.32), (0.72, 0.64), (0.4, 0.64),
+            (0.72, 0.32), (0.98, 0.32), (0.98, 0.64), (0.72, 0.64),
+            (0.02, 0.64), (0.18, 0.64), (0.18, 0.99), (0.02, 0.99),
+            (0.18, 0.64), (0.4, 0.64), (0.4, 0.99), (0.18, 0.99),
+            (0.4, 0.64), (0.72, 0.64), (0.72, 0.99), (0.4, 0.99),
+            (0.72, 0.64), (0.98, 0.64), (0.98, 0.99), (0.72, 0.99),
+        ],
+    }
+    rel material:binding = </ramp>
+}
+
+def Mesh "patch" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "catmullClark"
+    int[] faceVertexCounts = [4, 4, 4, 4]
+    int[] faceVertexIndices = [0, 1, 4, 3, 1, 2, 5, 4, 3, 4, 7, 6, 4, 5, 8, 7]
+    point3f[] points = [
+        (0.3, -0.7, -5), (1, -0.7, -5), (1.7, -0.7, -5),
+        (0.3, 0, -5), (1.15, -0.1, -5), (1.7, 0, -5),
+        (0.3, 0.7, -5), (1, 0.7, -5), (1.7, 0.7, -5),
+    ]
+    texCoord2f[] primvars:st = [
+        (0.05, 0.05), (0.55, 0.05), (0.95, 0.05),
+        (0.05, 0.35), (0.55, 0.35), (0.95, 0.35),
+        (0.05, 0.95), (0.55, 0.95), (0.95, 0.95),
+    ] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </ramp>
+}
+
+def Material "ramp"
+{
+    token outputs:surface.connect = </ramp/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </ramp/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </ramp/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </ramp/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </ramp/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/ramp.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </ramp/st.outputs:out>
+        float2 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}

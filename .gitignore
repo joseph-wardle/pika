@@ -7,8 +7,13 @@
 *.usdc
 *.usdz
 *.exr
+# The bake check's sources are a few hundred bytes each.
+!bake/fixtures/*.exr
 *.tx
 *.tex
 *.abc
 *.vdb
 *.bgeo*
+
+# Python byte code of the check scripts.
+__pycache__/

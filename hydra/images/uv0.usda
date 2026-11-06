@@ -1,0 +1,129 @@
+#usda 1.0
+(
+    doc = "Two quads facing the camera, each emitting the uv ramp (bake/fixtures/ramp.exr) sampled at UV0, the texcoord MaterialX's nodes read by default, which is the mesh's st: the left image's texcoord is unconnected, the right one reads a texcoord node of index 0. Both show the ramp as hydra/images/textured.usda shows it."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "left" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.7, -0.7, -5), (-0.1, -0.7, -5), (-0.1, 0.7, -5), (-1.7, 0.7, -5)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    rel material:binding = </unconnected>
+}
+
+def Mesh "right" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0.1, -0.7, -5), (1.7, -0.7, -5), (1.7, 0.7, -5), (0.1, 0.7, -5)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (interpolation = "vertex")
+    rel material:binding = </node>
+}
+
+def Material "unconnected"
+{
+    token outputs:surface.connect = </unconnected/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </unconnected/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </unconnected/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </unconnected/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </unconnected/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/ramp.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 outputs:out
+    }
+}
+
+def Material "node"
+{
+    token outputs:surface.connect = </node/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </node/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </node/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </node/xyz.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "xyz"
+    {
+        uniform token info:id = "ND_convert_vector2_vector3"
+        float2 inputs:in.connect = </node/image.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector2"
+        asset inputs:file = @../../bake/fixtures/ramp.exr@
+        string inputs:uaddressmode = "clamp"
+        string inputs:vaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </node/texcoord.outputs:out>
+        float2 outputs:out
+    }
+
+    def Shader "texcoord"
+    {
+        uniform token info:id = "ND_texcoord_vector2"
+        int inputs:index = 0
+        float2 outputs:out
+    }
+}

@@ -37,6 +37,11 @@ if grep "^pika: error" "$OUT/gate.log"; then
     echo "Pika reported errors (see $OUT/gate.log)"
     exit 1
 fi
+# A material drawn pink is cheaper than the one the scene asked for.
+if grep -q "drawn pink" "$OUT/gate.log"; then
+    echo "$(grep -c "drawn pink" "$OUT/gate.log") materials were drawn pink (see $OUT/gate.log)"
+    exit 1
+fi
 python3 -I "$ROOT/hydra/stats.py" "$OUT/gate.stats" 54
 awk -F', ' '{ print $2 + 0 }' "$OUT/clocks.csv" | sort -n |
     awk '{ c[NR] = $1 } END { print "graphics clock (MHz): min " c[1] ", median " c[int(NR / 2) + 1] ", max " c[NR] }'

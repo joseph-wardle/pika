@@ -6,14 +6,17 @@
 //! call on it fails, so the delegate stops calling and renders nothing rather
 //! than a frame from half-updated state.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
+use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, Normals, Refined, Scheme, Subset, Topology,
+    InstancePrimvars, Instancing, Interpolation, Normals, Refined, RefinedTexcoord, Scheme,
+    Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -57,11 +60,38 @@ pub struct CRefined {
     index_count: usize,
     holes: *const i32,
     hole_count: usize,
-    stencil_offsets: *const u32,
-    point_count: usize,
-    stencil_indices: *const i32,
-    stencil_weights: *const f32,
+    stencils: CStencils,
+}
+
+/// `pika_stencils`.
+#[repr(C)]
+pub struct CStencils {
+    offsets: *const u32,
+    count: usize,
+    indices: *const i32,
+    weights: *const f32,
     entry_count: usize,
+}
+
+/// `pika_refined_texcoord`.
+#[repr(C)]
+pub struct CRefinedTexcoord {
+    face_vertex_indices: *const i32,
+    index_count: usize,
+    stencils: CStencils,
+}
+
+/// # Safety
+/// `s`'s arrays must be valid for the reads its counts say.
+unsafe fn stencils(s: &CStencils) -> Stencils {
+    // SAFETY: the caller guarantees the arrays.
+    unsafe {
+        Stencils {
+            offsets: slice(s.offsets, s.count + 1).to_vec(),
+            indices: slice(s.indices, s.entry_count).to_vec(),
+            weights: slice(s.weights, s.entry_count).to_vec(),
+        }
+    }
 }
 
 /// `pika_instance_primvars`.
@@ -75,6 +105,45 @@ pub struct CInstancePrimvars {
     rotation_count: usize,
     scales: *const [f32; 3],
     scale_count: usize,
+}
+
+/// `pika_param`.
+#[repr(C)]
+pub struct CParam {
+    name: *const c_char,
+    kind: *const c_char,
+    floats: [f32; 16],
+    float_count: usize,
+    integer: i32,
+    text: *const c_char,
+}
+
+/// `pika_node`.
+#[repr(C)]
+pub struct CNode {
+    path: *const c_char,
+    node_type: *const c_char,
+    params: *const CParam,
+    param_count: usize,
+}
+
+/// `pika_connection`.
+#[repr(C)]
+pub struct CConnection {
+    from: *const c_char,
+    output: *const c_char,
+    to: *const c_char,
+    input: *const c_char,
+}
+
+/// `pika_network`.
+#[repr(C)]
+pub struct CNetwork {
+    nodes: *const CNode,
+    node_count: usize,
+    connections: *const CConnection,
+    connection_count: usize,
+    surface: *const c_char,
 }
 
 /// `pika_aov`.
@@ -106,6 +175,7 @@ pub struct CFrame {
     normal: CAov,
     render_tags: *const *const c_char,
     render_tag_count: usize,
+    texture_cap: u32,
 }
 
 thread_local! {
@@ -118,24 +188,27 @@ fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
     let (status, message) = match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => return OK,
         Ok(Err(message)) => (ERROR, message),
-        Err(payload) => {
-            let what = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown payload".into());
-            (
-                PANIC,
-                format!(
-                    "Pika panicked ({what}); it renders nothing until the delegate is recreated"
-                ),
-            )
-        }
+        Err(payload) => (
+            PANIC,
+            format!(
+                "Pika panicked ({}); it renders nothing until the delegate is recreated",
+                panic_message(payload.as_ref())
+            ),
+        ),
     };
     // Messages are Rust strings, which may hold a NUL; C would cut them there.
     let message = CString::new(message.replace('\0', " ")).unwrap_or_default();
     LAST_ERROR.with(|e| *e.borrow_mut() = message);
     status
+}
+
+/// What a caught panic said: its payload as text.
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown payload".into())
 }
 
 /// Borrows `len` values at `ptr`. Empty Hydra arrays may pass a null pointer,
@@ -178,6 +251,77 @@ unsafe fn string(ptr: *const c_char) -> Result<String, String> {
     s.to_str()
         .map(str::to_owned)
         .map_err(|_| format!("{s:?} is not UTF-8"))
+}
+
+/// # Safety
+/// `p`'s strings must be NUL-terminated and `float_count` at most 16.
+unsafe fn value(p: &CParam) -> Result<Value, String> {
+    // SAFETY: the caller guarantees the strings.
+    let (kind, text) = unsafe { (string(p.kind)?, string(p.text)?) };
+    Ok(match kind.as_str() {
+        "float" => Value::Float(p.floats[..p.float_count.min(16)].to_vec()),
+        "int" => Value::Int(p.integer),
+        "bool" => Value::Bool(p.integer != 0),
+        "text" => Value::Text(text),
+        "asset" => Value::Asset(text),
+        _ => return Err(format!("unknown parameter kind {kind:?}")),
+    })
+}
+
+/// # Safety
+/// `c`'s arrays must be valid for their counts and its strings NUL-terminated.
+unsafe fn network(c: &CNetwork) -> Result<Network, String> {
+    let mut network = Network {
+        // SAFETY: the caller guarantees the string.
+        surface: unsafe { path(c.surface)? },
+        ..Default::default()
+    };
+    // SAFETY: the caller guarantees the arrays.
+    let (nodes, connections) = unsafe {
+        (
+            slice(c.nodes, c.node_count),
+            slice(c.connections, c.connection_count),
+        )
+    };
+    for n in nodes {
+        // SAFETY: as above.
+        let (path, node_type, params) = unsafe {
+            (
+                string(n.path)?,
+                string(n.node_type)?,
+                slice(n.params, n.param_count),
+            )
+        };
+        let mut node = Node {
+            node_type,
+            ..Default::default()
+        };
+        for p in params {
+            // SAFETY: as above.
+            let (name, value) = unsafe { (string(p.name)?, value(p)?) };
+            node.params.insert(name, value);
+        }
+        network.nodes.insert(path, node);
+    }
+    for c in connections {
+        // SAFETY: as above.
+        let (from, output, to, input) = unsafe {
+            (
+                string(c.from)?,
+                string(c.output)?,
+                string(c.to)?,
+                string(c.input)?,
+            )
+        };
+        let node = (network.nodes.get_mut(&to))
+            .ok_or_else(|| format!("a connection to {to}, which is not a node of the network"))?;
+        if node.connections.contains_key(&input) {
+            return Err(format!("input {input} of {to} is connected twice"));
+        }
+        node.connections
+            .insert(input, Connection { node: from, output });
+    }
+    Ok(network)
 }
 
 fn lock(handle: &Handle) -> Result<MutexGuard<'_, Renderer>, String> {
@@ -225,7 +369,8 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
 }
 
 /// Renders one frame into the render buffers it binds, and writes to
-/// `*converged` whether they now hold this frame rather than the one before.
+/// `*converged` whether they now hold this frame rather than the one
+/// before, with no material build still out.
 ///
 /// # Safety
 /// `renderer` must be live, `frame` valid for reads, each bound AOV's
@@ -270,6 +415,7 @@ pub unsafe extern "C" fn pika_render(
             depth: aov(&f.depth, "depth")?,
             normal: aov(&f.normal, "normal")?,
             render_tags,
+            texture_cap: f.texture_cap,
         };
         let done = lock(handle)?.render(frame)?;
         // SAFETY: the caller guarantees one write.
@@ -345,9 +491,7 @@ pub unsafe extern "C" fn pika_mesh_topology(
                 face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
                     .to_vec(),
                 holes: unsafe { slice(r.holes, r.hole_count) }.to_vec(),
-                offsets: unsafe { slice(r.stencil_offsets, r.point_count + 1) }.to_vec(),
-                indices: unsafe { slice(r.stencil_indices, r.entry_count) }.to_vec(),
-                weights: unsafe { slice(r.stencil_weights, r.entry_count) }.to_vec(),
+                stencils: unsafe { stencils(&r.stencils) },
             }),
         };
         lock(handle)?.store.set_topology(id, topology)
@@ -400,6 +544,83 @@ pub unsafe extern "C" fn pika_mesh_normals(
 pub unsafe extern "C" fn pika_mesh_no_normals(renderer: *const Handle, id: u64) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.store.set_normals(id, None))
+}
+
+/// Writes the name of the float2 primvar the mesh's material reads, the
+/// texcoord to fetch, to `out`, or "" when it reads none.
+///
+/// # Safety
+/// `renderer` must be live and `out` valid for `capacity` writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_texcoord_name(
+    renderer: *const Handle,
+    id: u64,
+    out: *mut c_char,
+    capacity: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer.
+        let name = lock(unsafe { &*renderer })?.store.texcoord_name(id)?;
+        let name = CString::new(name.unwrap_or_default())
+            .map_err(|_| "the primvar's name holds a NUL".to_owned())?;
+        let bytes = name.as_bytes_with_nul();
+        if bytes.len() > capacity {
+            return Err(format!(
+                "the primvar's name {name:?} is longer than {capacity} bytes"
+            ));
+        }
+        // SAFETY: the caller guarantees `capacity` writable bytes at `out`,
+        // and `bytes` is no longer.
+        unsafe {
+            out.cast::<u8>()
+                .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len())
+        };
+        Ok(())
+    })
+}
+
+/// The float2 primvar `name` of the mesh, the texcoord its material reads.
+///
+/// # Safety
+/// `renderer` must be live, `name` and `interpolation` NUL-terminated
+/// strings and `values` valid for `count` reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_texcoord(
+    renderer: *const Handle,
+    id: u64,
+    name: *const c_char,
+    interpolation: *const c_char,
+    values: *const [f32; 2],
+    count: usize,
+    refined: *const CRefinedTexcoord,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer, the strings and the arrays.
+        let (handle, name, token) = unsafe { (&*renderer, string(name)?, string(interpolation)?) };
+        // SAFETY: as above.
+        let values = unsafe { slice(values, count) }.to_vec();
+        let texcoord = Texcoord {
+            name,
+            interpolation: Interpolation::from_token(&token)?,
+            values,
+            // SAFETY: as above.
+            refined: unsafe { refined.as_ref() }.map(|r| RefinedTexcoord {
+                // SAFETY: as above.
+                face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
+                    .to_vec(),
+                stencils: unsafe { stencils(&r.stencils) },
+            }),
+        };
+        lock(handle)?.store.set_texcoord(id, Some(texcoord))
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_no_texcoord(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.set_texcoord(id, None))
 }
 
 /// # Safety
@@ -578,6 +799,58 @@ pub unsafe extern "C" fn pika_instancer_primvars(
     })
 }
 
+/// Adds a material to the store and writes its id, never reused, to `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_material(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_material(id))
+}
+
+/// Replaces a material's network, and writes to `*dirty` whether its
+/// meshes must sync again, because it reads a primvar it did not before.
+///
+/// # Safety
+/// `renderer` must be live, `network` and everything it points to valid
+/// for reads for the duration of the call, and `dirty` for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_material_network(
+    renderer: *const Handle,
+    id: u64,
+    network: *const CNetwork,
+    dirty: *mut bool,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the network.
+        let (handle, network) = unsafe { (&*renderer, self::network(&*network)?) };
+        let changed = lock(handle)?.store.set_network(id, network)?;
+        // SAFETY: the caller guarantees `dirty` is writable.
+        unsafe { dirty.write(changed) };
+        Ok(())
+    })
+}
+
 /// Adds basis curves to the store and writes their id, never reused, to `*out`.
 ///
 /// # Safety
@@ -712,6 +985,17 @@ pub unsafe extern "C" fn pika_stats(
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn a_panic_says_what_it_said() {
+        let payloads: [Box<dyn Any + Send>; 3] = [
+            Box::new("a str"),
+            Box::new(String::from("a string")),
+            Box::new(7u8),
+        ];
+        let messages: Vec<String> = payloads.iter().map(|p| panic_message(p.as_ref())).collect();
+        assert_eq!(messages, ["a str", "a string", "unknown payload"]);
+    }
 
     fn last_error() -> String {
         // SAFETY: the pointer is valid until the next failing call on this thread.
