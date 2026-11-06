@@ -17,7 +17,7 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::cache;
@@ -88,6 +88,17 @@ impl Bake {
         for dir in [&materials, &textures] {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create the cache {}: {e}", dir.display()))?;
+        }
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        if cache::on_nfs(&mounts, &textures) {
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "pika: warning: the cache {} is on NFS, from which textures upload slowly; \
+                     set PIKA_CACHE to a local disk",
+                    root.display()
+                )
+            });
         }
         Ok(Self {
             materials,

@@ -4,8 +4,11 @@
 //! the materials drawn, with the samplers they are read through.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
 use std::ops::Range;
+use std::os::unix::fs::FileExt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use ash::vk;
 
@@ -25,9 +28,18 @@ pub struct Texture {
     pub wrap: [u32; 2],
     /// The layer of each tile, which the shader reads (`mx_texture.slang`).
     pub tiles: Vec<u32>,
-    /// Each level's bytes within `file`, all its layers, finest first.
+    /// Each level's bytes within the file, all its layers, finest first.
     pub levels: Vec<Range<usize>>,
-    pub file: Vec<u8>,
+    pub contents: Contents,
+}
+
+/// Where a texture's levels are read from when it uploads (`read_levels`).
+pub enum Contents {
+    /// The baked file, open from its header's read, so a build holds no
+    /// level bytes in memory however large its textures.
+    Open(File),
+    /// The whole file in memory.
+    Memory(Vec<u8>),
 }
 
 impl Texture {
@@ -40,7 +52,22 @@ impl Texture {
     pub fn capped(&self) -> bool {
         self.source != [self.width, self.height]
     }
+
+    /// Reads its levels, finest first, into `into`, which is `bytes()` long.
+    pub fn read_levels(&self, into: &mut [u8]) -> std::io::Result<()> {
+        let start = self.levels[0].start;
+        match &self.contents {
+            Contents::Open(file) => file.read_exact_at(into, start as u64),
+            Contents::Memory(file) => {
+                into.copy_from_slice(&file[start..]);
+                Ok(())
+            }
+        }
+    }
 }
+
+/// The longest header: the fixed words and a set's tile table.
+const HEADER: usize = 44 + 4 * 100;
 
 /// A 1×1 texture of `texel`: what an image whose file is missing is drawn
 /// as (`bake::build`). Periodic, so a node reading the file's wrap modes
@@ -55,26 +82,41 @@ pub fn solid(texel: [f32; 4]) -> Texture {
         wrap: [2, 2],
         tiles: vec![0],
         levels: std::iter::once(0..16).collect(),
-        file: texel.iter().flat_map(|v| v.to_le_bytes()).collect(),
+        contents: Contents::Memory(texel.iter().flat_map(|v| v.to_le_bytes()).collect()),
     }
 }
 
+/// Reads the baked file `path`'s header, checked against the file's
+/// length, and keeps the file open for its levels.
 pub fn read(path: &Path) -> Result<Texture, String> {
-    let file = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    parse(file).map_err(|e| format!("{} {e}", path.display()))
+    let cannot = |e: std::io::Error| format!("cannot read {}: {e}", path.display());
+    let file = File::open(path).map_err(cannot)?;
+    let len = file.metadata().map_err(cannot)?.len() as usize;
+    let mut head = vec![0; len.min(HEADER)];
+    file.read_exact_at(&mut head, 0).map_err(cannot)?;
+    header(&head, len, Contents::Open(file)).map_err(|e| format!("{} {e}", path.display()))
 }
 
+/// The texture whose whole file is `file`, as the tests build them.
+#[cfg(test)]
 pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
-    if file.len() < 44 || &file[..4] != b"pika" {
+    let head = file[..file.len().min(HEADER)].to_vec();
+    header(&head, file.len(), Contents::Memory(file))
+}
+
+/// The texture whose file of `len` bytes begins with `head`, the file
+/// itself or at least its `HEADER` bytes, its levels in `contents`.
+fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String> {
+    if head.len() < 44 || &head[..4] != b"pika" {
         return Err("is not a baked texture".into());
     }
-    let word = |i: usize| u32::from_le_bytes(file[4 + 4 * i..8 + 4 * i].try_into().unwrap());
+    let word = |i: usize| u32::from_le_bytes(head[4 + 4 * i..8 + 4 * i].try_into().unwrap());
     let (width, height, layers, levels) = (word(0), word(1), word(2), word(3));
     let format = vk::Format::from_raw(word(4) as i32);
     let source = [word(5), word(6)];
     let wrap = [word(7), word(8)];
     let entries = word(9) as usize;
-    if entries != 1 && entries != 100 || file.len() < 44 + 4 * entries {
+    if entries != 1 && entries != 100 || head.len() < 44 + 4 * entries {
         return Err(format!(
             "has a tile table of {entries} entries, not 1 or 100"
         ));
@@ -120,10 +162,10 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         w = (w / 2).max(1);
         h = (h / 2).max(1);
     }
-    if offset != file.len() {
+    if offset != len {
         return Err(format!(
             "holds {} bytes of levels where {} are expected",
-            file.len() - ranges[0].start,
+            len.saturating_sub(ranges[0].start),
             offset - ranges[0].start
         ));
     }
@@ -136,7 +178,7 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
         wrap,
         tiles,
         levels: ranges,
-        file,
+        contents,
     })
 }
 
@@ -181,9 +223,8 @@ pub struct Binding {
 }
 
 impl Image {
-    /// Creates the image for `texture` and the staging buffer holding its
-    /// levels, which `record` copies from.
-    fn new(device: &gpu::Device, texture: &Texture) -> Result<(Self, Buffer), String> {
+    /// Creates the image for `texture`.
+    fn new(device: &gpu::Device, texture: &Texture) -> Result<Self, String> {
         let d = &device.raw;
         let info = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
@@ -234,14 +275,7 @@ impl Image {
             .subresource_range(range(texture));
         i.view = unsafe { d.create_image_view(&view_info, None) }
             .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
-        // The levels alone: each starts at a multiple of its format's block
-        // size then, which a copy's buffer offset must be; the header is
-        // not one.
-        let usage = vk::BufferUsageFlags::TRANSFER_SRC;
-        let levels = &texture.file[texture.levels[0].start..];
-        let mut staging = Buffer::host(device, levels.len() as u64, usage, host)?;
-        staging.bytes()[..levels.len()].copy_from_slice(levels);
-        Ok((i, staging))
+        Ok(i)
     }
 
     /// Records into `cb`, outside rendering, the copies of `texture`'s
@@ -361,22 +395,34 @@ impl Textures {
     }
 
     /// The baked texture keyed `key`, read as `texture`, loaded now unless
-    /// it is, and the bytes that uploaded: 0 when it was.
+    /// it is, its levels read into a staging buffer; the bytes that
+    /// uploaded, 0 when it was loaded, and the time their read took.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         key: &str,
         texture: &Texture,
-    ) -> Result<u64, String> {
+    ) -> Result<(u64, Duration), String> {
         if self.images.contains_key(key) {
-            return Ok(0);
+            return Ok((0, Duration::ZERO));
         }
-        let (image, staging) = Image::new(device, texture)?;
+        let image = Image::new(device, texture).map_err(|e| format!("{key}: {e}"))?;
+        // The levels alone: each starts at a multiple of its format's block
+        // size then, which a copy's buffer offset must be; the header is
+        // not one.
+        let usage = vk::BufferUsageFlags::TRANSFER_SRC;
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let size = texture.bytes();
+        let mut staging = Buffer::host(device, size, usage, host)?;
+        let start = Instant::now();
+        (texture.read_levels(&mut staging.bytes()[..size as usize]))
+            .map_err(|e| format!("cannot read the levels of {key}: {e}"))?;
+        let read = start.elapsed();
         image.record(cb, &staging, texture);
         self.staging.push(staging);
         self.images.insert(key.to_owned(), image);
-        Ok(texture.bytes())
+        Ok((size, read))
     }
 
     /// What a surface binds for the texture keyed `key`, loaded and kept
@@ -470,7 +516,16 @@ pub mod tests {
         assert_eq!(t.bytes(), 16);
         assert!(!t.capped());
         assert_eq!(level_size(t.format, 1, 1), Some(16));
-        assert_eq!(f32::from_le_bytes(t.file[4..8].try_into().unwrap()), 0.4);
+        let mut texel = [0; 16];
+        t.read_levels(&mut texel).unwrap();
+        assert_eq!(f32::from_le_bytes(texel[4..8].try_into().unwrap()), 0.4);
+    }
+
+    /// `t`'s levels as an upload reads them.
+    fn levels(t: &Texture) -> Vec<u8> {
+        let mut bytes = vec![0; t.bytes() as usize];
+        t.read_levels(&mut bytes).unwrap();
+        bytes
     }
 
     /// The bake tool wrote this for bake/fixtures/ramp.exr, whose texels
@@ -487,9 +542,10 @@ pub mod tests {
         assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
         assert_eq!(t.levels[0].start, 48);
+        let bytes = levels(&t);
         let texel = |level: usize, x: usize, y: usize| {
-            let at = t.levels[level].start + (y * (8 >> level) + x) * 8;
-            let f = |i: usize| f32::from_le_bytes(t.file[at + i..at + i + 4].try_into().unwrap());
+            let at = t.levels[level].start - 48 + (y * (8 >> level) + x) * 8;
+            let f = |i: usize| f32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap());
             [f(0), f(4)]
         };
         assert_eq!(texel(0, 3, 5), [3.5 / 8.0, 5.5 / 8.0]);
@@ -518,6 +574,60 @@ pub mod tests {
         let mut bad = RAMP.to_vec();
         bad[44] = 1;
         assert!(parse(bad).is_err(), "a tile past the layers");
+    }
+
+    #[test]
+    fn reads_the_levels_from_the_open_file() {
+        let path = std::env::temp_dir().join(format!("pika_texture_{}", std::process::id()));
+        std::fs::write(&path, RAMP).unwrap();
+        let t = read(&path).unwrap();
+        assert!(matches!(t.contents, Contents::Open(_)));
+        assert_eq!(levels(&t), RAMP[48..], "the levels, not the header");
+
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(RAMP.len() as u64 - 8).unwrap();
+        let mut bytes = vec![0; t.bytes() as usize];
+        assert!(
+            t.read_levels(&mut bytes).is_err(),
+            "cut short after its header was read"
+        );
+        file.set_len(48).unwrap();
+        let why = read(&path).err().unwrap();
+        assert!(
+            why.contains("holds 0 bytes of levels where 680 are expected"),
+            "a header and no levels: {why}"
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn levels_follow_the_header_in_each_format() {
+        // A 5×3 image of two layers: three levels, 5×3, 2×1 and 1×1.
+        for (format, sizes) in [
+            (vk::Format::R32_SFLOAT, [60, 8, 4]),
+            (vk::Format::R32G32_SFLOAT, [120, 16, 8]),
+            (vk::Format::R32G32B32A32_SFLOAT, [240, 32, 16]),
+            (vk::Format::BC4_UNORM_BLOCK, [16, 8, 8]),
+            (vk::Format::BC7_UNORM_BLOCK, [32, 16, 16]),
+            (vk::Format::BC7_SRGB_BLOCK, [32, 16, 16]),
+        ] {
+            let mut file = b"pika".to_vec();
+            let words = [5, 3, 2, 3, format.as_raw() as u32, 5, 3, 0, 0, 1, 0];
+            for word in words {
+                file.extend_from_slice(&word.to_le_bytes());
+            }
+            let size: usize = sizes.iter().map(|s| 2 * s).sum();
+            file.resize(48 + size, 7);
+            let t = parse(file.clone()).unwrap();
+            let mut start = 48;
+            for (level, s) in t.levels.iter().zip(sizes) {
+                assert_eq!(*level, start..start + 2 * s, "{format:?}");
+                start = level.end;
+            }
+            assert_eq!(t.bytes() as usize, size);
+            file.pop();
+            assert!(parse(file).is_err(), "{format:?} a byte short");
+        }
     }
 
     #[test]

@@ -9,6 +9,7 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use ash::vk;
 
@@ -113,6 +114,8 @@ pub struct Update {
     pub loaded: u64,
     /// The textures loaded whose source the cap shrank.
     pub capped: usize,
+    /// Reading the loaded textures' levels from their files.
+    pub read: Duration,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
@@ -335,8 +338,9 @@ impl Shade {
             drawn.buffer.bytes(),
         )?;
         for baked in &output.textures {
-            let loaded = textures.load(device, cb, &baked.key, &baked.texture)?;
+            let (loaded, read) = textures.load(device, cb, &baked.key, &baked.texture)?;
             update.loaded += loaded;
+            update.read += read;
             update.capped += usize::from(loaded > 0 && baked.texture.capped());
             drawn.textures.push(baked.key.clone());
         }

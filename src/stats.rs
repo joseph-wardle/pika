@@ -68,6 +68,8 @@ pub struct Frame {
     pub baked: usize,
     /// The baked bytes the textures loaded this frame uploaded.
     pub loaded: u64,
+    /// Reading those textures' levels from their files, on the render thread.
+    pub texture_read: Duration,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
 }
@@ -276,6 +278,7 @@ impl Frame {
             ("record_ms".into(), ms(self.record)),
             ("wait_ms".into(), ms(self.times.wait)),
             ("place_ms".into(), ms(self.place)),
+            ("texture_read_ms".into(), ms(self.texture_read)),
         ]);
         pairs.extend(
             (self.times.spans.iter()).map(|(label, t)| (format!("gpu_{label}_ms"), ms(*t))),
@@ -404,6 +407,7 @@ mod tests {
             compiled: 0,
             baked: 2,
             loaded: 3_145_728,
+            texture_read: ms(0.25),
             pending: 1,
         }
     }
@@ -411,7 +415,7 @@ mod tests {
     #[test]
     fn frame_line_is_key_value_pairs_named_by_mark() {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
-             wait_ms 5.250 place_ms 4.500 gpu_update_ms 0.875 gpu_cull_ms 0.125 \
+             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 gpu_update_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \

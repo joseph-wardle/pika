@@ -18,6 +18,29 @@ pub fn root() -> Result<PathBuf, String> {
     Ok(Path::new(&home).join(".cache/pika"))
 }
 
+/// Whether `path`, which exists, lies on NFS by `mounts`, the contents of
+/// `/proc/self/mounts`: the render thread reads textures' levels from the
+/// cache as they upload, which a network file system stalls.
+pub fn on_nfs(mounts: &str, path: &Path) -> bool {
+    let Ok(path) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    // The deepest mount holding `path`, the last of equals: an automounter
+    // lists its trigger before the file system mounted over it.
+    let mut kind = "";
+    let mut depth = 0;
+    for line in mounts.lines() {
+        let mut fields = line.split(' ').skip(1);
+        let (Some(dir), Some(fs)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if path.starts_with(dir) && dir.len() >= depth {
+            (kind, depth) = (fs, dir.len());
+        }
+    }
+    kind.starts_with("nfs")
+}
+
 /// FNV-1a over `parts` in order. It keys the cache, so it must not change
 /// with the Rust version as `DefaultHasher` may.
 pub fn fnv1a(parts: &[&[u8]]) -> u64 {
@@ -62,6 +85,21 @@ pub fn discard(path: &Path, why: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nfs_is_the_deepest_mount() {
+        let mounts = "/dev/root / xfs rw 0 0\n\
+                      auto /proc autofs rw 0 0\n\
+                      server:/proc /proc nfs4 rw 0 0\n\
+                      tmpfs /proc/sys tmpfs rw 0 0\n";
+        let proc = Path::new("/proc/self");
+        assert!(on_nfs(mounts, proc), "the file system over the automounter");
+        assert!(!on_nfs(mounts, Path::new("/")), "the root above it");
+        assert!(!on_nfs(mounts, Path::new("/proc/sys")), "a mount within it");
+        assert!(!on_nfs(mounts, Path::new("/proc/nowhere")), "a path absent");
+        let local = mounts.replace("nfs4", "xfs");
+        assert!(!on_nfs(&local, proc), "local under the automounter");
+    }
 
     #[test]
     fn fnv1a_matches_the_reference_vectors() {
