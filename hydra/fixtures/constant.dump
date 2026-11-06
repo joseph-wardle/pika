@@ -1,0 +1,54 @@
+sync 1
+material /world/mtl/paint
+  surface surface
+  node base ND_constant_color3
+    typeName:value text "color3f"
+    value float 0.7 0.3 0.2
+  node surface ND_standard_surface_surfaceshader
+    base_color from base out
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none
+sync 2
+material /world/mtl/paint
+  surface surface
+  node base ND_constant_color3
+    typeName:value text "color3f"
+    value float 0.2 0.5 0.8
+  node surface ND_standard_surface_surfaceshader
+    base_color from base out
+mesh /world/tri
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material "/world/mtl/paint"
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none

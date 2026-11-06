@@ -52,7 +52,8 @@ What the reference encodes:
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
   Surface with its specular off (`lit`, within the facing angle each
-  holds), and an unlit emission of an image sampled at a primvar. The
+  holds, its inputs values or constant nodes' through dot nodes), and an
+  unlit emission of an image sampled at a primvar. The
   sample (`sample`) is trilinear at the level a Vulkan sampler picks from
   the pixel's st footprint, from the file's stored levels within
   pika:textureCap, in the working space from the declared colour space
@@ -116,7 +117,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sRGB read as raw", "8-bit auto read as raw", "8-bit data read as sRGB", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
-            "the cap ignored", "missing file's fallback ignored", "frame 1's reference"]
+            "the cap ignored", "missing file's fallback ignored", "constant nodes at their default",
+            "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 # ACEScg to linear Rec.709 (see the module's doc).
@@ -487,15 +489,26 @@ def metadata(path, control=None):
     return tuple(w if w in ("black", "clamp", "periodic", "mirror") else "black" for w in (words + words)[:2])
 
 
+def constant(shader, name):
+    """The constant node `shader`'s input `name` reads through dot nodes,
+    or None."""
+    node = upstream(shader, name)
+    while node and node.GetShaderId().startswith("ND_dot_"):
+        node = upstream(node, "in")
+    return node if node and node.GetShaderId().startswith("ND_constant_") else None
+
+
 def lit(surface, time, control=None):
     """The Look of an OpenPBR or Standard Surface shader with its specular
-    off (hydra/images/pbr.usda), its inputs read at `time`, its normal
-    mapped when connected (hydra/images/normalmap.usda)."""
+    off (hydra/images/pbr.usda), its inputs read at `time` as values or
+    constant nodes' values (hydra/images/constant.usda), its normal mapped
+    when connected (hydra/images/normalmap.usda)."""
     *names, bump, facing = LIT[surface.GetShaderId()]
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
     extra = sorted(set(authored) - set(names) - {bump})
-    connected = [n for n, i in authored.items() if i.HasConnectedSource() and n != bump]
+    connected = [n for n, i in authored.items()
+                 if i.HasConnectedSource() and n != bump and not constant(surface, n)]
     if extra or connected:
         raise ValueError(f"{path}: the reference lights a surface's base and emission as values; "
                          f"it has no closed form for {extra or connected}")
@@ -510,10 +523,14 @@ def lit(surface, time, control=None):
                              "image's vector3 sample at a primvar")
 
     def value(name):
-        if name in authored:
-            v = authored[name].Get(time)
+        node = constant(surface, name) if name in authored else None
+        shader, name = (node, "value") if node else (surface, name)
+        input = shader.GetInput(name)
+        default = node and control == "constant nodes at their default"
+        if input and input.GetAttr().HasAuthoredValue() and not default:
+            v = input.Get(time)
         else:
-            v = NODEDEFS.getNodeDef(surface.GetShaderId()).getActiveInput(name).getValue()
+            v = NODEDEFS.getNodeDef(shader.GetShaderId()).getActiveInput(name).getValue()
         return tuple(v) if hasattr(v, "__len__") else v
 
     if value(names[4]) != 0:
