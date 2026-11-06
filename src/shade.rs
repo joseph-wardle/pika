@@ -15,10 +15,10 @@ use ash::vk;
 use crate::bake::{self, Bake, Builder, Built, Manifest};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
-use crate::material::{self, Document, Source};
+use crate::material::{self, Document, Network, Source};
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::stats;
-use crate::store::{Moved, Network, Store};
+use crate::store::{Moved, Store};
 use crate::target;
 use crate::texture::{Binding, Textures};
 use crate::uniforms::{self, Layout};
@@ -187,7 +187,7 @@ impl Shade {
             };
             self.failed.remove(&id);
             self.stale = true;
-            if let Err(e) = self.material(id, network, cap) {
+            if let Err(e) = self.material(id, network, &material.document, cap) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.materials.remove(&id);
                 self.failed.insert(id);
@@ -238,8 +238,14 @@ impl Shade {
     /// document, textures and cap, else submits its build under `cap`,
     /// leaving the material as it was, clay before its first, until the
     /// build lands. A network with no surface leaves the material drawn clay.
-    fn material(&mut self, id: u64, network: &Network, cap: u32) -> Result<(), String> {
-        let Some(document) = material::document(network)? else {
+    fn material(
+        &mut self,
+        id: u64,
+        network: &Network,
+        document: &Result<Option<Document>, String>,
+        cap: u32,
+    ) -> Result<(), String> {
+        let Some(document) = document.as_ref().map_err(String::clone)? else {
             self.builder.forget(id);
             self.materials.remove(&id);
             return Ok(());
@@ -249,21 +255,21 @@ impl Shade {
             && uniforms.cap == cap
         {
             let surface = &self.surfaces[&document.hash];
-            if bake::sources(&surface.manifest, &document, network)? == uniforms.sources {
+            if bake::sources(&surface.manifest, document, network)? == uniforms.sources {
                 self.builder.forget(id);
                 uniforms::pack(
                     &surface.manifest,
                     &surface.layout,
-                    &document,
+                    document,
                     network,
                     uniforms.buffer.bytes(),
                 )?;
                 // An address mode is a value too: the samplers follow it.
-                return uniforms.bind(&mut self.textures, surface, &document, network);
+                return uniforms.bind(&mut self.textures, surface, document, network);
             }
         }
         let held = self.surfaces.contains_key(&document.hash);
-        (self.builder).submit(id, document, network.clone(), cap, held)
+        (self.builder).submit(id, document.clone(), network.clone(), cap, held)
     }
 
     /// Installs a build that landed: its surface into `surfaces` unless

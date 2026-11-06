@@ -1,5 +1,5 @@
-//! A material's shading network as the MaterialX document Pika compiles, and
-//! the key that says which materials share a shader.
+//! A material's shading network, as Hydra hands it over and as the MaterialX
+//! document Pika compiles, and the key that says which materials share a shader.
 //!
 //! The document holds only what decides the generated code: the nodes
 //! upstream of the surface, named by their MaterialX nodedefs, their
@@ -12,11 +12,71 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::cache;
-use crate::store::{Connection, Network, Node, Value};
 
 /// A texture as a node's input declares it: the file, the colour space the
 /// file is in, the encoding the bake tool stores it with, and, when the
 /// file is missing, the value the node draws instead.
+/// `HdMaterialNetwork2`: shader nodes by path, and the node whose output is
+/// the material's surface, when it has one.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Network {
+    pub nodes: BTreeMap<String, Node>,
+    pub surface: Option<String>,
+}
+
+/// One shader node: its identifier ("UsdPreviewSurface",
+/// "ND_open_pbr_surface_surfaceshader"), its authored values by input name,
+/// and the upstream outputs connected to its inputs. An input may have both.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Node {
+    pub node_type: String,
+    pub params: BTreeMap<String, Value>,
+    pub connections: BTreeMap<String, Connection>,
+}
+
+/// An upstream node's output.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Connection {
+    pub node: String,
+    pub output: String,
+}
+
+/// A parameter value as the `VtValue` held it. Numbers keep their width (a
+/// `GfVec3f` is three floats) but not whether they are a colour or a
+/// vector, which the node's definition says.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Value {
+    Float(Vec<f32>),
+    Int(i32),
+    Bool(bool),
+    /// A token or string.
+    Text(String),
+    /// An asset's resolved path.
+    Asset(String),
+}
+
+impl Network {
+    /// The bytes Hydra handed over for the network, as counted for a pull.
+    pub fn bytes(&self) -> usize {
+        let mut bytes = self.surface.as_ref().map_or(0, String::len);
+        for (path, node) in &self.nodes {
+            bytes += path.len() + node.node_type.len();
+            for (name, value) in &node.params {
+                bytes += name.len()
+                    + match value {
+                        Value::Float(v) => size_of_val(v.as_slice()),
+                        Value::Int(_) | Value::Bool(_) => 4,
+                        Value::Text(s) | Value::Asset(s) => s.len(),
+                    };
+            }
+            for (name, c) in &node.connections {
+                bytes += name.len() + c.node.len() + c.output.len();
+            }
+        }
+        bytes
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Source {
     pub file: String,
@@ -86,7 +146,7 @@ pub fn source(node: &Node, input: &str) -> Result<Source, String> {
 
 /// A network's MaterialX document, its key, and the texcoord its meshes
 /// carry.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Document {
     pub text: String,
     /// FNV-1a of the text, which keys the cache.

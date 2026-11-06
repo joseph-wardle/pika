@@ -7,8 +7,7 @@ use std::collections::BTreeMap;
 
 use crate::bake::Manifest;
 use crate::json::{self, Json};
-use crate::material::{self, Document};
-use crate::store::{Network, Node, Value};
+use crate::material::{self, Document, Network, Node, Value};
 
 /// The uniform block's byte layout and its textures' bindings, in
 /// descriptor set 0, as slangc laid them out.

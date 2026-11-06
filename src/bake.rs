@@ -22,9 +22,8 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::abi;
 use crate::cache;
-use crate::material::{self, Document, Source};
+use crate::material::{self, Document, Network, Node, Source};
 use crate::shader;
-use crate::store::{Network, Node};
 use crate::texture::{self, Texture};
 use crate::uniforms;
 

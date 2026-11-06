@@ -12,11 +12,11 @@ use std::ffi::{CStr, CString, c_char};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, MutexGuard};
 
-use crate::material;
+use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    Connection, InstancePrimvars, Instancing, Interpolation, Network, Node, Normals, Refined,
-    RefinedTexcoord, Scheme, Stencils, Subset, Texcoord, Topology, Value,
+    InstancePrimvars, Instancing, Interpolation, Normals, Refined, RefinedTexcoord, Scheme,
+    Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -844,10 +844,7 @@ pub unsafe extern "C" fn pika_material_network(
     call(|| {
         // SAFETY: the caller guarantees the renderer and the network.
         let (handle, network) = unsafe { (&*renderer, self::network(&*network)?) };
-        // A network Pika cannot build is warned of when its build is tried
-        // (`shade`); its meshes carry no texcoord.
-        let texcoord = (material::document(&network).ok().flatten()).map(|d| d.texcoord);
-        let changed = lock(handle)?.store.set_network(id, network, texcoord)?;
+        let changed = lock(handle)?.store.set_network(id, network)?;
         // SAFETY: the caller guarantees `dirty` is writable.
         unsafe { dirty.write(changed) };
         Ok(())
