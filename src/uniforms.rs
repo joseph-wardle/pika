@@ -205,7 +205,15 @@ pub fn pack(
         let words = if uniform.name.starts_with("geomprop_") {
             shape.initial(&uniform.initial)?
         } else {
-            let (path, node, input) = document.reader(network, &uniform.name)?;
+            let (mut path, mut node, mut input) = document.reader(network, &uniform.name)?;
+            // The generator folds a constant node away, moving its value
+            // onto the input it feeds, so the variable names that input
+            // (`n1_color` for a constant into node 1's `color`).
+            while let Some(c) = node.connections.get(input)
+                && network.nodes[&c.node].node_type.starts_with("ND_constant_")
+            {
+                (path, node, input) = (&c.node, &network.nodes[&c.node], "value");
+            }
             match node.params.get(input) {
                 // A text value went into the document, and the generator
                 // resolved it into the initial (a geomprop name), or is an
@@ -412,5 +420,40 @@ pub mod tests {
         );
         roughness(&mut wide, Value::Int(1));
         assert!(pack(&manifest, &l, &document, &wide, &mut bytes).is_err());
+    }
+
+    #[test]
+    fn pack_takes_a_constant_node_s_value_for_the_input_it_feeds() {
+        let (manifest, l) = (fixture_manifest(), layout(REFLECTION).unwrap());
+        let roughness = |upstream: &str, value: Option<f32>| {
+            let mut network = fixture();
+            let surface = network.nodes.get_mut("surface").unwrap();
+            surface.params.remove("roughness");
+            let feed = material::Connection {
+                node: "rough".into(),
+                output: "out".into(),
+            };
+            surface.connections.insert("roughness".into(), feed);
+            let mut rough = material::Node {
+                node_type: upstream.into(),
+                ..Default::default()
+            };
+            if let Some(v) = value {
+                rough.params.insert("value".into(), Value::Float(vec![v]));
+                rough.params.insert("in".into(), Value::Float(vec![v]));
+            }
+            network.nodes.insert("rough".into(), rough);
+            // The surface stays node 0, which the fixture's manifest reads.
+            let document = material::document(&network).unwrap().unwrap();
+            let mut bytes = vec![0; l.size];
+            pack(&manifest, &l, &document, &network, &mut bytes).unwrap();
+            f32_at(&bytes, l.offsets["n0_roughness"])
+        };
+        assert_eq!(roughness("ND_constant_float", Some(0.75)), 0.75);
+        // The generator keeps any other node, so the input's uniform is not
+        // the one it reads, and neither is an unauthored constant's value:
+        // each keeps the initial value.
+        assert_eq!(roughness("ND_dot_float", Some(0.75)), 0.5);
+        assert_eq!(roughness("ND_constant_float", None), 0.5);
     }
 }

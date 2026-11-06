@@ -1,0 +1,47 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A constant node's value is a value: the generator folds the node into
+# the input it feeds, whose uniform carries the value, so frame 2's edit to
+# it compiles nothing.
+#
+# compiles: 1 then 0
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:out>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "ND_standard_surface_surfaceshader"
+                color3f inputs:base_color.connect = </world/mtl/paint/base.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "base"
+            {
+                uniform token info:id = "ND_constant_color3"
+                color3f inputs:value = (0.7, 0.3, 0.2)
+                color3f outputs:out
+            }
+        }
+    }
+}
