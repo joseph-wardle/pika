@@ -6,7 +6,8 @@
 # side and neither touches target/hydra. Then, in order: hydra/image.py
 # (husk and usdrecord renders against the ray cast), the store-dump
 # fixtures in hydra/fixtures/ (two frames each, the scene's .py edit between
-# them, RENDERS at a time; see fixture() for the header keys), and
+# them, RENDERS at a time; see fixture() for the header keys; a run's
+# <name>.store is its dump in the reference's form), and
 # hydra/engine.py (UsdImagingGL in hython, as usdview renders). usdrecord
 # and hython draw on a private Xvnc display started here. The validation
 # layer must be on and report nothing from Pika.
@@ -74,11 +75,18 @@ counts() {
         END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
 }
 
-# expected <name> <count> <default>: what the scene's header expects of the
-# count, in its "# <count>: ..." line, or the default.
+# keys <name>: the scene's "# key: value" lines: the header's last
+# paragraph, after a bare "#".
+keys() {
+    awk '/^#$/{ n = 0; after = 1; next } /^#/{ if (after) line[++n] = $0; next }
+        /^def /{ for (i = 1; i <= n; i++) print line[i]; exit }' "$ROOT/hydra/fixtures/$1.usda"
+}
+
+# expected <name> <key> <default>: what the scene's header expects of the
+# key, or the default.
 expected() {
     local line
-    line=$(sed -n "s/^# $2: //p" "$ROOT/hydra/fixtures/$1.usda" | head -n 1)
+    line=$(keys "$1" | sed -n "s/^# $2: //p" | head -n 1)
     echo "${line:-$3}"
 }
 
@@ -132,9 +140,10 @@ fixture() {
         fail "$name: no sync changed the store, so frame 2 is frame 1"
         return
     fi
-    diff -u "$dir/$name.dump" <(printf 'sync 1\n%s\nsync 2\n%s\n' \
-        "$(store_after 1 "$OUT/fixtures/$name.dump")" "$(store_after "$edit" "$OUT/fixtures/$name.dump")") ||
-        fail "$name: the store differs from $name.dump"
+    printf 'sync 1\n%s\nsync 2\n%s\n' "$(store_after 1 "$OUT/fixtures/$name.dump")" \
+        "$(store_after "$edit" "$OUT/fixtures/$name.dump")" >"$OUT/fixtures/$name.store"
+    diff -u "$dir/$name.dump" "$OUT/fixtures/$name.store" ||
+        fail "$name: the store differs from $name.dump ($OUT/fixtures/$name.store is this run's)"
     for n in $(seq $((edit + 1)) "$syncs"); do
         [ "$(store_after "$n" "$OUT/fixtures/$name.dump")" = "$(store_after "$edit" "$OUT/fixtures/$name.dump")" ] ||
             fail "$name: sync $n, a render repeated for frame 2, changed the store"
@@ -148,8 +157,8 @@ fixture() {
     # An edit to a value, a wrap mode or an asset path among them, compiles
     # nothing; one to the network's structure, the primvar a reader names
     # included, compiles its surface; a texture is baked once per file. The
-    # scene's header states what the run must count ("# key: value"; the
-    # default, when absent, in brackets):
+    # scene's header ends with what the run must count, "# key: value" lines
+    # in a paragraph of their own (the default, when absent, in brackets):
     #   compiles: A then B   surfaces compiled for frame 1, then for the edit (0 then 0)
     #   bakes: A then B      textures baked, likewise (0 then 0)
     #   warnings: N          material warnings, each once though husk renders a
@@ -164,6 +173,13 @@ fixture() {
     # The scenes that edit a material are each other's control. Every material
     # with a surface in frame 1's expected store must be pending on the first
     # frame and none on the last; a scene without one is the control.
+    local key
+    while IFS= read -r key; do
+        case $key in
+            "# compiles: "* | "# bakes: "* | "# warnings: "* | "# warned: "* | "# redundant bytes: "* | "# budget: "*) ;;
+            *) fail "$name: the header line \"$key\" is not a key this check reads" ;;
+        esac
+    done < <(keys "$name")
     local compiles bakes warnings warned redundant built c1 b1 c2 b2
     compiles=$(expected "$name" compiles "0 then 0")
     bakes=$(expected "$name" bakes "0 then 0")
@@ -208,7 +224,7 @@ done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 # Each fixture's check reports to a file of its own; one that stops short of
 # the end exits nonzero.
-export -f fixture clean store_after counts expected pending redundant fail
+export -f fixture clean store_after counts keys expected pending redundant fail
 export OUT ROOT
 printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \
     'set -euo pipefail; fixture "$1" >"$OUT/fixtures/$(basename "$1" .usda).report" 2>&1' _ {} ||

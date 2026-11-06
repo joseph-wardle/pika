@@ -152,6 +152,7 @@ fn fixed(name: &str) -> Result<Vec<u8>, String> {
 
 // The generator declares textures inside its uniform block, and slangc
 // warns that it moves them to bindings of their own (31106, 31107).
+// bake/check.sh compiles the fixture surface with FLAGS and these.
 const SURFACE_FLAGS: [&str; 2] = ["-warnings-disable", "31106,31107"];
 
 /// `bytes` as SPIR-V words. `read_spv` checks the magic alone, which a

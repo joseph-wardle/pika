@@ -362,9 +362,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // The wrap token is packed as the nodedef's integer, and read into
-        // the sampler; wrapT, unauthored, is useMetadata: the file's, as
-        // is a wrapS saying so, the block keeping the initial value.
+        // The wrap token is packed as the nodedef's integer; wrapT,
+        // unauthored, keeps the initial value.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 1);
         assert_eq!(bytes[l.offsets["n1_wrapT"]], 2);
         let tex = &network.nodes["tex"];
@@ -383,25 +382,6 @@ mod tests {
         wrap_s(&mut edited, "bogus");
         let error = pack(&manifest, &l, &document, &edited, &mut bytes).unwrap_err();
         assert!(error.starts_with("tex's wrapS is bogus"), "{error}");
-        // An image node authoring none is periodic; its tokens are the
-        // enumeration's own.
-        let mut image = tex.clone();
-        image.node_type = "ND_image_color3".into();
-        image.params.remove("wrapS");
-        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [2, 2]);
-        (image.params).insert("uaddressmode".into(), Value::Text("constant".into()));
-        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [0, 2]);
-        (image.params).insert("vaddressmode".into(), Value::Text("bogus".into()));
-        let error = address_modes(&image, [3, 0]).unwrap_err();
-        assert!(error.starts_with("vaddressmode is bogus"), "{error}");
-        let surface = &network.nodes["surface"];
-        assert_eq!(
-            address_modes(surface, [3, 0]).unwrap(),
-            [2, 2],
-            "no texture: periodic"
-        );
-        assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
-        assert!(node_input("u_viewPosition").is_err());
 
         // The generator's node for a default geomprop keeps its initial
         // value; any other uniform is a node's input.
@@ -443,5 +423,40 @@ mod tests {
         );
         roughness(&mut wide, Value::Int(1));
         assert!(pack(&manifest, &l, &document, &wide, &mut bytes).is_err());
+    }
+
+    #[test]
+    fn address_modes_follow_the_node_then_the_file() {
+        let network = fixture();
+        let tex = &network.nodes["tex"];
+        // wrapT, unauthored, is useMetadata: the file's, as is a wrapS
+        // saying so.
+        assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
+        let mut metadata = tex.clone();
+        (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
+        assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
+        // An image node authoring none is periodic; its tokens are the
+        // enumeration's own.
+        let mut image = tex.clone();
+        image.node_type = "ND_image_color3".into();
+        image.params.remove("wrapS");
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [2, 2]);
+        (image.params).insert("uaddressmode".into(), Value::Text("constant".into()));
+        assert_eq!(address_modes(&image, [3, 0]).unwrap(), [0, 2]);
+        (image.params).insert("vaddressmode".into(), Value::Text("bogus".into()));
+        let error = address_modes(&image, [3, 0]).unwrap_err();
+        assert!(error.starts_with("vaddressmode is bogus"), "{error}");
+        let surface = &network.nodes["surface"];
+        assert_eq!(
+            address_modes(surface, [3, 0]).unwrap(),
+            [2, 2],
+            "no texture: periodic"
+        );
+    }
+
+    #[test]
+    fn node_input_reads_the_generated_name() {
+        assert_eq!(node_input("n12_file").unwrap(), (12, "file"));
+        assert!(node_input("u_viewPosition").is_err());
     }
 }

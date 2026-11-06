@@ -40,14 +40,16 @@ grep -qx '#include "frame.slang"' "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not read the frame through shaders/frame.slang"
 ! grep -q "u_viewPosition;" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage declares the eye in the material's block"
-# The generator declares textures inside its uniform block, and slangc warns
-# that it moves them to bindings of their own, which is where Pika binds them.
-# The reflection is bake/fixtures/network.reflection.json's source, copied
-# from here when slangc or the libraries change.
+# The flags are the renderer's (src/shader.rs: FLAGS and SURFACE_FLAGS). The
+# reflection must match bake/fixtures/network.reflection.json, the layout
+# test's input, as JSON: copy it over when slangc or the libraries change.
 slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-entrypoint-name \
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
     fail "network: slangc rejected the surface"
+python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])))' \
+    "$FIXTURES/network.reflection.json" "$OUT/network/reflection.json" ||
+    fail "network: the reflection differs from the reference ($OUT/network/reflection.json is this run's)"
 
 "$BAKE" libraries > "$OUT/libraries" || fail "libraries: the listing failed"
 [ "$(head -1 "$OUT/libraries")" = "$(head -1 "$FIXTURES/network.manifest")" ] ||
