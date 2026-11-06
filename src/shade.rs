@@ -32,17 +32,14 @@ pub struct Shade {
     textures: Textures,
     /// By document hash.
     surfaces: BTreeMap<u64, Surface>,
-    /// By the store's material id; a material whose first build is out
-    /// has no entry, and is drawn clay, and one whose edit's build is out
-    /// keeps the entry it had, drawn as it was until the build lands.
-    materials: BTreeMap<u64, Uniforms>,
-    /// The materials that failed to build, each warned of once when it
-    /// did; `update` tries one again only when its network moves or the
-    /// cap changes.
-    failed: BTreeSet<u64>,
-    /// Whether a material came or went since the textures no material
-    /// uses were last dropped.
-    stale: bool,
+    /// By the store's material id; a material whose first build is out,
+    /// or that has no surface, has no entry and is drawn clay, and one
+    /// whose edit's build is out keeps the look it had until the build
+    /// lands.
+    looks: BTreeMap<u64, Look>,
+    /// Whether a look changed since the textures no look binds were last
+    /// dropped.
+    prune: bool,
     /// The last frame's texture cap, 0 for none; None before the first.
     cap: Option<u32>,
     /// The textures loaded since the last build landed whose source the
@@ -50,10 +47,27 @@ pub struct Shade {
     /// worth at once, rather than a line per texture, thousands on a
     /// production asset.
     capped: usize,
-    /// `material::clay`, drawn where `materials` has no entry.
-    clay: Uniforms,
-    /// `material::pink`, drawn for `failed`.
-    pink: Uniforms,
+    /// `material::clay`, drawn where `looks` has no entry.
+    clay: Material,
+    /// `material::pink`, drawn for `Look::Failed`.
+    pink: Material,
+}
+
+/// How a material is drawn.
+enum Look {
+    Built(Box<Material>),
+    /// Its build failed, warned of once when it did; `update` tries it
+    /// again only when its network moves or the cap changes.
+    Failed,
+}
+
+impl Look {
+    fn built(&self) -> Option<&Material> {
+        match self {
+            Look::Built(m) => Some(m),
+            Look::Failed => None,
+        }
+    }
 }
 
 /// The baked bytes a frame installs, past which the builds that landed
@@ -72,9 +86,10 @@ pub struct Surface {
     pipelines: Vec<vk::Pipeline>,
 }
 
-/// One material's uniform block, written in place when its values change,
-/// and the descriptor set binding it with its textures to its surface.
-struct Uniforms {
+/// One material as drawn: its uniform block, written in place when its
+/// values change, and the descriptor set binding it with its textures to
+/// its surface.
+struct Material {
     device: ash::Device,
     hash: u64,
     buffer: Buffer,
@@ -109,7 +124,7 @@ impl Shade {
         let bake = Bake::new()?;
         let mut textures = Textures::new(device);
         let mut surfaces = BTreeMap::new();
-        let mut builtin = |network: Network| -> Result<Uniforms, String> {
+        let mut builtin = |network: Network| -> Result<Material, String> {
             let document = material::document(&network)?.expect("Pika's networks have a surface");
             let built = Built::now(&bake, document, network);
             // No textures, so nothing is recorded or counted.
@@ -123,9 +138,8 @@ impl Shade {
             builder: Builder::new(bake),
             textures,
             surfaces,
-            materials: BTreeMap::new(),
-            failed: BTreeSet::new(),
-            stale: false,
+            looks: BTreeMap::new(),
+            prune: false,
             cap: None,
             capped: 0,
             clay,
@@ -151,23 +165,22 @@ impl Shade {
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
         self.textures.begin();
-        let before = self.materials.len();
-        self.materials
+        let before = self.looks.len();
+        self.looks
             .retain(|id, _| store.materials().contains_key(id));
-        self.stale |= self.materials.len() != before;
-        self.failed.retain(|id| store.materials().contains_key(id));
+        self.prune |= self.looks.len() != before;
         (self.builder).retain(|id| store.materials().contains_key(id));
         // Before any load: a material whose install fails this frame
         // keeps the textures it loaded until the next, when the uploads
         // recorded into `cb` have run. Collecting the used paths costs
-        // milliseconds on a large scene, so only a material coming or
-        // going asks for it.
-        if self.stale {
-            let used: BTreeSet<PathBuf> = (self.materials.values())
-                .flat_map(|u| u.textures.iter().cloned())
+        // milliseconds on a large scene, so only a look changing asks for
+        // it.
+        if self.prune {
+            let used: BTreeSet<PathBuf> = (self.looks.values().filter_map(Look::built))
+                .flat_map(|m| m.textures.iter().cloned())
                 .collect();
             self.textures.retain(&used);
-            self.stale = false;
+            self.prune = false;
         }
         let mut update = Update::default();
         let ids: Vec<u64> = if self.cap == Some(cap) {
@@ -186,12 +199,14 @@ impl Shade {
             let Some(network) = &material.network else {
                 continue;
             };
-            self.failed.remove(&id);
-            self.stale = true;
+            // A failed material is tried again, drawn clay meanwhile.
+            if let Some(Look::Failed) = self.looks.get(&id) {
+                self.looks.remove(&id);
+            }
             if let Err(e) = self.material(id, network, &material.document, cap) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
-                self.materials.remove(&id);
-                self.failed.insert(id);
+                self.looks.insert(id, Look::Failed);
+                self.prune = true;
             }
         }
         for built in self.builder.drain(INSTALL) {
@@ -199,23 +214,23 @@ impl Shade {
                 continue;
             };
             let id = built.id;
-            self.stale = true;
+            // Even a failed install leaves textures it loaded unbound.
+            self.prune = true;
             let missing = built.missing().to_vec();
             let (surfaces, textures) = (&mut self.surfaces, &mut self.textures);
             match Shade::install(device, surfaces, textures, built, cb, &mut update) {
-                Ok(uniforms) => {
+                Ok(drawn) => {
                     for input in &missing {
                         eprintln!(
                             "pika: warning: material {}: {input}; drawn with its fallback",
                             material.path
                         );
                     }
-                    self.materials.insert(id, uniforms);
+                    self.looks.insert(id, Look::Built(Box::new(drawn)));
                 }
                 Err(e) => {
                     eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
-                    self.materials.remove(&id);
-                    self.failed.insert(id);
+                    self.looks.insert(id, Look::Failed);
                 }
             }
         }
@@ -248,25 +263,25 @@ impl Shade {
     ) -> Result<(), String> {
         let Some(document) = document.as_ref().map_err(String::clone)? else {
             self.builder.forget(id);
-            self.materials.remove(&id);
+            self.prune |= self.looks.remove(&id).is_some();
             return Ok(());
         };
-        if let Some(uniforms) = self.materials.get_mut(&id)
-            && uniforms.hash == document.hash
-            && uniforms.cap == cap
+        if let Some(Look::Built(drawn)) = self.looks.get_mut(&id)
+            && drawn.hash == document.hash
+            && drawn.cap == cap
         {
             let surface = &self.surfaces[&document.hash];
-            if bake::sources(&surface.manifest, document, network)? == uniforms.sources {
+            if bake::sources(&surface.manifest, document, network)? == drawn.sources {
                 self.builder.forget(id);
                 uniforms::pack(
                     &surface.manifest,
                     &surface.layout,
                     document,
                     network,
-                    uniforms.buffer.bytes(),
+                    drawn.buffer.bytes(),
                 )?;
                 // An address mode is a value too: the samplers follow it.
-                return uniforms.bind(&mut self.textures, surface, document, network);
+                return drawn.bind(&mut self.textures, surface, document, network);
             }
         }
         (self.builder).submit(id, document.clone(), network.clone(), cap)
@@ -285,7 +300,7 @@ impl Shade {
         built: Built,
         cb: vk::CommandBuffer,
         update: &mut Update,
-    ) -> Result<Uniforms, String> {
+    ) -> Result<Material, String> {
         let output = built.result?;
         let hash = built.document.hash;
         let surface = match surfaces.entry(hash) {
@@ -314,24 +329,24 @@ impl Shade {
             ));
         }
         let (manifest, layout) = (&surface.manifest, &surface.layout);
-        let mut uniforms = Uniforms::new(device, surface, hash)?;
+        let mut drawn = Material::new(device, surface, hash)?;
         uniforms::pack(
             manifest,
             layout,
             &built.document,
             &built.network,
-            uniforms.buffer.bytes(),
+            drawn.buffer.bytes(),
         )?;
         for baked in &output.textures {
             let loaded = textures.load(device, cb, &baked.path, &baked.texture)?;
             update.loaded += loaded;
             update.capped += usize::from(loaded > 0 && baked.texture.capped());
-            uniforms.textures.push(baked.path.clone());
+            drawn.textures.push(baked.path.clone());
         }
-        uniforms.bind(textures, surface, &built.document, &built.network)?;
-        uniforms.sources = output.sources;
-        uniforms.cap = built.cap;
-        Ok(uniforms)
+        drawn.bind(textures, surface, &built.document, &built.network)?;
+        drawn.sources = output.sources;
+        drawn.cap = built.cap;
+        Ok(drawn)
     }
 
     /// Records the draws of `view`'s `groups`, after the prepass, into `cb`,
@@ -368,18 +383,18 @@ impl Shade {
             d.cmd_set_scissor(cb, 0, &[area]);
             d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
             for group in groups {
-                let uniforms = match group.material {
-                    Some(id) if self.failed.contains(&id) => &self.pink,
-                    Some(id) => self.materials.get(&id).unwrap_or(&self.clay),
+                let drawn = match group.material.and_then(|id| self.looks.get(&id)) {
+                    Some(Look::Built(drawn)) => drawn,
+                    Some(Look::Failed) => &self.pink,
                     None => &self.clay,
                 };
-                let surface = &self.surfaces[&uniforms.hash];
+                let surface = &self.surfaces[&drawn.hash];
                 let point = vk::PipelineBindPoint::GRAPHICS;
                 let layout = surface.pipeline_layout;
                 d.cmd_bind_pipeline(cb, point, surface.pipelines[index]);
                 let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
                 d.cmd_push_constants(cb, layout, stages, 0, &push);
-                d.cmd_bind_descriptor_sets(cb, point, layout, 0, &[uniforms.set], &[]);
+                d.cmd_bind_descriptor_sets(cb, point, layout, 0, &[drawn.set], &[]);
                 let offset = u64::from(group.first * stride);
                 d.cmd_draw_indexed_indirect(cb, view.records(), offset, group.count, stride);
             }
@@ -388,8 +403,9 @@ impl Shade {
 
     pub fn memory(&self) -> gpu::Memory {
         let mut memory = self.textures.memory();
-        for u in self.materials.values().chain([&self.clay, &self.pink]) {
-            memory += u.buffer.memory();
+        let built = self.looks.values().filter_map(Look::built);
+        for m in built.chain([&self.clay, &self.pink]) {
+            memory += m.buffer.memory();
         }
         memory
     }
@@ -511,7 +527,7 @@ impl Drop for Surface {
     }
 }
 
-impl Uniforms {
+impl Material {
     /// A block and a set for `surface`, with nothing bound yet.
     fn new(device: &gpu::Device, surface: &Surface, hash: u64) -> Result<Self, String> {
         let d = &device.raw;
@@ -641,7 +657,7 @@ impl Uniforms {
     }
 }
 
-impl Drop for Uniforms {
+impl Drop for Material {
     fn drop(&mut self) {
         // Destroying the pool frees its set; the buffer drops after.
         // SAFETY: the pool was created on `device`, and the owner's target
