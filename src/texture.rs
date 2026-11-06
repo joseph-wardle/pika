@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ash::vk;
 
@@ -333,13 +333,13 @@ fn range(texture: &Texture) -> vk::ImageSubresourceRange {
     }
 }
 
-/// The textures loaded for the materials drawn, by baked file, and the
+/// The textures loaded for the materials drawn, by `bake::Baked::key`, and the
 /// samplers they are read through. Loads are recorded into a frame's
 /// commands, outside rendering, and their staging buffers kept until the
 /// next frame begins, when the GPU has read them.
 pub struct Textures {
     device: ash::Device,
-    images: BTreeMap<PathBuf, Image>,
+    images: BTreeMap<String, Image>,
     /// By address modes, u then v (`material::address_modes`).
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
     staging: Vec<Buffer>,
@@ -360,40 +360,40 @@ impl Textures {
         self.staging.clear();
     }
 
-    /// The baked texture at `path`, read as `texture`, loaded now unless it
-    /// is, and the bytes that uploaded: 0 when it was.
+    /// The baked texture keyed `key`, read as `texture`, loaded now unless
+    /// it is, and the bytes that uploaded: 0 when it was.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
-        path: &Path,
+        key: &str,
         texture: &Texture,
     ) -> Result<u64, String> {
-        if self.images.contains_key(path) {
+        if self.images.contains_key(key) {
             return Ok(0);
         }
         let (image, staging) = Image::new(device, texture)?;
         image.record(cb, &staging, texture);
         self.staging.push(staging);
-        self.images.insert(path.to_owned(), image);
+        self.images.insert(key.to_owned(), image);
         Ok(texture.bytes())
     }
 
-    /// What a surface binds for the texture at `path`, loaded and kept
+    /// What a surface binds for the texture keyed `key`, loaded and kept
     /// while a material lists it (`retain`).
-    pub fn binding(&self, path: &Path) -> Result<Binding, String> {
-        (self.images.get(path).map(Image::binding))
-            .ok_or_else(|| format!("texture {} is not loaded", path.display()))
+    pub fn binding(&self, key: &str) -> Result<Binding, String> {
+        (self.images.get(key).map(Image::binding))
+            .ok_or_else(|| format!("texture {key} is not loaded"))
     }
 
-    /// Whether the texture baked at `path` is loaded.
-    pub fn holds(&self, path: &Path) -> bool {
-        self.images.contains_key(path)
+    /// Whether the texture keyed `key` is loaded.
+    pub fn holds(&self, key: &str) -> bool {
+        self.images.contains_key(key)
     }
 
     /// Drops the textures not in `used`. No GPU work may be pending.
-    pub fn retain(&mut self, used: &BTreeSet<PathBuf>) {
-        self.images.retain(|path, _| used.contains(path));
+    pub fn retain(&mut self, used: &BTreeSet<String>) {
+        self.images.retain(|key, _| used.contains(key));
     }
 
     /// A trilinear sampler with the address modes `modes`, u then v, in

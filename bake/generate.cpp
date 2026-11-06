@@ -64,9 +64,9 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
 // shaders/vertex.slang pulls. Every float2 primvar the surface reads is the
 // mesh's one texcoord: a geomprop it names, or UV0, the texcoord MaterialX's
 // nodes read by default, which is the primvar st, as Storm and Karma read
-// it. The renderer fetches st for a network naming no primvar and refuses
-// one naming two (src/material.rs); only the nodedefs say which inputs read
-// UV0, so a surface reading it beside another name is refused here.
+// it. The renderer fetches the first primvar a network names, else st
+// (src/material.rs); only the nodedefs say which inputs read UV0, so a
+// surface reading two is refused here.
 std::string vertex(mx::ShaderStage const &stage) {
     std::string text = "// Written by the bake tool: the vertex stage for the pixel stage beside it.\n\n"
                        "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"

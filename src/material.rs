@@ -74,9 +74,9 @@ impl Network {
     }
 }
 
-/// A texture as a node's input declares it: the file, the colour space the
-/// file is in, the encoding the bake tool stores it with, and, when the
-/// file is missing, the value the node draws instead.
+/// A texture as a material asks the bake tool for it: the file, the colour
+/// space the file is in, the encoding and cap it is stored with, and, when
+/// the file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
 pub struct Source {
     /// The node reading it, by path.
@@ -86,6 +86,8 @@ pub struct Source {
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
+    /// The texels a side above which its levels are dropped, 0 for none.
+    pub cap: u32,
     /// A UsdUVTexture's `fallback` or an image node's `default`, its
     /// nodedef's when unauthored, for a file that is empty; empty itself
     /// for a file that resolves, so an edit to a drawn fallback, and no
@@ -93,14 +95,15 @@ pub struct Source {
     pub default: Vec<f32>,
 }
 
-/// The texture `node`, at `path`, reads through its input `input`. The
+/// The texture `node`, at `path`, reads through its input `input`, under
+/// the cap `cap`. The
 /// encoding follows the node's output type: colour compresses as BC7
 /// sRGB, or as plain BC7 when its space is raw; a float as BC4; a vector3
 /// or vector4 as BC7; a vector2 stays float, so a coordinate map stays
 /// exact (the oracles' uv ramp). The space is the asset's `colorSpace` metadata, else
 /// UsdUVTexture's `sourceColorSpace`, in OpenColorIO's names, else `auto`
 /// for a colour and raw for the rest.
-pub fn source(path: &str, node: &Node, input: &str) -> Result<Source, String> {
+pub fn source(path: &str, node: &Node, input: &str, cap: u32) -> Result<Source, String> {
     let file = match node.params.get(input) {
         Some(Value::Asset(file)) => file.clone(),
         Some(_) => return Err(format!("{path}'s {input} is not an asset")),
@@ -153,6 +156,7 @@ pub fn source(path: &str, node: &Node, input: &str) -> Result<Source, String> {
         file,
         space,
         encoding,
+        cap,
         default,
     })
 }
@@ -166,9 +170,9 @@ pub struct Document {
     pub hash: u64,
     /// The store's node paths in document order: node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
-    /// The float2 primvar the surface reads: the one its reader nodes
+    /// The float2 primvar the surface reads: the first its reader nodes
     /// name, else `st`, which is UV0 (bake/generate.cpp says which inputs
-    /// read UV0 and refuses it beside another name).
+    /// read UV0 and refuses a surface reading two).
     pub texcoord: String,
 }
 
@@ -359,10 +363,10 @@ pub fn pink() -> Network {
 }
 
 /// The document for a network, or none when the network has no surface.
-/// A network naming two primvars is refused, since a mesh is drawn with
-/// one texcoord: ALab's meshes carry `st` and `perfuv` both and each
-/// material reads one of them, so carrying every float2 primvar would
-/// double the texture coordinates for nothing.
+/// A mesh is drawn with one texcoord, the primvar its material reads:
+/// ALab's meshes carry `st` and `perfuv` both and each material reads one
+/// of them, so carrying every float2 primvar would double the texture
+/// coordinates for nothing.
 pub fn document(network: &Network) -> Result<Option<Document>, String> {
     let Some(surface) = &network.surface else {
         return Ok(None);
@@ -424,16 +428,11 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
          name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
          </surfacematerial>\n</materialx>\n",
     );
-    let mut primvars = primvars.into_iter();
-    let texcoord = match (primvars.next(), primvars.next()) {
-        (Some(a), Some(b)) => {
-            return Err(format!(
-                "reads the primvars {a} and {b}, and a mesh is drawn with one texcoord"
-            ));
-        }
-        (Some(name), None) => name,
-        (None, _) => "st".to_owned(),
-    };
+    // A surface reading two is the bake tool's to refuse, naming both.
+    let texcoord = primvars
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| "st".to_owned());
     Ok(Some(Document {
         hash: cache::fnv1a(&[text.as_bytes()]),
         nodes: order.iter().map(|p| (*p).to_owned()).collect(),
@@ -633,7 +632,8 @@ pub mod tests {
         assert_eq!(texcoord(&clay()).unwrap(), Some("st".to_owned()));
         assert_eq!(texcoord(&Network::default()).unwrap(), None);
 
-        // A second reader of the same name is one texcoord; of another, two.
+        // A second reader of the same name is one texcoord; of another,
+        // the first by name, which the bake tool then refuses.
         let mut network = fixture();
         let mut reader = network.nodes["st"].clone();
         network.nodes.insert("uv".into(), reader.clone());
@@ -644,8 +644,7 @@ pub mod tests {
             .params
             .insert("varname".into(), Value::Text("perfuv".into()));
         network.nodes.insert("uv".into(), reader);
-        let error = texcoord(&network).unwrap_err();
-        assert!(error.contains("perfuv") && error.contains("st"), "{error}");
+        assert_eq!(texcoord(&network).unwrap(), Some("perfuv".to_owned()));
         // The control: a reader nothing reads through does not count.
         (network.nodes.get_mut("tex").unwrap().connections).remove("bias");
         assert_eq!(texcoord(&network).unwrap(), Some("st".to_owned()));
@@ -784,13 +783,14 @@ pub mod tests {
     fn sources_follow_the_node_and_its_colour_space() {
         let tex = &fixture().nodes["tex"];
         assert_eq!(
-            source("tex", tex, "file").unwrap(),
+            source("tex", tex, "file", 0).unwrap(),
             Source {
                 node: "tex".into(),
                 input: "file".into(),
                 file: "bake/fixtures/swatch.png".into(),
                 space: "raw".into(),
                 encoding: "data",
+                cap: 0,
                 default: vec![],
             }
         );
@@ -800,28 +800,31 @@ pub mod tests {
             .params
             .insert("file".into(), Value::Asset(String::new()));
         assert_eq!(
-            source("tex", &missing, "file").unwrap().default,
+            source("tex", &missing, "file", 0).unwrap().default,
             [0.0, 0.0, 0.0, 1.0]
         );
         (missing.params).insert("fallback".into(), Value::Float(vec![0.2, 0.4, 0.6, 1.0]));
         assert_eq!(
-            source("tex", &missing, "file").unwrap().default,
+            source("tex", &missing, "file", 0).unwrap().default,
             [0.2, 0.4, 0.6, 1.0]
         );
         missing.node_type = "ND_image_float".into();
-        assert_eq!(source("tex", &missing, "file").unwrap().default, [0.0; 4]);
+        assert_eq!(
+            source("tex", &missing, "file", 0).unwrap().default,
+            [0.0; 4]
+        );
         missing
             .params
             .insert("default".into(), Value::Float(vec![0.5]));
-        assert_eq!(source("tex", &missing, "file").unwrap().default, [0.5]);
+        assert_eq!(source("tex", &missing, "file", 0).unwrap().default, [0.5]);
         let mut srgb = tex.clone();
         srgb.params.remove("colorSpace:file");
         srgb.params
             .insert("sourceColorSpace".into(), Value::Text("sRGB".into()));
-        let s = source("tex", &srgb, "file").unwrap();
+        let s = source("tex", &srgb, "file", 0).unwrap();
         assert_eq!((s.space.as_str(), s.encoding), ("srgb_texture", "color"));
         srgb.params.remove("sourceColorSpace");
-        assert_eq!(source("tex", &srgb, "file").unwrap().space, "auto");
+        assert_eq!(source("tex", &srgb, "file", 0).unwrap().space, "auto");
 
         // Declaring nothing, a colour is sRGB when 8-bit, the rest raw.
         let image = |kind: &str| {
@@ -829,7 +832,7 @@ pub mod tests {
             node.node_type = format!("ND_image_{kind}");
             node.params.remove("colorSpace:file");
             node.params.remove("sourceColorSpace");
-            source("tex", &node, "file").map(|s| (s.space, s.encoding))
+            source("tex", &node, "file", 0).map(|s| (s.space, s.encoding))
         };
         assert_eq!(image("vector2"), Ok(("raw".into(), "float")));
         assert_eq!(image("float"), Ok(("raw".into(), "single")));
@@ -838,8 +841,8 @@ pub mod tests {
         assert!(image("matrix33").is_err());
         let mut other = tex.clone();
         other.node_type = "ND_triplanarprojection_color3".into();
-        assert!(source("tex", &other, "file").is_err());
-        assert!(source("tex", tex, "st").is_err());
+        assert!(source("tex", &other, "file", 0).is_err());
+        assert!(source("tex", tex, "st", 0).is_err());
     }
 
     #[test]

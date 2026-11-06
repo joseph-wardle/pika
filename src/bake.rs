@@ -41,9 +41,9 @@ pub struct Generated {
 /// A texture as the renderer uploads it, read from the cache, or the texel
 /// a missing file's node draws instead (`fallback`).
 pub struct Baked {
-    /// Its file under the cache, or `fallback` and its texel: what the
-    /// renderer keys the loaded textures by.
-    pub path: PathBuf,
+    /// What the renderer keys the loaded textures by: its file under the
+    /// cache, or `fallback` and its texel.
+    pub key: String,
     pub texture: Texture,
     /// Whether the bake tool ran now rather than the cache answering.
     pub fresh: bool,
@@ -140,24 +140,17 @@ impl Bake {
         })
     }
 
-    /// Bakes the image `source`, or the UDIM set its `<UDIM>` pattern
-    /// names, declared in the colour space `space`, with the levels above
-    /// `cap` texels dropped (none for 0), in one of the tool's encodings,
+    /// Bakes `source`'s image, or the UDIM set its `<UDIM>` pattern names,
     /// unless the cache holds it, and reads it.
-    pub fn texture(
-        &self,
-        source: &Path,
-        space: &str,
-        encoding: &str,
-        cap: u32,
-    ) -> Result<Baked, String> {
-        let set = tiles(source)?;
-        let path = self.texture_path(source, &set, space, encoding, cap)?;
+    pub fn texture(&self, source: &Source) -> Result<Baked, String> {
+        let set = tiles(Path::new(&source.file))?;
+        let path = self.texture_path(source, &set)?;
+        let key = path.to_string_lossy().into_owned();
         if path.is_file() {
             match texture::read(&path) {
                 Ok(texture) => {
                     return Ok(Baked {
-                        path,
+                        key,
                         texture,
                         fresh: false,
                     });
@@ -172,7 +165,8 @@ impl Bake {
         let mut command = tool();
         command
             .arg("texture")
-            .args([space, encoding, &cap.to_string(), &self.config])
+            .args([&source.space, source.encoding, &source.cap.to_string()])
+            .arg(&self.config)
             .arg(&tmp);
         for (number, tile) in &set {
             command.arg(number.to_string()).arg(tile);
@@ -187,7 +181,7 @@ impl Bake {
             .map_err(|e| format!("cannot move {} into place: {e}", tmp.display()))?;
         Ok(Baked {
             texture: texture::read(&path)?,
-            path,
+            key,
             fresh: true,
         })
     }
@@ -197,14 +191,7 @@ impl Bake {
     /// be found and deleted, named by a hash of each file's name, size and
     /// modification time, the parameters, the config and the tool, so an
     /// edited source, a tile added or a changed setting misses.
-    pub fn texture_path(
-        &self,
-        source: &Path,
-        set: &[(u32, PathBuf)],
-        space: &str,
-        encoding: &str,
-        cap: u32,
-    ) -> Result<PathBuf, String> {
+    pub fn texture_path(&self, source: &Source, set: &[(u32, PathBuf)]) -> Result<PathBuf, String> {
         let mut state = Vec::new();
         for (_, file) in set {
             let meta = std::fs::metadata(file)
@@ -221,15 +208,16 @@ impl Bake {
         }
         let key = cache::fnv1a(&[
             &state,
-            space.as_bytes(),
+            source.space.as_bytes(),
             b"\0",
-            encoding.as_bytes(),
+            source.encoding.as_bytes(),
             b"\0",
             self.config.as_bytes(),
             b"\0",
-            &cap.to_le_bytes(),
+            &source.cap.to_le_bytes(),
             &self.tool.to_le_bytes(),
         ]);
+        let source = Path::new(&source.file);
         let dir = source.parent().unwrap_or(Path::new("."));
         let dir = std::fs::canonicalize(dir)
             .map_err(|e| format!("cannot find the texture {}: {e}", source.display()))?;
@@ -341,7 +329,6 @@ pub struct Built {
     generation: u64,
     pub document: Document,
     pub network: Network,
-    pub cap: u32,
     pub result: Result<Output, String>,
 }
 
@@ -371,7 +358,6 @@ impl Built {
             generation: 0,
             document,
             network,
-            cap: 0,
             result,
         }
     }
@@ -572,7 +558,6 @@ fn work(
             generation: job.generation,
             document: job.document,
             network: job.network,
-            cap: job.cap,
             result,
         };
         if finished.send(built).is_err() {
@@ -594,7 +579,7 @@ fn build(
     wanted: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
     let generated = bake.generate(document)?;
-    let sources = sources(&generated.manifest, document, network)?;
+    let sources = sources(&generated.manifest, document, network, cap)?;
     let mut textures = Vec::new();
     let mut missing = Vec::new();
     for source in &sources {
@@ -609,10 +594,7 @@ fn build(
             textures.push(fallback(&source.default));
             continue;
         }
-        let file = Path::new(&source.file);
-        let baked = bake
-            .texture(file, &source.space, source.encoding, cap)
-            .map_err(|e| format!("{path}'s {input}: {e}"))?;
+        let baked = (bake.texture(source)).map_err(|e| format!("{path}'s {input}: {e}"))?;
         textures.push(baked);
     }
     let compiled = shader::surface(&generated.dir)?;
@@ -633,23 +615,24 @@ fn fallback(default: &[f32]) -> Baked {
     let n = default.len().min(4);
     texel[..n].copy_from_slice(&default[..n]);
     Baked {
-        path: PathBuf::from(format!("fallback {texel:?}")),
+        key: format!("fallback {texel:?}"),
         texture: texture::solid(texel),
         fresh: false,
     }
 }
 
 /// The texture each of `manifest`'s textures reads, from the node and
-/// input of `network` the name stands for.
+/// input of `network` the name stands for, under the cap `cap`.
 pub fn sources(
     manifest: &Manifest,
     document: &Document,
     network: &Network,
+    cap: u32,
 ) -> Result<Vec<Source>, String> {
     (manifest.textures.iter())
         .map(|name| {
             let (path, node, input) = document.reader(network, name)?;
-            material::source(path, node, input)
+            material::source(path, node, input, cap)
         })
         .collect()
 }
@@ -681,10 +664,19 @@ mod tests {
         bake: &Bake,
         source: &Path,
         space: &str,
-        encoding: &str,
+        encoding: &'static str,
         cap: u32,
     ) -> Result<PathBuf, String> {
-        bake.texture_path(source, &tiles(source)?, space, encoding, cap)
+        let source = Source {
+            node: String::new(),
+            input: String::new(),
+            file: source.to_str().unwrap().to_owned(),
+            space: space.to_owned(),
+            encoding,
+            cap,
+            default: Vec::new(),
+        };
+        bake.texture_path(&source, &tiles(Path::new(&source.file))?)
     }
 
     #[test]
@@ -831,7 +823,6 @@ mod tests {
                 generation,
                 document: material::document(&network).unwrap().unwrap(),
                 network: network.clone(),
-                cap: 0,
                 result: Ok(Output {
                     manifest: uniforms::tests::fixture_manifest(),
                     compiled: shader::Compiled {
@@ -844,7 +835,7 @@ mod tests {
                     },
                     sources: Vec::new(),
                     textures: vec![Baked {
-                        path: "ramp".into(),
+                        key: "ramp".into(),
                         texture,
                         fresh: false,
                     }],

@@ -9,7 +9,6 @@
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use ash::vk;
 
@@ -95,13 +94,12 @@ struct Material {
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-    /// What the textures were baked from, in the surface's order, and under
-    /// which cap: a material edit that keeps them and the document only
+    /// What the textures were baked from, cap included, in the surface's
+    /// order: a material edit that keeps them and the document only
     /// rewrites the block.
     sources: Vec<Source>,
-    cap: u32,
-    /// The baked textures bound, in the surface's order.
-    textures: Vec<PathBuf>,
+    /// The baked textures bound, by key, in the surface's order.
+    textures: Vec<String>,
 }
 
 /// What one frame's `update` did.
@@ -176,7 +174,7 @@ impl Shade {
         // milliseconds on a large scene, so only a look changing asks for
         // it.
         if self.prune {
-            let used: BTreeSet<PathBuf> = (self.looks.values().filter_map(Look::built))
+            let used: BTreeSet<String> = (self.looks.values().filter_map(Look::built))
                 .flat_map(|m| m.textures.iter().cloned())
                 .collect();
             self.textures.retain(&used);
@@ -251,7 +249,7 @@ impl Shade {
     }
 
     /// Rewrites material `id`'s block from `network` when it keeps its
-    /// document, textures and cap, else submits its build under `cap`,
+    /// document and its textures under `cap`, else submits its build,
     /// leaving the material as it was, clay before its first, until the
     /// build lands. A network with no surface leaves the material drawn clay.
     fn material(
@@ -268,10 +266,9 @@ impl Shade {
         };
         if let Some(Look::Built(drawn)) = self.looks.get_mut(&id)
             && drawn.hash == document.hash
-            && drawn.cap == cap
         {
             let surface = &self.surfaces[&document.hash];
-            if bake::sources(&surface.manifest, document, network)? == drawn.sources {
+            if bake::sources(&surface.manifest, document, network, cap)? == drawn.sources {
                 self.builder.forget(id);
                 uniforms::pack(
                     &surface.manifest,
@@ -317,7 +314,7 @@ impl Shade {
         // A refused allocation leaves the device usable, but ALab filling
         // it at the 1024 cap lost the device, so the budget is never crossed.
         let fresh: u64 = (output.textures.iter())
-            .filter(|b| !textures.holds(&b.path))
+            .filter(|b| !textures.holds(&b.key))
             .map(|b| b.texture.bytes())
             .sum();
         let (used, allowed) = device.budget();
@@ -338,14 +335,13 @@ impl Shade {
             drawn.buffer.bytes(),
         )?;
         for baked in &output.textures {
-            let loaded = textures.load(device, cb, &baked.path, &baked.texture)?;
+            let loaded = textures.load(device, cb, &baked.key, &baked.texture)?;
             update.loaded += loaded;
             update.capped += usize::from(loaded > 0 && baked.texture.capped());
-            drawn.textures.push(baked.path.clone());
+            drawn.textures.push(baked.key.clone());
         }
         drawn.bind(textures, surface, &built.document, &built.network)?;
         drawn.sources = output.sources;
-        drawn.cap = built.cap;
         Ok(drawn)
     }
 
@@ -573,7 +569,6 @@ impl Material {
             pool,
             set: vk::DescriptorSet::null(),
             sources: Vec::new(),
-            cap: 0,
             textures: Vec::new(),
         };
         let set_layouts = [surface.set_layout];
@@ -599,11 +594,11 @@ impl Material {
         let layout = &surface.layout;
         assert_eq!(self.textures.len(), layout.textures.len());
         let mut bindings: Vec<(Binding, vk::Sampler)> = Vec::new();
-        for (name, path) in surface.manifest.textures.iter().zip(&self.textures) {
-            let (node_path, node, _) = document.reader(network, name)?;
-            let binding = textures.binding(path)?;
-            let modes = material::address_modes(node, binding.wrap)
-                .map_err(|e| format!("{node_path}'s {e}"))?;
+        for (name, key) in surface.manifest.textures.iter().zip(&self.textures) {
+            let (path, node, _) = document.reader(network, name)?;
+            let binding = textures.binding(key)?;
+            let modes =
+                material::address_modes(node, binding.wrap).map_err(|e| format!("{path}'s {e}"))?;
             bindings.push((binding, textures.sampler(modes)?));
         }
         let buffer_info = [vk::DescriptorBufferInfo::default()
