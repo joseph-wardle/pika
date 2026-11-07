@@ -389,36 +389,68 @@ pub struct Device<'a> {
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
-    /// `PIKA_BUDGET`, bytes standing in for the driver's budget, so a check
-    /// can see textures refused without filling the device.
+    /// `PIKA_BUDGET`, bytes standing in for the driver's budget of each
+    /// device-local heap, so a check can see textures lowered without
+    /// filling the device.
     ceiling: Option<u64>,
 }
 
 impl Device<'_> {
-    /// The bytes of device-local memory this process uses, and the bytes
-    /// the driver lets it use before allocations fail or spill to host
-    /// memory, summed over the device-local heaps. Both are 0 on a driver
-    /// without `VK_EXT_memory_budget`; `PIKA_BUDGET` replaces the latter.
-    pub fn budget(&self) -> (u64, u64) {
-        if !self.memory_budget {
-            return (0, self.ceiling.unwrap_or(0));
-        }
+    /// Each memory heap's use and budget, by heap index. A memory type's
+    /// allocations come from its heap alone, so each is checked on its
+    /// own: a GPU's second device-local heap, the small window the CPU
+    /// writes through, holds no textures however much of it is free.
+    pub fn heaps(&self) -> Vec<Heap> {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
-        let mut properties = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+        let mut properties = vk::PhysicalDeviceMemoryProperties2::default();
+        if self.memory_budget {
+            properties = properties.push_next(&mut budget);
+        }
         // SAFETY: the physical device belongs to the live instance, and the
-        // extension that fills `budget` is enabled.
+        // extension that fills `budget` is enabled when it is chained.
         unsafe {
             (self.instance.raw)
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
         };
         let heaps = properties.memory_properties.memory_heaps_as_slice();
-        let (used, allowed) = (0..heaps.len())
-            .filter(|&i| heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
-            .fold((0, 0), |(used, allowed), i| {
-                (used + budget.heap_usage[i], allowed + budget.heap_budget[i])
-            });
-        (used, self.ceiling.unwrap_or(allowed))
+        (0..heaps.len())
+            .map(|i| {
+                let local = heaps[i].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
+                Heap {
+                    used: budget.heap_usage[i],
+                    allowed: match (local, self.ceiling) {
+                        (true, Some(ceiling)) => ceiling,
+                        _ => budget.heap_budget[i],
+                    },
+                }
+            })
+            .collect()
     }
+
+    /// The heap that `allocate` takes memory of `type_bits` and `flags` from.
+    pub fn heap(&self, type_bits: u32, flags: vk::MemoryPropertyFlags) -> Result<usize, String> {
+        let i = memory_type(&self.memory_types, type_bits, flags)?;
+        Ok(self.memory_types[i as usize].heap_index as usize)
+    }
+}
+
+/// The bytes of a memory heap this process uses, and the bytes the driver
+/// lets it use before allocations fail or spill to host memory. Both are 0
+/// on a driver without `VK_EXT_memory_budget`, where `PIKA_BUDGET` still
+/// sets the device-local heaps' budget.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Heap {
+    pub used: u64,
+    pub allowed: u64,
+}
+
+/// The first heap that allocating `needs`, bytes by heap index, would take
+/// past its budget. A heap whose budget is unknown takes anything.
+pub fn overflow(heaps: &[Heap], needs: &[u64]) -> Option<usize> {
+    (0..heaps.len()).find(|&i| {
+        let h = heaps[i];
+        needs[i] > 0 && h.allowed > 0 && h.used + needs[i] > h.allowed
+    })
 }
 
 impl Drop for Device<'_> {
@@ -552,6 +584,13 @@ impl Buffer {
         Ok(b)
     }
 
+    fn info(size: u64, usage: vk::BufferUsageFlags) -> vk::BufferCreateInfo<'static> {
+        // Vulkan has no empty buffers.
+        vk::BufferCreateInfo::default()
+            .size(size.max(16))
+            .usage(usage)
+    }
+
     fn create(device: &Device, size: u64, usage: vk::BufferUsageFlags) -> Result<Self, String> {
         let mut b = Self {
             device: device.raw.clone(),
@@ -561,10 +600,7 @@ impl Buffer {
             address: 0,
             mapped: std::ptr::null_mut(),
         };
-        // Vulkan has no empty buffers.
-        let info = vk::BufferCreateInfo::default()
-            .size(size.max(16))
-            .usage(usage);
+        let info = Self::info(size, usage);
         // SAFETY: `device.raw` is live and `info` outlives the call.
         b.raw = unsafe { device.raw.create_buffer(&info, None) }
             .map_err(|e| format!("vkCreateBuffer ({size} bytes, {usage:?}) failed: {e}"))?;
@@ -813,6 +849,23 @@ mod tests {
         // Type 2 matches but is not allowed, so the next match is chosen.
         assert_eq!(memory_type(&types, 0b1011, host), Ok(3));
         assert!(memory_type(&types, 0b0011, host).is_err());
+    }
+
+    #[test]
+    fn each_heap_holds_only_its_own_allocations() {
+        // VRAM, host memory, and the small device-local window the CPU
+        // writes through, as an NVIDIA GPU lays them out.
+        let heap = |used, allowed| Heap { used, allowed };
+        let heaps = [heap(10, 12), heap(0, 100), heap(1, 4)];
+        assert_eq!(overflow(&heaps, &[2, 50, 3]), None);
+        assert_eq!(overflow(&heaps, &[0, 0, 0]), None);
+        // The control: 3 bytes fit the device-local heaps' 5 free bytes
+        // summed, but not the 2 free in the heap they come from.
+        assert_eq!(overflow(&heaps, &[3, 0, 0]), Some(0));
+        assert_eq!(overflow(&heaps, &[0, 101, 0]), Some(1));
+        assert_eq!(overflow(&heaps, &[0, 0, 4]), Some(2));
+        // A heap whose budget the driver does not report takes anything.
+        assert_eq!(overflow(&[heap(0, 0)], &[1 << 40]), None);
     }
 
     #[test]

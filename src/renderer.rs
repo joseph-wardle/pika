@@ -19,6 +19,7 @@ use crate::shader;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
 use crate::target::Target;
+use crate::texture::Needs;
 use crate::transform::Camera;
 use crate::view::View;
 
@@ -176,7 +177,12 @@ struct Pending {
     compiled: usize,
     baked: usize,
     loaded: u64,
+    texture_read: Duration,
     pending: usize,
+    pending_textures: usize,
+    lowered_textures: usize,
+    need: Duration,
+    needs: Needs,
 }
 
 impl Renderer {
@@ -316,11 +322,13 @@ impl Renderer {
             self.collect(pending, &buffers, &mut aovs)?;
         }
         let placed = self.placed.as_ref();
+        // A swap waiting for a frame's bytes needs no build to land.
         if moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
+            && self.shade.settled()
             && !self.shade.builder.wait(WAIT)?
         {
-            return Ok(self.shade.builder.is_empty());
+            return Ok(self.shade.settled());
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
@@ -334,12 +342,25 @@ impl Renderer {
             }
         };
         let cb = self.commands.begin()?;
-        let update =
-            self.geometry
-                .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
-        let shading =
-            (self.shade).update(&self.device, &self.store, &moved, inputs.texture_cap, cb)?;
-        self.commands.mark("update")?;
+        let update = (self.geometry).update(
+            &self.device,
+            &self.store,
+            &moved,
+            &inputs.render_tags,
+            &mut self.commands,
+        )?;
+        let estimating = Instant::now();
+        let footprints = (self.geometry).footprints(&camera.view_projection, [w, h]);
+        let need = estimating.elapsed();
+        let shading = (self.shade).update(
+            &self.device,
+            &self.store,
+            &moved,
+            inputs.texture_cap,
+            &footprints,
+            cb,
+        )?;
+        self.commands.mark("texture")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
@@ -395,14 +416,19 @@ impl Renderer {
             compiled: shading.compiled,
             baked: shading.baked,
             loaded: shading.loaded,
+            texture_read: shading.read,
             pending: shading.pending,
+            pending_textures: shading.pending_textures,
+            lowered_textures: shading.lowered_textures,
+            need,
+            needs: shading.needs,
         };
         if latent {
             self.pending = Some(pending);
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.builder.is_empty())
+        Ok(self.shade.settled())
     }
 
     /// Waits for the pending frame and copies it into `aovs`, if they are
@@ -443,7 +469,11 @@ impl Renderer {
             .filter(|(_, r)| *r)
             .map(|(f, _)| (f.1 * w as usize * h as usize) as u64)
             .sum();
-        let (vram_used, vram_budget) = self.device.budget();
+        let local = self
+            .device
+            .heap(!0, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        let vram = self.device.heaps()[local];
+        let (vram_used, vram_budget) = (vram.used, vram.allowed);
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
@@ -469,7 +499,12 @@ impl Renderer {
             compiled: pending.compiled,
             baked: pending.baked,
             loaded: pending.loaded,
+            texture_read: pending.texture_read,
             pending: pending.pending,
+            pending_textures: pending.pending_textures,
+            lowered_textures: pending.lowered_textures,
+            need: pending.need,
+            needs: pending.needs,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

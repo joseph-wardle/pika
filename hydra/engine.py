@@ -7,17 +7,26 @@ clay while the material's build is out, that the converged frame does not,
 and that a structural edit, which builds the material again, keeps the
 converged look while its build is out, neither clay nor the new one,
 whether the host edits the material in place (Houdini 22) or resyncs it,
-removing it and inserting it again at its path (Houdini 21).
+removing it and inserting it again at its path (Houdini 21). Then, for a
+third scene, a texture magnified, that changing the texture cap in one
+session, from none to 4, 2 and none again, builds no material and draws
+at each cap what a session started at it draws, that a raise whose
+read fails, its baked file cut short, keeps the image it had and still
+converges, and that once the file is whole again a cap change releases
+it, drawing what a session at that cap draws.
 
-    hython hydra/engine.py <clay.usda> <painted.usda>
+    hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda>
 
 Needs a display (check.sh runs it on its Xvnc) and the delegate on
 PXR_PLUGINPATH_NAME. The controls are the dictionary before the first
 frame, which has no frame pairs, the converged frame's pixel, which must
-differ from the clay, and the edit's converged pixel, which must differ
-from the look it kept.
+differ from the clay, the edit's converged pixel, which must differ
+from the look it kept, and the fresh sessions' images at each cap, which
+must differ from each other.
 """
 
+import glob
+import os
 import sys
 import time
 
@@ -87,6 +96,40 @@ def frame(engine, stage, params, fbo):
     return centre(fbo)
 
 
+def pixels(fbo):
+    """Every pixel of the framebuffer, as ARGB words."""
+    image = fbo.toImage()
+    return [image.pixel(x, y) for y in range(SIZE) for x in range(SIZE)]
+
+
+def capped(path, cap, fbo):
+    """The converged image of the scene at `path` in a session of its own
+    under the texture cap `cap`, 0 for none, as the host's setting."""
+    engine, stage, params = scene(path)
+    engine.SetRendererSetting("pika:textureCap", cap)
+    converge(engine, stage, params, fbo)
+    return pixels(fbo)
+
+
+def recap(engine, stage, params, fbo, cap):
+    """Sets the texture cap to `cap` in the engine's session and renders
+    until converged, failing on any frame that builds a material."""
+    engine.SetRendererSetting("pika:textureCap", cap)
+    deadline = time.monotonic() + PATIENCE
+    frames = 0
+    while True:
+        frame(engine, stage, params, fbo)
+        frames += 1
+        stats = engine.GetRenderStats()
+        building = {k: stats.get(k) for k in ("pending_materials", "compiled_surfaces", "baked_textures")}
+        if any(building.values()):
+            sys.exit(f"engine: the cap {cap} built a material again: {building}")
+        if engine.IsConverged():
+            return pixels(fbo), frames
+        if time.monotonic() > deadline:
+            sys.exit(f"engine: the cap {cap} did not converge in {PATIENCE} s")
+
+
 def converge(engine, stage, params, fbo):
     """Renders until converged and gives each frame's centre pixel."""
     pixels = []
@@ -99,7 +142,7 @@ def converge(engine, stage, params, fbo):
             sys.exit(f"engine: the scene did not converge in {PATIENCE} s")
 
 
-def main(clay, painted):
+def main(clay, painted, mipped):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     engine, stage, params = scene(clay)
@@ -152,8 +195,45 @@ def main(clay, painted):
         sys.exit(f"engine: the edited cube stayed {pixels[-1]} once built: {last}")
     print("engine: the edited cube kept %s for %d frames, then %s" % (red, len(pixels), pixels[-1]))
 
+    fresh = {cap: capped(mipped, cap, fbo) for cap in (0, 4, 2)}
+    if len({tuple(image) for image in fresh.values()}) != 3:
+        sys.exit("engine: the control failed: caps of none, 4 and 2 do not each draw their own image")
+    engine, stage, params = scene(mipped)
+    converge(engine, stage, params, fbo)
+    for cap in (4, 2, 0):
+        image, frames = recap(engine, stage, params, fbo, cap)
+        if image != fresh[cap]:
+            differ = sum(a != b for a, b in zip(image, fresh[cap]))
+            sys.exit(f"engine: under the cap {cap}, {differ} pixels differ from a session started at it")
+        print(f"engine: the cap changed to {cap} in {frames} frames, building nothing, as a session at it draws")
+    recap(engine, stage, params, fbo, 2)
+    # The file the raise back to every level reads, cut to its header: the
+    # read fails, and the texture is held at its 2×2 levels.
+    baked = glob.glob(os.path.join(os.environ["PIKA_CACHE"], "textures", "**", "mips.exr", "*"), recursive=True)
+    if not baked:
+        sys.exit("engine: mips.exr has no bake under PIKA_CACHE")
+    whole = {}
+    for path in baked:
+        with open(path, "rb") as f:
+            whole[path] = f.read()
+        os.truncate(path, 40)
+    image, frames = recap(engine, stage, params, fbo, 0)
+    if image != fresh[2]:
+        sys.exit("engine: a raise whose read failed did not keep the 2×2 levels")
+    print(f"engine: a raise whose read failed kept the cap 2 image, converged in {frames} frames")
+    # Written back in place, as the session reads the file it holds open:
+    # the cap changing releases the hold. Unreleased, it would draw the 2×2
+    # levels, which differ from the cap 4 image (the control above).
+    for path, data in whole.items():
+        with open(path, "r+b") as f:
+            f.write(data)
+    image, frames = recap(engine, stage, params, fbo, 4)
+    if image != fresh[4]:
+        sys.exit("engine: the cap changing did not release the held raise")
+    print(f"engine: the cap changed to 4 released the held raise in {frames} frames")
+
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         sys.exit(__doc__)
-    main(sys.argv[1], sys.argv[2])
+    main(*sys.argv[1:])

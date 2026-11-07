@@ -21,6 +21,11 @@ pub struct Instance {
 }
 
 impl Instance {
+    /// Its world matrix: rows of the column-vector matrix.
+    pub fn world(&self) -> &[[f32; 4]; 3] {
+        &self.world
+    }
+
     /// The instance at world transform `matrix` of a mesh with the given
     /// orientation. `None` when the transform flattens the mesh, which then
     /// covers no pixels.

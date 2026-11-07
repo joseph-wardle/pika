@@ -6,15 +6,13 @@
 )
 
 # A texture past the device's memory budget, here a budget of one byte that
-# nothing fits: its surface compiles and it bakes, but its material is not
-# installed, drawn pink with one warning naming the setting that shrinks
-# textures, and the device goes on rendering. The edit disconnects the
-# texture, so the material has nothing to fit and builds.
+# nothing fits: its material builds, its 8×8 texture is lowered to its 4×4
+# floor, with one warning saying by how much textures still exceed it,
+# and the device goes on rendering. The edit disconnects the texture.
 #
 # compiles: 1 then 1
 # bakes: 1 then 0
-# warnings: 1
-# warned: /world/mtl/skin: its textures, 112 B baked, do not fit the device's memory budget: set or lower pika:textureCap; drawn pink
+# warned: 1 texture was lowered to 4 texels a side or less to fit the device's memory budget, and textures still take
 # budget: 1
 def Xform "world"
 {

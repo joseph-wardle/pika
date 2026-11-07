@@ -8,16 +8,16 @@
 //! reads its textures, on one of `WORKERS` threads (`Builder`), and its
 //! result waits for the frame that installs it. Each job for a material is
 //! a later generation than the one before, and `drain` hands out only the
-//! latest's result, so an edit's build never replaces a newer edit's, and
-//! only so many bytes of results a frame, so a scene's textures arrive
-//! over frames the host can still answer.
+//! latest's result, so an edit's build never replaces a newer edit's. The
+//! texture cap is not a build's: a build reads every level's place, and
+//! the frame that installs it loads those within the cap (`Textures`).
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::cache;
@@ -89,6 +89,17 @@ impl Bake {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("cannot create the cache {}: {e}", dir.display()))?;
         }
+        let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        if cache::on_nfs(&mounts, &textures) {
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "pika: warning: the cache {} is on NFS, from which textures upload slowly; \
+                     set PIKA_CACHE to a local disk",
+                    root.display()
+                )
+            });
+        }
         Ok(Self {
             materials,
             textures,
@@ -141,7 +152,7 @@ impl Bake {
     }
 
     /// Bakes `source`'s image, or the UDIM set its `<UDIM>` pattern names,
-    /// unless the cache holds it, and reads it.
+    /// unless the cache holds it, and reads its header, every level's place.
     pub fn texture(&self, source: &Source) -> Result<Baked, String> {
         let set = tiles(Path::new(&source.file))?;
         let path = self.texture_path(source, &set)?;
@@ -165,7 +176,7 @@ impl Bake {
         let mut command = tool();
         command
             .arg("texture")
-            .args([&source.space, source.encoding, &source.cap.to_string()])
+            .args([&source.space, source.encoding])
             .arg(&self.config)
             .arg(&tmp);
         for (number, tile) in &set {
@@ -189,8 +200,9 @@ impl Bake {
     /// Where `source`'s bake lives, its files being `set` (`tiles`): under
     /// `textures`, mirroring the source's own path so one asset's bakes can
     /// be found and deleted, named by a hash of each file's name, size and
-    /// modification time, the parameters, the config and the tool, so an
-    /// edited source, a tile added or a changed setting misses.
+    /// modification time, the space and encoding, the config and the tool,
+    /// so an edited source, a tile added or a changed setting misses. Not
+    /// the cap: the bake holds every level, and a cap loads fewer.
     pub fn texture_path(&self, source: &Source, set: &[(u32, PathBuf)]) -> Result<PathBuf, String> {
         let mut state = Vec::new();
         for (_, file) in set {
@@ -214,7 +226,6 @@ impl Bake {
             b"\0",
             self.config.as_bytes(),
             b"\0",
-            &source.cap.to_le_bytes(),
             &self.tool.to_le_bytes(),
         ]);
         let source = Path::new(&source.file);
@@ -320,7 +331,6 @@ struct Job {
     generation: u64,
     document: Document,
     network: Network,
-    cap: u32,
 }
 
 /// A finished job, with what the frame installing it needs.
@@ -333,14 +343,6 @@ pub struct Built {
 }
 
 impl Built {
-    /// The bytes installing it uploads: its baked textures'.
-    pub fn bytes(&self) -> u64 {
-        match &self.result {
-            Ok(output) => output.textures.iter().map(|b| b.texture.bytes()).sum(),
-            Err(_) => 0,
-        }
-    }
-
     /// The texture inputs whose file is missing, to warn of when it installs.
     pub fn missing(&self) -> &[String] {
         match &self.result {
@@ -350,9 +352,9 @@ impl Built {
     }
 
     /// `network`'s build, run now on this thread: Pika's own networks are
-    /// built before the first frame, with no textures and so no cap.
+    /// built before the first frame, with no textures.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
-        let result = build(bake, &document, &network, 0, &|| true);
+        let result = build(bake, &document, &network, &|| true);
         Self {
             id: 0,
             generation: 0,
@@ -415,21 +417,14 @@ impl Builder {
     }
 
     /// Queues a build of material `id`'s `network`, whose document is
-    /// `document`, under the texture cap `cap`.
-    pub fn submit(
-        &mut self,
-        id: u64,
-        document: Document,
-        network: Network,
-        cap: u32,
-    ) -> Result<(), String> {
+    /// `document`.
+    pub fn submit(&mut self, id: u64, document: Document, network: Network) -> Result<(), String> {
         let generation = self.latest.submit(id);
         let job = Job {
             id,
             generation,
             document,
             network,
-            cap,
         };
         (self.jobs.send(job)).map_err(|_| "the build workers have exited".to_string())
     }
@@ -454,25 +449,14 @@ impl Builder {
     }
 
     /// The finished builds that are their material's latest, as they
-    /// finished, until their bytes reach `bytes`: the first lands however
-    /// large, the rest wait for the next frame. A stale one is dropped
-    /// here.
-    pub fn drain(&mut self, bytes: u64) -> Vec<Built> {
-        let mut built = Vec::new();
-        let mut total = 0;
-        let mut arrived = std::mem::take(&mut self.arrived).into_iter();
-        while let Some(b) = arrived.next().or_else(|| self.done.try_recv().ok()) {
-            if !self.latest.landed(b.id, b.generation) {
-                continue;
-            }
-            total += b.bytes();
-            built.push(b);
-            if total >= bytes {
-                break;
-            }
-        }
-        self.arrived.extend(arrived);
-        built
+    /// finished: the frame's uploads are bounded where it loads their
+    /// textures (`texture::UPLOAD`). A stale one is dropped here.
+    pub fn drain(&mut self) -> Vec<Built> {
+        let mut arrived = std::mem::take(&mut self.arrived);
+        arrived.extend(self.done.try_iter());
+        (arrived.into_iter())
+            .filter(|b| self.latest.landed(b.id, b.generation))
+            .collect()
     }
 
     /// Drops material `id`'s job, if one is out: its result will be stale.
@@ -545,7 +529,7 @@ fn work(
         // A panic here would leave the material pending for good, with no
         // frame to report it: it is the build's failure, warned of like one.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
-            build(bake, &job.document, &job.network, job.cap, &wanted)
+            build(bake, &job.document, &job.network, &wanted)
         }))
         .unwrap_or_else(|payload| {
             let message = (payload.downcast_ref::<&str>().copied())
@@ -567,7 +551,7 @@ fn work(
 }
 
 /// Generates `document`'s stages, bakes and reads each texture `network`
-/// gives it, under the cap `cap`, while `wanted` says the build still is,
+/// gives it, while `wanted` says the build still is,
 /// and then compiles its surface, which the cache answers once any
 /// material of the document has: a texture that cannot be read fails the
 /// build before the compile is paid for.
@@ -575,11 +559,10 @@ fn build(
     bake: &Bake,
     document: &Document,
     network: &Network,
-    cap: u32,
     wanted: &dyn Fn() -> bool,
 ) -> Result<Output, String> {
     let generated = bake.generate(document)?;
-    let sources = sources(&generated.manifest, document, network, cap)?;
+    let sources = sources(&generated.manifest, document, network)?;
     let mut textures = Vec::new();
     let mut missing = Vec::new();
     for source in &sources {
@@ -622,17 +605,16 @@ fn fallback(default: &[f32]) -> Baked {
 }
 
 /// The texture each of `manifest`'s textures reads, from the node and
-/// input of `network` the name stands for, under the cap `cap`.
+/// input of `network` the name stands for.
 pub fn sources(
     manifest: &Manifest,
     document: &Document,
     network: &Network,
-    cap: u32,
 ) -> Result<Vec<Source>, String> {
     (manifest.textures.iter())
         .map(|name| {
             let (path, node, input) = document.reader(network, name)?;
-            material::source(path, node, input, cap)
+            material::source(network, path, node, input)
         })
         .collect()
 }
@@ -665,7 +647,6 @@ mod tests {
         source: &Path,
         space: &str,
         encoding: &'static str,
-        cap: u32,
     ) -> Result<PathBuf, String> {
         let source = Source {
             node: String::new(),
@@ -673,8 +654,8 @@ mod tests {
             file: source.to_str().unwrap().to_owned(),
             space: space.to_owned(),
             encoding,
-            cap,
             default: Vec::new(),
+            transformed: false,
         };
         bake.texture_path(&source, &tiles(Path::new(&source.file))?)
     }
@@ -691,7 +672,7 @@ mod tests {
             config: config.into(),
             tool,
         };
-        let path = key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap();
+        let path = key(&bake("", 1), &source, "srgb_texture", "color").unwrap();
         // temp_dir may be a symlink; the mirror follows the real path.
         let real = std::fs::canonicalize(&source).unwrap();
         assert_eq!(
@@ -701,18 +682,17 @@ mod tests {
         assert_eq!(path.file_name().unwrap().len(), 16);
         assert_eq!(
             path,
-            key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap()
+            key(&bake("", 1), &source, "srgb_texture", "color").unwrap()
         );
-        for (space, encoding, cap, config, tool) in [
-            ("raw", "color", 4096, "", 1),
-            ("srgb_texture", "data", 4096, "", 1),
-            ("srgb_texture", "color", 1024, "", 1),
-            ("srgb_texture", "color", 4096, "studio.ocio", 1),
-            ("srgb_texture", "color", 4096, "", 2),
+        for (space, encoding, config, tool) in [
+            ("raw", "color", "", 1),
+            ("srgb_texture", "data", "", 1),
+            ("srgb_texture", "color", "studio.ocio", 1),
+            ("srgb_texture", "color", "", 2),
         ] {
             assert_ne!(
                 path,
-                key(&bake(config, tool), &source, space, encoding, cap).unwrap()
+                key(&bake(config, tool), &source, space, encoding).unwrap()
             );
         }
 
@@ -722,18 +702,9 @@ mod tests {
             .unwrap();
         assert_ne!(
             path,
-            key(&bake("", 1), &source, "srgb_texture", "color", 4096).unwrap()
+            key(&bake("", 1), &source, "srgb_texture", "color").unwrap()
         );
-        assert!(
-            key(
-                &bake("", 1),
-                Path::new("/nowhere/rock.png"),
-                "raw",
-                "data",
-                4096
-            )
-            .is_err()
-        );
+        assert!(key(&bake("", 1), Path::new("/nowhere/rock.png"), "raw", "data").is_err());
 
         // A set is keyed on its tiles: one added or saved again misses.
         let pattern = dir.join("assets/wall.<UDIM>.png");
@@ -752,7 +723,7 @@ mod tests {
         assert_eq!(tiles(&source).unwrap(), [(0, source.clone())]);
         let error = tiles(Path::new("")).unwrap_err();
         assert!(error.contains("did not resolve"), "{error}");
-        let set = key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap();
+        let set = key(&bake("", 1), &pattern, "raw", "data").unwrap();
         assert_eq!(
             set.parent().unwrap(),
             dir.join("textures")
@@ -760,7 +731,7 @@ mod tests {
                 .join("wall.<UDIM>.png")
         );
         std::fs::write(dir.join("assets/wall.1002.png"), b"png").unwrap();
-        let added = key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap();
+        let added = key(&bake("", 1), &pattern, "raw", "data").unwrap();
         assert_ne!(set, added);
         let file = std::fs::File::options()
             .write(true)
@@ -768,10 +739,7 @@ mod tests {
             .unwrap();
         file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(2_000_000))
             .unwrap();
-        assert_ne!(
-            added,
-            key(&bake("", 1), &pattern, "raw", "data", 4096).unwrap()
-        );
+        assert_ne!(added, key(&bake("", 1), &pattern, "raw", "data").unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -804,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_drains_so_many_bytes() {
+    fn a_frame_drains_the_latest_builds() {
         let network = material::clay();
         let mut builder = Builder::new(Bake {
             materials: "materials".into(),
@@ -817,53 +785,26 @@ mod tests {
             if stale {
                 builder.latest.submit(id);
             }
-            let texture = crate::texture::parse(crate::texture::tests::RAMP.to_vec()).unwrap();
             builder.arrived.push(Built {
                 id,
                 generation,
                 document: material::document(&network).unwrap().unwrap(),
                 network: network.clone(),
-                result: Ok(Output {
-                    manifest: uniforms::tests::fixture_manifest(),
-                    compiled: shader::Compiled {
-                        shader: shader::Shader {
-                            slangc_version: String::new(),
-                            spirv: Vec::new(),
-                        },
-                        reflection: String::new(),
-                        fresh: false,
-                    },
-                    sources: Vec::new(),
-                    textures: vec![Baked {
-                        key: "ramp".into(),
-                        texture,
-                        fresh: false,
-                    }],
-                    missing: Vec::new(),
-                }),
+                result: Err(String::new()),
             });
         };
         finished(1, false);
         finished(2, true);
         finished(3, false);
-        finished(4, false);
-        let bytes = builder.arrived[0].bytes();
-        assert!(bytes > 0);
         let ids = |built: &[Built]| built.iter().map(|b| b.id).collect::<Vec<_>>();
 
-        assert_eq!(ids(&builder.drain(0)), [1], "the first lands however large");
-        assert_eq!(builder.len(), 3);
         assert!(
             builder.wait(Duration::ZERO).unwrap(),
             "builds wait to be installed"
         );
-        assert_eq!(
-            ids(&builder.drain(bytes + 1)),
-            [3, 4],
-            "the stale one neither lands nor counts"
-        );
+        assert_eq!(ids(&builder.drain()), [1, 3], "the stale one does not land");
         assert_eq!(builder.len(), 1, "material 2's latest build is still out");
-        assert!(builder.drain(u64::MAX).is_empty());
+        assert!(builder.drain().is_empty());
         assert!(!builder.wait(Duration::ZERO).unwrap());
     }
 }

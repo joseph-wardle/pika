@@ -23,13 +23,15 @@ BUDGET_MS = 41.67
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
     ("shade", ("gpu_shade_ms",), 8.0),
-    ("update", ("gpu_update_ms",), 1.0),
+    ("update", ("gpu_upload_ms", "gpu_subdiv_ms", "gpu_smooth_ms", "gpu_tangent_ms",
+                "gpu_texture_ms"), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
     ("cpu", ("record_ms", "wait_ms"), 2.0),
     ("period", ("period_ms",), BUDGET_MS),
 )
-# Frame counts of material work going on: none may be in a warm window.
-BUILDING = ("pending_materials", "compiled_surfaces", "baked_textures")
+# Frame counts of material and texture work going on: none may be in a
+# warm window.
+BUILDING = ("pending_materials", "pending_textures", "compiled_surfaces", "baked_textures")
 
 
 def read(path):
@@ -121,6 +123,9 @@ def main(path, warm=None):
     print(f"  memory: geometry {size(last['geometry_bytes'])}, views {size(last['view_bytes'])}, "
           f"targets {size(last['target_bytes'])}, host {size(last['host_bytes'])}; "
           f"vram {size(last['vram_used_bytes'])} used of {size(last['vram_budget_bytes'])}")
+    print(f"  materials: {size(last['material_bytes'])}, {last['lowered_textures']:.0f} textures lowered to fit")
+    print(f"  textures: {last['blurred_textures']:.0f} drawn coarser than the view needs, "
+          f"{last['unseen_textures']:.0f} unseen, {last['unestimated_textures']:.0f} not estimated")
 
 
 if __name__ == "__main__":

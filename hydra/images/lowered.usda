@@ -1,0 +1,75 @@
+#usda 1.0
+(
+    doc = "A quad facing the camera, bound to a MaterialX surface that emits the vector3 sample of bake/fixtures/mips.exr, rendered under a memory budget of one byte (hydra/image.py's BUDGET), which no texture fits: Pika lowers the 8×8 file to its floor, its 4×4 stored level on, flat greys of 128, 64 and 32 of 255, and warns of it in one line. At an st scaled so that a pixel covers √2 texels of the 4×4 at frame 1 (level 0.5, as the full chain would draw at its level 1.5) and √2/2 at frame 2 (level 0, where the full chain blends its swatch and its flat level 1 instead)."
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 50
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.5, -0.9, -5), (1.5, -0.9, -5), (1.5, 0.9, -5), (-1.5, 0.9, -5)]
+    texCoord2f[] primvars:st (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st.timeSamples = {
+        1: [(0, 0), (47.140452, 0), (47.140452, 28.284271), (0, 28.284271)],
+        2: [(0, 0), (23.570226, 0), (23.570226, 14.142136), (0, 14.142136)],
+    }
+    rel material:binding = </levels>
+}
+
+def Material "levels"
+{
+    token outputs:surface.connect = </levels/surface.outputs:out>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "ND_surface"
+        token inputs:edf.connect = </levels/emission.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "emission"
+    {
+        uniform token info:id = "ND_uniform_edf"
+        color3f inputs:color.connect = </levels/rgb.outputs:out>
+        token outputs:out
+    }
+
+    def Shader "rgb"
+    {
+        uniform token info:id = "ND_convert_vector3_color3"
+        float3 inputs:in.connect = </levels/image.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "ND_image_vector3"
+        asset inputs:file = @../../bake/fixtures/mips.exr@
+        float2 inputs:texcoord.connect = </levels/st.outputs:out>
+        float3 outputs:out
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "ND_geompropvalue_vector2"
+        string inputs:geomprop = "st"
+        float2 outputs:out
+    }
+}
+

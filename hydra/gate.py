@@ -1,11 +1,12 @@
 """usdview's --testScript for the gate run (hydra/gate.sh): sizes the
 viewport to 1080p at ALab's 3:2, shows the render purpose, repaints until
-Pika's stats say a frame was drawn with no material pending (every build
-landed), then plays frames 1004-1057 twice as the Play button does
+Pika's stats say a frame was drawn with no material or texture pending
+(every build landed, every texture at the levels that fit), then plays frames 1004-1057 twice as the Play button does
 (playing on, setFrame, a synchronous repaint). Pika writes the numbers to
 PIKA_STATS.
 """
 
+import os
 import sys
 import time
 
@@ -19,9 +20,12 @@ PATIENCE = 600
 def testUsdviewInputFunction(appController):
     app = QtWidgets.QApplication.instance()
     view = appController._stageView
-    # ALab's textures are 145 GB at their own size (design.md), so the gate
-    # caps them at 512 until they stream; the delegate's default is no cap.
-    view.SetRendererSetting("pika:textureCap", 512)
+    # ALab's textures are 145 GB at their own size (design.md), which Pika
+    # fits to the device; GATE_CAP=512 is the run to compare with, as the
+    # gate ran before it did.
+    cap = int(os.environ.get("GATE_CAP", "0"))
+    if cap:
+        view.SetRendererSetting("pika:textureCap", cap)
     view.SetPhysicalWindowSize(WIDTH, HEIGHT)
     settings = appController._dataModel.viewSettings
     settings.displayRender = True
@@ -32,10 +36,11 @@ def testUsdviewInputFunction(appController):
     start = time.monotonic()
     while True:
         stats = view._renderer.GetRenderStats()
-        if stats.get("frames", 0) and not stats.get("pending_materials", 0):
+        pending = stats.get("pending_materials", 0), stats.get("pending_textures", 0)
+        if stats.get("frames", 0) and not any(pending):
             break
         if time.monotonic() - start > PATIENCE:
-            sys.exit(f"{stats.get('pending_materials')} materials still pending after {PATIENCE} s")
+            sys.exit(f"{pending[0]} materials and {pending[1]} textures still pending after {PATIENCE} s")
         view.repaint()
         app.processEvents()
     print(

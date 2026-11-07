@@ -75,7 +75,7 @@ impl Network {
 }
 
 /// A texture as a material asks the bake tool for it: the file, the colour
-/// space the file is in, the encoding and cap it is stored with, and, when
+/// space the file is in, the encoding it is stored with, and, when
 /// the file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
 pub struct Source {
@@ -86,24 +86,24 @@ pub struct Source {
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
-    /// The texels a side above which its levels are dropped, 0 for none.
-    pub cap: u32,
     /// A UsdUVTexture's `fallback` or an image node's `default`, its
     /// nodedef's when unauthored, for a file that is empty; empty itself
     /// for a file that resolves, so an edit to a drawn fallback, and no
     /// other, makes a new source.
     pub default: Vec<f32>,
+    /// It reads coordinates other than a primvar's as authored, so the
+    /// detail it needs is not estimated (`transformed`).
+    pub transformed: bool,
 }
 
-/// The texture `node`, at `path`, reads through its input `input`, under
-/// the cap `cap`. The
+/// The texture `node`, at `path`, reads through its input `input`. The
 /// encoding follows the node's output type: colour compresses as BC7
 /// sRGB, or as plain BC7 when its space is raw; a float as BC4; a vector3
 /// or vector4 as BC7; a vector2 stays float, so a coordinate map stays
 /// exact (the oracles' uv ramp). The space is the asset's `colorSpace` metadata, else
 /// UsdUVTexture's `sourceColorSpace`, in OpenColorIO's names, else `auto`
 /// for a colour and raw for the rest.
-pub fn source(path: &str, node: &Node, input: &str, cap: u32) -> Result<Source, String> {
+pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result<Source, String> {
     let file = match node.params.get(input) {
         Some(Value::Asset(file)) => file.clone(),
         Some(_) => return Err(format!("{path}'s {input} is not an asset")),
@@ -156,9 +156,32 @@ pub fn source(path: &str, node: &Node, input: &str, cap: u32) -> Result<Source, 
         file,
         space,
         encoding,
-        cap,
         default,
+        transformed: transformed(network, node),
     })
+}
+
+/// Whether the texture node `node` of `network` reads coordinates other
+/// than a primvar's as authored: its UsdUVTexture `st` or image
+/// `texcoord` is connected to anything but a primvar reader, which
+/// transforms them, or it is another node, which may (a tiled image's
+/// tiling). Unconnected, it reads UV0 as authored.
+fn transformed(network: &Network, node: &Node) -> bool {
+    let input = match node.node_type.as_str() {
+        "UsdUVTexture" => "st",
+        t if t.starts_with("ND_image_") => "texcoord",
+        _ => return true,
+    };
+    let Some(connection) = node.connections.get(input) else {
+        return false;
+    };
+    const READERS: [&str; 3] = [
+        "UsdPrimvarReader_float2",
+        "ND_geompropvalue_vector2",
+        "ND_texcoord_vector2",
+    ];
+    let upstream = network.nodes.get(&connection.node);
+    !upstream.is_some_and(|n| READERS.contains(&n.node_type.as_str()))
 }
 
 /// A network's MaterialX document, its key, and the texcoord its meshes
@@ -781,17 +804,18 @@ pub mod tests {
 
     #[test]
     fn sources_follow_the_node_and_its_colour_space() {
-        let tex = &fixture().nodes["tex"];
+        let network = fixture();
+        let tex = &network.nodes["tex"];
         assert_eq!(
-            source("tex", tex, "file", 0).unwrap(),
+            source(&network, "tex", tex, "file").unwrap(),
             Source {
                 node: "tex".into(),
                 input: "file".into(),
                 file: "bake/fixtures/swatch.png".into(),
                 space: "raw".into(),
                 encoding: "data",
-                cap: 0,
                 default: vec![],
+                transformed: false,
             }
         );
         // A missing file carries the fallback the node draws instead.
@@ -800,31 +824,37 @@ pub mod tests {
             .params
             .insert("file".into(), Value::Asset(String::new()));
         assert_eq!(
-            source("tex", &missing, "file", 0).unwrap().default,
+            source(&network, "tex", &missing, "file").unwrap().default,
             [0.0, 0.0, 0.0, 1.0]
         );
         (missing.params).insert("fallback".into(), Value::Float(vec![0.2, 0.4, 0.6, 1.0]));
         assert_eq!(
-            source("tex", &missing, "file", 0).unwrap().default,
+            source(&network, "tex", &missing, "file").unwrap().default,
             [0.2, 0.4, 0.6, 1.0]
         );
         missing.node_type = "ND_image_float".into();
         assert_eq!(
-            source("tex", &missing, "file", 0).unwrap().default,
+            source(&network, "tex", &missing, "file").unwrap().default,
             [0.0; 4]
         );
         missing
             .params
             .insert("default".into(), Value::Float(vec![0.5]));
-        assert_eq!(source("tex", &missing, "file", 0).unwrap().default, [0.5]);
+        assert_eq!(
+            source(&network, "tex", &missing, "file").unwrap().default,
+            [0.5]
+        );
         let mut srgb = tex.clone();
         srgb.params.remove("colorSpace:file");
         srgb.params
             .insert("sourceColorSpace".into(), Value::Text("sRGB".into()));
-        let s = source("tex", &srgb, "file", 0).unwrap();
+        let s = source(&network, "tex", &srgb, "file").unwrap();
         assert_eq!((s.space.as_str(), s.encoding), ("srgb_texture", "color"));
         srgb.params.remove("sourceColorSpace");
-        assert_eq!(source("tex", &srgb, "file", 0).unwrap().space, "auto");
+        assert_eq!(
+            source(&network, "tex", &srgb, "file").unwrap().space,
+            "auto"
+        );
 
         // Declaring nothing, a colour is sRGB when 8-bit, the rest raw.
         let image = |kind: &str| {
@@ -832,7 +862,7 @@ pub mod tests {
             node.node_type = format!("ND_image_{kind}");
             node.params.remove("colorSpace:file");
             node.params.remove("sourceColorSpace");
-            source("tex", &node, "file", 0).map(|s| (s.space, s.encoding))
+            source(&network, "tex", &node, "file").map(|s| (s.space, s.encoding))
         };
         assert_eq!(image("vector2"), Ok(("raw".into(), "float")));
         assert_eq!(image("float"), Ok(("raw".into(), "single")));
@@ -841,8 +871,8 @@ pub mod tests {
         assert!(image("matrix33").is_err());
         let mut other = tex.clone();
         other.node_type = "ND_triplanarprojection_color3".into();
-        assert!(source("tex", &other, "file", 0).is_err());
-        assert!(source("tex", tex, "st", 0).is_err());
+        assert!(source(&network, "tex", &other, "file").is_err());
+        assert!(source(&network, "tex", tex, "st").is_err());
     }
 
     #[test]
@@ -898,5 +928,30 @@ pub mod tests {
                 .contains("lacks")
         );
         assert!(doc.reader(&network, "u_viewPosition").is_err());
+    }
+
+    #[test]
+    fn a_texture_read_through_a_transform_is_not_estimated() {
+        let mut network = fixture();
+        let transformed = |n: &Network| {
+            source(n, "tex", &n.nodes["tex"], "file")
+                .unwrap()
+                .transformed
+        };
+        assert!(!transformed(&network));
+        // Unconnected, it reads UV0 as authored.
+        let tex = network.nodes.get_mut("tex").unwrap();
+        tex.connections.remove("st");
+        assert!(!transformed(&network));
+        // Through a UsdTransform2d, it is not.
+        let tex = network.nodes.get_mut("tex").unwrap();
+        tex.connections
+            .insert("st".into(), connection("place", "result"));
+        let place = Node {
+            node_type: "UsdTransform2d".into(),
+            ..Default::default()
+        };
+        network.nodes.insert("place".into(), place);
+        assert!(transformed(&network));
     }
 }

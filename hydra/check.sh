@@ -163,8 +163,9 @@ fixture() {
     #   bakes: A then B      textures baked, likewise (0 then 0)
     #   warnings: N          material warnings, each once though husk renders a
     #                        frame more than once, and none for a repair (0)
-    #   warned: M            one warning's text after "material ", which must
-    #                        name what to fix and say what is drawn (unchecked)
+    #   warned: M            the start of one warning's text after "pika: warning: ",
+    #                        which must name what to fix and say what is drawn
+    #                        (unchecked)
     #   redundant bytes: R   mesh bytes the edit handed over that the store held;
     #                        0 for an edit touching no primvar the materials read
     #                        (unchecked: Hydra resends what a changed topology covers)
@@ -196,8 +197,8 @@ fixture() {
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
-    [ -z "$warned" ] || grep -qF "pika: warning: material $warned" "$OUT/fixtures/$name.log" ||
-        fail "$name: no warning reads \"material $warned\" (see $OUT/fixtures/$name.log)"
+    [ -z "$warned" ] || grep -qF "pika: warning: $warned" "$OUT/fixtures/$name.log" ||
+        fail "$name: no warning reads \"$warned\" (see $OUT/fixtures/$name.log)"
     [ -z "$redundant" ] || [ "$(redundant "$OUT/fixtures/$name.stats" "$edit")" = "$redundant" ] ||
         fail "$name: the edit handed over $(redundant "$OUT/fixtures/$name.stats" "$edit") redundant mesh bytes, not $redundant"
 }
@@ -240,8 +241,10 @@ first=${fixtures[0]}
     >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
 
 DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" \
-    "$ROOT/hydra/scenes/painted.usda" >"$OUT/engine.log" 2>&1 ||
-    fail "the host does not see Pika's stats, or a pending material is not clay or as it was (see $OUT/engine.log)"
+    "$ROOT/hydra/scenes/painted.usda" "$ROOT/hydra/scenes/mipped.usda" >"$OUT/engine.log" 2>&1 ||
+    fail "the host does not see Pika's stats, a pending material is not clay or as it was, or a cap change in session differs from a fresh session (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
+grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; held at 2×2 until the memory budget grows or the textures change$" "$OUT/engine.log" ||
+    fail "engine: the raise whose read failed was not warned of (see $OUT/engine.log)"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

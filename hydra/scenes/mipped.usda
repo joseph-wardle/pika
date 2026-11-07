@@ -1,0 +1,69 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A quad emitting the vector3 sample of bake/fixtures/mips.exr, magnified,
+# for hydra/engine.py: with no texture cap it draws the file's 8×8 swatch,
+# under a cap of 4 its 4×4 level, a flat grey of 128 of 255, and under 2
+# its 2×2, a grey of 64, so each cap draws an image of its own.
+def Xform "world"
+{
+    def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [(-1, -1, 0), (1, -1, 0), (1, 1, 0), (-1, 1, 0)]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </world/mtl/levels>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "levels"
+        {
+            token outputs:surface.connect = </world/mtl/levels/surface.outputs:out>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "ND_surface"
+                token inputs:edf.connect = </world/mtl/levels/emission.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "emission"
+            {
+                uniform token info:id = "ND_uniform_edf"
+                color3f inputs:color.connect = </world/mtl/levels/rgb.outputs:out>
+                token outputs:out
+            }
+
+            def Shader "rgb"
+            {
+                uniform token info:id = "ND_convert_vector3_color3"
+                float3 inputs:in.connect = </world/mtl/levels/image.outputs:out>
+                color3f outputs:out
+            }
+
+            def Shader "image"
+            {
+                uniform token info:id = "ND_image_vector3"
+                asset inputs:file = @../../bake/fixtures/mips.exr@
+                float2 inputs:texcoord.connect = </world/mtl/levels/st.outputs:out>
+                float3 outputs:out
+            }
+
+            def Shader "st"
+            {
+                uniform token info:id = "ND_geompropvalue_vector2"
+                string inputs:geomprop = "st"
+                float2 outputs:out
+            }
+        }
+    }
+}
