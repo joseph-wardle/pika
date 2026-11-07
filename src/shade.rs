@@ -42,11 +42,16 @@ pub struct Shade {
     /// Whether a look changed since the textures no look binds were last
     /// dropped.
     prune: bool,
-    /// Whether a texture loaded or swapped since the textures the cap
-    /// shrinks, and those lowered to fit, were last warned of, in a line
-    /// each when every build and swap is done: a scene's worth at once,
-    /// rather than a line per texture, thousands on a production asset.
-    warn: bool,
+    /// Whether the textures the cap shrinks, those fitting the memory
+    /// blurs, and the textures past the memory at their floors are still to
+    /// be warned of since the cap last changed: in a line each, the first
+    /// time every build and swap is done with any to count, a scene's worth
+    /// at once rather than a line per texture, thousands on a production
+    /// asset. Once, since every camera cut swaps hundreds of textures on
+    /// ALab.
+    warn_cap: bool,
+    warn_blur: bool,
+    warn_short: bool,
     /// `material::clay`, drawn where `looks` has no entry.
     clay: Material,
     /// `material::pink`, drawn for `Look::Failed`.
@@ -139,7 +144,9 @@ impl Shade {
             surfaces,
             looks: BTreeMap::new(),
             prune: false,
-            warn: false,
+            warn_cap: true,
+            warn_blur: true,
+            warn_short: true,
             clay,
             pink,
         })
@@ -184,7 +191,9 @@ impl Shade {
             self.prune = false;
         }
         // Before the builds land, so they load under the new cap.
-        self.warn |= self.textures.set_cap(cap);
+        if self.textures.set_cap(cap) {
+            (self.warn_cap, self.warn_blur, self.warn_short) = (true, true, true);
+        }
         let mut update = Update::default();
         for &id in &moved.materials {
             let Some(material) = store.materials().get(&id) else {
@@ -262,41 +271,43 @@ impl Shade {
         update.needs = self.textures.needs();
         update.pending = self.builder.len();
         update.pending_textures = self.textures.pending();
-        let (lowered, finest) = self.textures.lowered();
-        update.lowered_textures = lowered;
-        self.warn |= update.loaded > 0;
-        if update.pending == 0 && update.pending_textures == 0 && self.warn {
-            let counted = |n: usize| match n {
-                1 => "1 texture was".to_string(),
-                _ => format!("{n} textures were"),
-            };
-            let capped = self.textures.capped();
-            if capped > 0 {
-                eprintln!(
-                    "pika: warning: {} capped to {cap} texels a side by pika:textureCap",
-                    counted(capped)
-                );
-            }
-            let short = self.textures.short();
-            let past = format!("textures still take {} past it", stats::size(short));
-            if lowered > 0 {
-                eprintln!(
-                    "pika: warning: {} lowered to {finest} texels a side or less to fit the \
-                     device's memory budget{}",
-                    counted(lowered),
-                    if short > 0 {
-                        format!(", and {past}")
-                    } else {
-                        String::new()
-                    }
-                );
-            } else if short > 0 {
-                eprintln!(
-                    "pika: warning: none of the textures can be lowered to fit the device's \
-                     memory budget, and {past}"
-                );
-            }
-            self.warn = false;
+        update.lowered_textures = self.textures.lowered();
+        if update.pending > 0 || update.pending_textures > 0 {
+            return Ok(update);
+        }
+        let counted = |n: usize| match n {
+            1 => "1 texture was".to_string(),
+            _ => format!("{n} textures were"),
+        };
+        let capped = self.textures.capped();
+        if self.warn_cap && capped > 0 {
+            eprintln!(
+                "pika: warning: {} capped to {cap} texels a side by pika:textureCap",
+                counted(capped)
+            );
+            self.warn_cap = false;
+        }
+        let (blurred, short) = (update.needs.blurred, self.textures.short());
+        let past = format!("textures still take {} past it", stats::size(short));
+        if self.warn_blur && blurred > 0 {
+            eprintln!(
+                "pika: warning: {} drawn coarser than the view needs, at {} texels a side or \
+                 less, to fit the device's memory budget{}",
+                counted(blurred),
+                self.textures.blurred_side(),
+                if short > 0 {
+                    format!(", and {past}")
+                } else {
+                    String::new()
+                }
+            );
+            (self.warn_blur, self.warn_short) = (false, self.warn_short && short == 0);
+        } else if self.warn_short && short > 0 {
+            eprintln!(
+                "pika: warning: none of the textures can be lowered to fit the device's \
+                 memory budget, and {past}"
+            );
+            self.warn_short = false;
         }
         Ok(update)
     }
