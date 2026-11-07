@@ -53,6 +53,30 @@ impl Texture {
         self.source != [self.width, self.height]
     }
 
+    /// Adds into `needs`, bytes by heap index, what loading it allocates as
+    /// the driver sizes it: its image with alignment and tiling, its tile
+    /// table and its staging buffer. Nothing is created.
+    pub fn needs(&self, device: &gpu::Device, needs: &mut [u64]) -> Result<(), String> {
+        let info = image_info(self);
+        let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
+        let mut image = vk::MemoryRequirements2::default();
+        // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
+        // outlives the call.
+        unsafe {
+            device
+                .raw
+                .get_device_image_memory_requirements(&ask, &mut image)
+        };
+        let image = image.memory_requirements;
+        let tiles = Buffer::host_needs(device, 4 * self.tiles.len() as u64, TILES);
+        let staging = Buffer::host_needs(device, self.bytes(), STAGING);
+        let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        needs[device.heap(image.memory_type_bits, local)?] += image.size;
+        needs[device.heap(tiles.memory_type_bits, HOST)?] += tiles.size;
+        needs[device.heap(staging.memory_type_bits, HOST)?] += staging.size;
+        Ok(())
+    }
+
     /// Reads its levels, finest first, into `into`, which is `bytes()` long.
     pub fn read_levels(&self, into: &mut [u8]) -> std::io::Result<()> {
         let start = self.levels[0].start;
@@ -65,6 +89,15 @@ impl Texture {
         }
     }
 }
+
+/// The memory and usages of a texture's host buffers: its tile table, which
+/// the shader reads, and the staging buffer its levels upload from.
+const HOST: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::from_raw(
+    vk::MemoryPropertyFlags::HOST_VISIBLE.as_raw()
+        | vk::MemoryPropertyFlags::HOST_COHERENT.as_raw(),
+);
+const TILES: vk::BufferUsageFlags = vk::BufferUsageFlags::STORAGE_BUFFER;
+const STAGING: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_SRC;
 
 /// The longest header: the fixed words and a set's tile table.
 const HEADER: usize = 44 + 4 * 100;
@@ -222,25 +255,28 @@ pub struct Binding {
     pub wrap: [u32; 2],
 }
 
+/// The image `texture` uploads to, which `Texture::needs` sizes.
+fn image_info(texture: &Texture) -> vk::ImageCreateInfo<'static> {
+    vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(texture.format)
+        .extent(vk::Extent3D {
+            width: texture.width,
+            height: texture.height,
+            depth: 1,
+        })
+        .mip_levels(texture.levels.len() as u32)
+        .array_layers(texture.layers)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+}
+
 impl Image {
     /// Creates the image for `texture`.
     fn new(device: &gpu::Device, texture: &Texture) -> Result<Self, String> {
         let d = &device.raw;
-        let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(texture.format)
-            .extent(vk::Extent3D {
-                width: texture.width,
-                height: texture.height,
-                depth: 1,
-            })
-            .mip_levels(texture.levels.len() as u32)
-            .array_layers(texture.layers)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST);
-        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let usage = vk::BufferUsageFlags::STORAGE_BUFFER;
-        let mut tiles = Buffer::host(device, 4 * texture.tiles.len() as u64, usage, host)?;
+        let info = image_info(texture);
+        let mut tiles = Buffer::host(device, 4 * texture.tiles.len() as u64, TILES, HOST)?;
         for (i, layer) in texture.tiles.iter().enumerate() {
             tiles.bytes()[4 * i..4 * i + 4].copy_from_slice(&layer.to_ne_bytes());
         }
@@ -411,10 +447,8 @@ impl Textures {
         // The levels alone: each starts at a multiple of its format's block
         // size then, which a copy's buffer offset must be; the header is
         // not one.
-        let usage = vk::BufferUsageFlags::TRANSFER_SRC;
-        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
         let size = texture.bytes();
-        let mut staging = Buffer::host(device, size, usage, host)?;
+        let mut staging = Buffer::host(device, size, STAGING, HOST)?;
         let start = Instant::now();
         (texture.read_levels(&mut staging.bytes()[..size as usize]))
             .map_err(|e| format!("cannot read the levels of {key}: {e}"))?;

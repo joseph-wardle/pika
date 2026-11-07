@@ -445,7 +445,11 @@ impl Renderer {
             .filter(|(_, r)| *r)
             .map(|(f, _)| (f.1 * w as usize * h as usize) as u64)
             .sum();
-        let (vram_used, vram_budget) = self.device.budget();
+        let local = self
+            .device
+            .heap(!0, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+        let vram = self.device.heaps()[local];
+        let (vram_used, vram_budget) = (vram.used, vram.allowed);
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),

@@ -316,12 +316,18 @@ impl Shade {
         update.baked += output.textures.iter().filter(|b| b.fresh).count();
         // A refused allocation leaves the device usable, but ALab filling
         // it at the 1024 cap lost the device, so the budget is never crossed.
-        let fresh: u64 = (output.textures.iter())
-            .filter(|b| !textures.holds(&b.key))
-            .map(|b| b.texture.bytes())
-            .sum();
-        let (used, allowed) = device.budget();
-        if fresh > 0 && allowed > 0 && used + fresh > allowed {
+        let heaps = device.heaps();
+        let mut needs = vec![0; heaps.len()];
+        // By key: a texture that two of its nodes read loads once.
+        let mut fresh = BTreeMap::new();
+        for b in output.textures.iter().filter(|b| !textures.holds(&b.key)) {
+            fresh.insert(&b.key, &b.texture);
+        }
+        for texture in fresh.values() {
+            texture.needs(device, &mut needs)?;
+        }
+        if gpu::overflow(&heaps, &needs).is_some() {
+            let fresh: u64 = fresh.values().map(|t| t.bytes()).sum();
             return Err(format!(
                 "its textures, {} baked, do not fit the device's memory budget: set or lower \
                  pika:textureCap",
