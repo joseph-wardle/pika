@@ -1,7 +1,7 @@
 """usdview's --testScript for the gate run (hydra/gate.sh): sizes the
 viewport to 1080p at ALab's 3:2, shows the render purpose, repaints until
-Pika's stats say a frame was drawn with no material pending (every build
-landed), then plays frames 1004-1057 twice as the Play button does
+Pika's stats say a frame was drawn with no material or texture pending
+(every build landed, every texture at the cap's levels), then plays frames 1004-1057 twice as the Play button does
 (playing on, setFrame, a synchronous repaint). Pika writes the numbers to
 PIKA_STATS.
 """
@@ -32,10 +32,11 @@ def testUsdviewInputFunction(appController):
     start = time.monotonic()
     while True:
         stats = view._renderer.GetRenderStats()
-        if stats.get("frames", 0) and not stats.get("pending_materials", 0):
+        pending = stats.get("pending_materials", 0), stats.get("pending_textures", 0)
+        if stats.get("frames", 0) and not any(pending):
             break
         if time.monotonic() - start > PATIENCE:
-            sys.exit(f"{stats.get('pending_materials')} materials still pending after {PATIENCE} s")
+            sys.exit(f"{pending[0]} materials and {pending[1]} textures still pending after {PATIENCE} s")
         view.repaint()
         app.processEvents()
     print(

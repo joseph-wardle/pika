@@ -178,6 +178,7 @@ struct Pending {
     loaded: u64,
     texture_read: Duration,
     pending: usize,
+    pending_textures: usize,
 }
 
 impl Renderer {
@@ -317,11 +318,13 @@ impl Renderer {
             self.collect(pending, &buffers, &mut aovs)?;
         }
         let placed = self.placed.as_ref();
+        // A swap waiting for a frame's bytes needs no build to land.
         if moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
+            && self.shade.settled()
             && !self.shade.builder.wait(WAIT)?
         {
-            return Ok(self.shade.builder.is_empty());
+            return Ok(self.shade.settled());
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
@@ -398,13 +401,14 @@ impl Renderer {
             loaded: shading.loaded,
             texture_read: shading.read,
             pending: shading.pending,
+            pending_textures: shading.pending_textures,
         };
         if latent {
             self.pending = Some(pending);
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.builder.is_empty())
+        Ok(self.shade.settled())
     }
 
     /// Waits for the pending frame and copies it into `aovs`, if they are
@@ -477,6 +481,7 @@ impl Renderer {
             loaded: pending.loaded,
             texture_read: pending.texture_read,
             pending: pending.pending,
+            pending_textures: pending.pending_textures,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

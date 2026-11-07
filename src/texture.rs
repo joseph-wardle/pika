@@ -1,7 +1,10 @@
 //! Baked textures: the file `bake texture` writes for one image or UDIM
 //! set under the cache, laid out as bake/texture.cpp says, as the renderer
-//! reads it, the image it is uploaded to, and the set of them loaded for
-//! the materials drawn, with the samplers they are read through.
+//! reads it, the image it is uploaded to, holding the levels within the
+//! texture cap, and the set of them loaded for the materials drawn, with
+//! the samplers they are read through. A changed cap swaps each image for
+//! one of its new levels, read from the file, a frame's worth of bytes at
+//! a time; nothing is baked or built again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
@@ -19,9 +22,6 @@ pub struct Texture {
     pub height: u32,
     pub layers: u32,
     pub format: vk::Format,
-    /// Its baked width and height before the cap (`cap`), a set's largest
-    /// tile's.
-    pub source: [u32; 2],
     /// The wrap modes the source's metadata states, u then v, in the image
     /// nodedefs' enumeration (black, clamp, periodic, mirror), black where
     /// it states none: what a UsdUVTexture's useMetadata reads
@@ -44,31 +44,38 @@ pub enum Contents {
 }
 
 impl Texture {
-    /// Its levels' bytes: what loading it uploads.
-    pub fn bytes(&self) -> u64 {
-        self.levels.iter().map(|l| l.len() as u64).sum()
+    /// The first of its levels within `cap` texels a side, 0 for none: the
+    /// file holds every level, so a cap reads fewer of it and bakes nothing.
+    /// Its last level is within any cap.
+    pub fn first(&self, cap: u32) -> usize {
+        let over = |&level: &usize| {
+            let (w, h) = self.extent(level);
+            cap > 0 && w.max(h) > cap
+        };
+        (0..self.levels.len() - 1).take_while(over).count()
     }
 
-    /// Whether the cap shrank it: its source was larger.
-    pub fn capped(&self) -> bool {
-        self.source != [self.width, self.height]
+    /// The width and height of its level `level`.
+    pub fn extent(&self, level: usize) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
     }
 
-    /// Drops its levels with a side over `cap` texels, 0 for none: the file
-    /// holds every level, so a cap reads fewer of it and bakes nothing.
-    pub fn cap(&mut self, cap: u32) {
-        while cap > 0 && self.levels.len() > 1 && self.width.max(self.height) > cap {
-            self.levels.remove(0);
-            self.width = (self.width / 2).max(1);
-            self.height = (self.height / 2).max(1);
-        }
+    /// The bytes of its levels from `first` on: what loading them uploads.
+    pub fn bytes(&self, first: usize) -> u64 {
+        self.levels[first..].iter().map(|l| l.len() as u64).sum()
     }
 
-    /// Adds into `needs`, bytes by heap index, what loading it allocates as
-    /// the driver sizes it: its image with alignment and tiling, its tile
-    /// table and its staging buffer. Nothing is created.
-    pub fn needs(&self, device: &gpu::Device, needs: &mut [u64]) -> Result<(), String> {
-        let info = image_info(self);
+    /// Adds into `needs`, bytes by heap index, what loading its levels
+    /// from `first` on allocates as the driver sizes it: their image with
+    /// alignment and tiling, its tile table and at most a staging buffer of
+    /// its own. Nothing is created.
+    pub fn needs(
+        &self,
+        device: &gpu::Device,
+        first: usize,
+        needs: &mut [u64],
+    ) -> Result<(), String> {
+        let info = image_info(self, first);
         let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
         let mut image = vk::MemoryRequirements2::default();
         // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
@@ -80,7 +87,7 @@ impl Texture {
         };
         let image = image.memory_requirements;
         let tiles = Buffer::host_needs(device, 4 * self.tiles.len() as u64, TILES);
-        let staging = Buffer::host_needs(device, self.bytes(), STAGING);
+        let staging = Buffer::host_needs(device, self.bytes(first), STAGING);
         let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         needs[device.heap(image.memory_type_bits, local)?] += image.size;
         needs[device.heap(tiles.memory_type_bits, HOST)?] += tiles.size;
@@ -88,9 +95,10 @@ impl Texture {
         Ok(())
     }
 
-    /// Reads its levels, finest first, into `into`, which is `bytes()` long.
-    pub fn read_levels(&self, into: &mut [u8]) -> std::io::Result<()> {
-        let start = self.levels[0].start;
+    /// Reads its levels from `first` on, finest first, into `into`, which
+    /// is `bytes(first)` long.
+    pub fn read_levels(&self, first: usize, into: &mut [u8]) -> std::io::Result<()> {
+        let start = self.levels[first].start;
         match &self.contents {
             Contents::Open(file) => file.read_exact_at(into, start as u64),
             Contents::Memory(file) => {
@@ -124,7 +132,6 @@ pub fn solid(texel: [f32; 4]) -> Texture {
         height: 1,
         layers: 1,
         format: vk::Format::R32G32B32A32_SFLOAT,
-        source: [1, 1],
         wrap: [2, 2],
         tiles: vec![0],
         levels: std::iter::once(0..16).collect(),
@@ -213,7 +220,6 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
         height,
         layers,
         format,
-        source: [width, height],
         wrap,
         tiles,
         levels: ranges,
@@ -236,8 +242,15 @@ pub fn level_size(format: vk::Format, width: u32, height: u32) -> Option<usize> 
     })
 }
 
-/// A texture on the GPU: a 2D array image with every level, in the layout
-/// the material pass samples once its upload has run, and its tile table.
+/// The bytes of levels a frame uploads, loads and swaps together, past
+/// which the rest wait for the next: reading and copying a texture's levels
+/// costs the render thread about 0.8 ms a MiB on the RTX 4070 Ti SUPER. A
+/// frame's first upload goes however large, so a texture larger than this
+/// still loads, alone in its frame.
+pub const UPLOAD: u64 = 32 << 20;
+
+/// A texture's levels on the GPU from `first` on: a 2D array image, in the
+/// layout the material pass samples once its upload has run.
 struct Image {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
@@ -245,8 +258,18 @@ struct Image {
     memory: vk::DeviceMemory,
     view: vk::ImageView,
     bytes: u64,
+    first: usize,
+}
+
+/// A texture loaded: its file, its tile table, which a swap keeps, and the
+/// image of its levels now.
+struct Loaded {
+    texture: Texture,
     tiles: Buffer,
-    wrap: [u32; 2],
+    image: Image,
+    /// The first level its image is to hold: the cap's, or the image's own
+    /// once a swap to the cap's failed, until the cap changes.
+    target: usize,
 }
 
 /// What a surface binds for one texture: its view and its tile table,
@@ -261,47 +284,45 @@ pub struct Binding {
     pub wrap: [u32; 2],
 }
 
-/// The image `texture` uploads to, which `Texture::needs` sizes.
-fn image_info(texture: &Texture) -> vk::ImageCreateInfo<'static> {
+/// The image of `texture`'s levels from `first` on, which `Texture::needs`
+/// sizes.
+fn image_info(texture: &Texture, first: usize) -> vk::ImageCreateInfo<'static> {
+    let (width, height) = texture.extent(first);
     vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(texture.format)
         .extent(vk::Extent3D {
-            width: texture.width,
-            height: texture.height,
+            width,
+            height,
             depth: 1,
         })
-        .mip_levels(texture.levels.len() as u32)
+        .mip_levels((texture.levels.len() - first) as u32)
         .array_layers(texture.layers)
         .samples(vk::SampleCountFlags::TYPE_1)
         .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
 }
 
 impl Image {
-    /// Creates the image for `texture`.
-    fn new(device: &gpu::Device, texture: &Texture) -> Result<Self, String> {
+    /// Creates the image of `texture`'s levels from `first` on.
+    fn new(device: &gpu::Device, texture: &Texture, first: usize) -> Result<Self, String> {
         let d = &device.raw;
-        let info = image_info(texture);
-        let mut tiles = Buffer::host(device, 4 * texture.tiles.len() as u64, TILES, HOST)?;
-        for (i, layer) in texture.tiles.iter().enumerate() {
-            tiles.bytes()[4 * i..4 * i + 4].copy_from_slice(&layer.to_ne_bytes());
-        }
+        let info = image_info(texture, first);
         let mut i = Self {
             device: d.clone(),
             image: vk::Image::null(),
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
             bytes: 0,
-            tiles,
-            wrap: texture.wrap,
+            first,
         };
         // SAFETY (this and every call below): `d` is live, each info struct
         // outlives its call, and each handle passed in was created on `d`
         // just above. `drop` destroys what was made before an error.
         i.image = unsafe { d.create_image(&info, None) }.map_err(|e| {
+            let (width, height) = texture.extent(first);
             format!(
-                "vkCreateImage ({}×{} {:?}) failed: {e}",
-                texture.width, texture.height, texture.format
+                "vkCreateImage ({width}×{height} {:?}) failed: {e}",
+                texture.format
             )
         })?;
         let needs = unsafe { d.get_image_memory_requirements(i.image) };
@@ -314,16 +335,17 @@ impl Image {
             .image(i.image)
             .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
             .format(texture.format)
-            .subresource_range(range(texture));
+            .subresource_range(i.range(texture));
         i.view = unsafe { d.create_image_view(&view_info, None) }
             .map_err(|e| format!("vkCreateImageView failed: {e}"))?;
         Ok(i)
     }
 
-    /// Records into `cb`, outside rendering, the copies of `texture`'s
-    /// levels from `staging` and the move into the layout the material
-    /// pass samples. `staging` must live until the GPU has run `cb`.
-    fn record(&self, cb: vk::CommandBuffer, staging: &Buffer, texture: &Texture) {
+    /// Records into `cb`, outside rendering, the copies of its levels of
+    /// `texture` from `staging`, where they start at `at`, and the move into
+    /// the layout the material pass samples. `staging` must live until the
+    /// GPU has run `cb`.
+    fn record(&self, cb: vk::CommandBuffer, staging: &Buffer, at: u64, texture: &Texture) {
         let to_copy = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::NONE)
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
@@ -331,7 +353,7 @@ impl Image {
             .old_layout(vk::ImageLayout::UNDEFINED)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .image(self.image)
-            .subresource_range(range(texture));
+            .subresource_range(self.range(texture));
         let to_sample = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -340,28 +362,30 @@ impl Image {
             .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image(self.image)
-            .subresource_range(range(texture));
-        let copies: Vec<_> = (texture.levels.iter().enumerate())
-            .map(|(level, bytes)| {
+            .subresource_range(self.range(texture));
+        let start = texture.levels[self.first].start;
+        let copies: Vec<_> = (self.first..texture.levels.len())
+            .map(|level| {
+                let (width, height) = texture.extent(level);
                 vk::BufferImageCopy::default()
-                    .buffer_offset((bytes.start - texture.levels[0].start) as u64)
+                    .buffer_offset(at + (texture.levels[level].start - start) as u64)
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: level as u32,
+                        mip_level: (level - self.first) as u32,
                         base_array_layer: 0,
                         layer_count: texture.layers,
                     })
                     .image_extent(vk::Extent3D {
-                        width: (texture.width >> level).max(1),
-                        height: (texture.height >> level).max(1),
+                        width,
+                        height,
                         depth: 1,
                     })
             })
             .collect();
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering, the image was created
-        // on `d` with TRANSFER_DST usage for `texture`, and `staging` holds
-        // its levels at the offsets copied from.
+        // on `d` with TRANSFER_DST usage for these levels of `texture`, and
+        // `staging` holds them at the offsets copied from.
         unsafe {
             let barriers = [to_copy];
             let barrier = vk::DependencyInfo::default().image_memory_barriers(&barriers);
@@ -373,16 +397,14 @@ impl Image {
             d.cmd_pipeline_barrier2(cb, &barrier);
         }
     }
-}
 
-impl Image {
-    fn binding(&self) -> Binding {
-        Binding {
-            view: self.view,
-            tiles: vk::DescriptorBufferInfo::default()
-                .buffer(self.tiles.raw)
-                .range(self.tiles.size),
-            wrap: self.wrap,
+    fn range(&self, texture: &Texture) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: (texture.levels.len() - self.first) as u32,
+            base_array_layer: 0,
+            layer_count: texture.layers,
         }
     }
 }
@@ -399,87 +421,263 @@ impl Drop for Image {
     }
 }
 
-fn range(texture: &Texture) -> vk::ImageSubresourceRange {
-    vk::ImageSubresourceRange {
-        aspect_mask: vk::ImageAspectFlags::COLOR,
-        base_mip_level: 0,
-        level_count: texture.levels.len() as u32,
-        base_array_layer: 0,
-        layer_count: texture.layers,
+/// The first level of `texture` a frame with `left` bytes still to upload
+/// loads for a target of `target`: the target, unless its levels are more
+/// than are left and another upload went first, then the finest whose
+/// levels fit, its last at least, which swaps raise in later frames.
+fn fit(texture: &Texture, target: usize, left: u64) -> usize {
+    let last = texture.levels.len() - 1;
+    if left == UPLOAD {
+        return target;
+    }
+    (target..last)
+        .find(|&first| texture.bytes(first) <= left)
+        .unwrap_or(last)
+}
+
+/// The host memory a frame's level reads land in, which its commands copy
+/// into the images: one buffer of `UPLOAD` bytes kept from frame to frame,
+/// since on ALab a buffer of a texture's own cost seven times its read to
+/// create and free, and one of its own for an upload past what is left.
+struct Staging {
+    buffer: Buffer,
+    /// The bytes of `buffer` this frame's uploads hold.
+    used: u64,
+    own: Vec<Buffer>,
+}
+
+impl Staging {
+    fn new(device: &gpu::Device) -> Result<Self, String> {
+        Ok(Self {
+            buffer: Buffer::host(device, UPLOAD, STAGING, HOST)?,
+            used: 0,
+            own: Vec::new(),
+        })
+    }
+
+    /// Room for an upload of `size` bytes: the buffer and where in it.
+    fn room(&mut self, device: &gpu::Device, size: u64) -> Result<(&mut Buffer, u64), String> {
+        // A copy's buffer offset is a multiple of its format's block size,
+        // at most 16 bytes.
+        let at = self.used.next_multiple_of(16);
+        if at + size <= self.buffer.size {
+            self.used = at + size;
+            return Ok((&mut self.buffer, at));
+        }
+        self.own.push(Buffer::host(device, size, STAGING, HOST)?);
+        Ok((self.own.last_mut().unwrap(), 0))
     }
 }
 
-/// The textures loaded for the materials drawn, by `bake::Baked::key`, and the
-/// samplers they are read through. Loads are recorded into a frame's
-/// commands, outside rendering, and their staging buffers kept until the
-/// next frame begins, when the GPU has read them.
+/// The image of `texture`'s levels from `first` on, created now, and their
+/// upload recorded into `cb` from `staging`; the time reading them took.
+fn upload(
+    device: &gpu::Device,
+    cb: vk::CommandBuffer,
+    texture: &Texture,
+    first: usize,
+    staging: &mut Staging,
+) -> Result<(Image, Duration), String> {
+    let image = Image::new(device, texture, first)?;
+    // The levels alone: each starts at a multiple of its format's block
+    // size then, which a copy's buffer offset must be; the header is not
+    // one.
+    let size = texture.bytes(first);
+    let (buffer, at) = staging.room(device, size)?;
+    let start = Instant::now();
+    let into = &mut buffer.bytes()[at as usize..(at + size) as usize];
+    (texture.read_levels(first, into)).map_err(|e| format!("cannot read its levels: {e}"))?;
+    let read = start.elapsed();
+    image.record(cb, buffer, at, texture);
+    Ok((image, read))
+}
+
+/// The textures loaded for the materials drawn, by `bake::Baked::key`, each
+/// holding the levels within the texture cap, and the samplers they are
+/// read through. Loads and swaps are recorded into a frame's commands,
+/// outside rendering, `UPLOAD` bytes a frame, and their staging is kept
+/// until the next frame begins, when the GPU has read it.
 pub struct Textures {
     device: ash::Device,
-    images: BTreeMap<String, Image>,
+    loaded: BTreeMap<String, Loaded>,
     /// By address modes, u then v (`material::address_modes`).
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
-    staging: Vec<Buffer>,
+    staging: Staging,
+    /// The images swaps replaced, kept until the next frame begins, by
+    /// when every material binding them has been rebound.
+    retired: Vec<Image>,
+    /// The texels a side of the cap, 0 for none.
+    cap: u32,
+    /// The bytes this frame may still upload.
+    left: u64,
 }
 
 impl Textures {
-    pub fn new(device: &gpu::Device) -> Self {
-        Self {
+    pub fn new(device: &gpu::Device) -> Result<Self, String> {
+        Ok(Self {
             device: device.raw.clone(),
-            images: BTreeMap::new(),
+            loaded: BTreeMap::new(),
             samplers: BTreeMap::new(),
-            staging: Vec::new(),
-        }
+            staging: Staging::new(device)?,
+            retired: Vec::new(),
+            cap: 0,
+            left: UPLOAD,
+        })
     }
 
-    /// Begins a frame's loads. No GPU work may be pending.
+    /// Begins a frame's loads and swaps. No GPU work may be pending.
     pub fn begin(&mut self) {
-        self.staging.clear();
+        (self.staging.used, self.staging.own) = (0, Vec::new());
+        self.retired.clear();
+        self.left = UPLOAD;
+    }
+
+    pub fn cap(&self) -> u32 {
+        self.cap
+    }
+
+    /// Sets the cap to `cap` texels a side, 0 for none, and so each loaded
+    /// texture's target, which `swap` moves its image to; whether it changed.
+    pub fn set_cap(&mut self, cap: u32) -> bool {
+        if cap == self.cap {
+            return false;
+        }
+        self.cap = cap;
+        for loaded in self.loaded.values_mut() {
+            loaded.target = loaded.texture.first(cap);
+        }
+        true
     }
 
     /// The baked texture keyed `key`, read as `texture`, loaded now unless
-    /// it is, its levels read into a staging buffer; the bytes that
+    /// it is: its levels within the cap, or as many of them as the frame's
+    /// bytes allow (`fit`), read into a staging buffer; the bytes that
     /// uploaded, 0 when it was loaded, and the time their read took.
     pub fn load(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         key: &str,
-        texture: &Texture,
+        texture: Texture,
     ) -> Result<(u64, Duration), String> {
-        if self.images.contains_key(key) {
+        if self.loaded.contains_key(key) {
             return Ok((0, Duration::ZERO));
         }
-        let image = Image::new(device, texture).map_err(|e| format!("{key}: {e}"))?;
-        // The levels alone: each starts at a multiple of its format's block
-        // size then, which a copy's buffer offset must be; the header is
-        // not one.
-        let size = texture.bytes();
-        let mut staging = Buffer::host(device, size, STAGING, HOST)?;
-        let start = Instant::now();
-        (texture.read_levels(&mut staging.bytes()[..size as usize]))
-            .map_err(|e| format!("cannot read the levels of {key}: {e}"))?;
-        let read = start.elapsed();
-        image.record(cb, &staging, texture);
-        self.staging.push(staging);
-        self.images.insert(key.to_owned(), image);
+        let mut tiles = Buffer::host(device, 4 * texture.tiles.len() as u64, TILES, HOST)?;
+        for (i, layer) in texture.tiles.iter().enumerate() {
+            tiles.bytes()[4 * i..4 * i + 4].copy_from_slice(&layer.to_ne_bytes());
+        }
+        let target = texture.first(self.cap);
+        let first = fit(&texture, target, self.left);
+        let (image, read) = upload(device, cb, &texture, first, &mut self.staging)
+            .map_err(|e| format!("{key}: {e}"))?;
+        let size = texture.bytes(first);
+        self.left = self.left.saturating_sub(size);
+        let loaded = Loaded {
+            texture,
+            tiles,
+            image,
+            target,
+        };
+        self.loaded.insert(key.to_owned(), loaded);
         Ok((size, read))
+    }
+
+    /// Swaps each image not holding its target's levels for one that does,
+    /// read from its file, while the frame's bytes last (`UPLOAD`), in key
+    /// order: the new image is made and uploaded first, and the old one
+    /// retired once the materials binding it are rebound, so a swap that
+    /// fails keeps the old. A raise goes only if its image fits the
+    /// device's memory budget beside the old. A swap that fails is warned
+    /// of, and its texture kept as it is until the cap changes. Records
+    /// the uploads into `cb`; the keys swapped, which the caller rebinds
+    /// before the next frame begins, the bytes uploaded and the time
+    /// their read took.
+    pub fn swap(
+        &mut self,
+        device: &gpu::Device,
+        cb: vk::CommandBuffer,
+    ) -> (BTreeSet<String>, u64, Duration) {
+        let (mut keys, mut bytes, mut read) = (BTreeSet::new(), 0, Duration::ZERO);
+        let heaps = device.heaps();
+        let mut raised = vec![0; heaps.len()];
+        for (key, loaded) in &mut self.loaded {
+            let (texture, target) = (&loaded.texture, loaded.target);
+            if loaded.image.first == target {
+                continue;
+            }
+            let size = texture.bytes(target);
+            if self.left < UPLOAD && size > self.left {
+                continue;
+            }
+            let swapped = (|| {
+                if target < loaded.image.first {
+                    let mut needs = raised.clone();
+                    texture.needs(device, target, &mut needs)?;
+                    if gpu::overflow(&heaps, &needs).is_some() {
+                        let (w, h) = texture.extent(target);
+                        return Err(format!(
+                            "its {w}×{h} levels do not fit the device's memory budget"
+                        ));
+                    }
+                    raised = needs;
+                }
+                upload(device, cb, texture, target, &mut self.staging)
+            })();
+            match swapped {
+                Ok((image, time)) => {
+                    let old = std::mem::replace(&mut loaded.image, image);
+                    self.retired.push(old);
+                    self.left = self.left.saturating_sub(size);
+                    (bytes, read) = (bytes + size, read + time);
+                    keys.insert(key.clone());
+                }
+                Err(e) => {
+                    let (w, h) = texture.extent(loaded.image.first);
+                    eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
+                    loaded.target = loaded.image.first;
+                }
+            }
+        }
+        (keys, bytes, read)
+    }
+
+    /// The textures whose image does not hold its target's levels yet.
+    pub fn pending(&self) -> usize {
+        (self.loaded.values())
+            .filter(|l| l.image.first != l.target)
+            .count()
+    }
+
+    /// The textures the cap shrinks.
+    pub fn capped(&self) -> usize {
+        (self.loaded.values())
+            .filter(|l| l.texture.first(self.cap) > 0)
+            .count()
     }
 
     /// What a surface binds for the texture keyed `key`, loaded and kept
     /// while a material lists it (`retain`).
     pub fn binding(&self, key: &str) -> Result<Binding, String> {
-        (self.images.get(key).map(Image::binding))
-            .ok_or_else(|| format!("texture {key} is not loaded"))
+        let loaded =
+            (self.loaded.get(key)).ok_or_else(|| format!("texture {key} is not loaded"))?;
+        Ok(Binding {
+            view: loaded.image.view,
+            tiles: vk::DescriptorBufferInfo::default()
+                .buffer(loaded.tiles.raw)
+                .range(loaded.tiles.size),
+            wrap: loaded.texture.wrap,
+        })
     }
 
     /// Whether the texture keyed `key` is loaded.
     pub fn holds(&self, key: &str) -> bool {
-        self.images.contains_key(key)
+        self.loaded.contains_key(key)
     }
 
     /// Drops the textures not in `used`. No GPU work may be pending.
     pub fn retain(&mut self, used: &BTreeSet<String>) {
-        self.images.retain(|key, _| used.contains(key));
+        self.loaded.retain(|key, _| used.contains(key));
     }
 
     /// A trilinear sampler with the address modes `modes`, u then v, in
@@ -514,18 +712,17 @@ impl Textures {
         Ok(sampler)
     }
 
-    /// The images' bytes, and the tile tables' and staging buffers' on the
-    /// host side.
+    /// The images' bytes, retired ones included, and the tile tables' and
+    /// staging's on the host side.
     pub fn memory(&self) -> gpu::Memory {
+        let images = self.loaded.values().map(|l| &l.image).chain(&self.retired);
         let mut memory = gpu::Memory {
-            device: self.images.values().map(|i| i.bytes).sum(),
+            device: images.map(|i| i.bytes).sum(),
             host: 0,
         };
-        for b in self
-            .staging
-            .iter()
-            .chain(self.images.values().map(|i| &i.tiles))
-        {
+        let tiles = self.loaded.values().map(|l| &l.tiles);
+        let staging = std::iter::once(&self.staging.buffer).chain(&self.staging.own);
+        for b in staging.chain(tiles) {
             memory += b.memory();
         }
         memory
@@ -553,18 +750,18 @@ pub mod tests {
     fn a_solid_texture_is_one_float_texel() {
         let t = solid([0.2, 0.4, 0.6, 1.0]);
         assert_eq!((t.width, t.height, t.layers, t.levels.len()), (1, 1, 1, 1));
-        assert_eq!(t.bytes(), 16);
-        assert!(!t.capped());
+        assert_eq!(t.bytes(0), 16);
+        assert_eq!(t.first(1), 0);
         assert_eq!(level_size(t.format, 1, 1), Some(16));
         let mut texel = [0; 16];
-        t.read_levels(&mut texel).unwrap();
+        t.read_levels(0, &mut texel).unwrap();
         assert_eq!(f32::from_le_bytes(texel[4..8].try_into().unwrap()), 0.4);
     }
 
-    /// `t`'s levels as an upload reads them.
-    fn levels(t: &Texture) -> Vec<u8> {
-        let mut bytes = vec![0; t.bytes() as usize];
-        t.read_levels(&mut bytes).unwrap();
+    /// `t`'s levels from `first` on as an upload reads them.
+    fn levels(t: &Texture, first: usize) -> Vec<u8> {
+        let mut bytes = vec![0; t.bytes(first) as usize];
+        t.read_levels(first, &mut bytes).unwrap();
         bytes
     }
 
@@ -577,12 +774,11 @@ pub mod tests {
         let t = parse(RAMP.to_vec()).unwrap();
         assert_eq!((t.width, t.height, t.layers), (8, 8, 1));
         assert_eq!(t.format, vk::Format::R32G32_SFLOAT);
-        assert_eq!(t.source, [8, 8]);
         assert_eq!(t.wrap, [0, 0], "the ramp states no wrap mode: black");
         assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
         assert_eq!(t.levels[0].start, 40);
-        let bytes = levels(&t);
+        let bytes = levels(&t, 0);
         let texel = |level: usize, x: usize, y: usize| {
             let at = t.levels[level].start - 40 + (y * (8 >> level) + x) * 8;
             let f = |i: usize| f32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap());
@@ -619,13 +815,13 @@ pub mod tests {
         std::fs::write(&path, RAMP).unwrap();
         let t = read(&path).unwrap();
         assert!(matches!(t.contents, Contents::Open(_)));
-        assert_eq!(levels(&t), RAMP[40..], "the levels, not the header");
+        assert_eq!(levels(&t, 0), RAMP[40..], "the levels, not the header");
 
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(RAMP.len() as u64 - 8).unwrap();
-        let mut bytes = vec![0; t.bytes() as usize];
+        let mut bytes = vec![0; t.bytes(0) as usize];
         assert!(
-            t.read_levels(&mut bytes).is_err(),
+            t.read_levels(0, &mut bytes).is_err(),
             "cut short after its header was read"
         );
         file.set_len(40).unwrap();
@@ -661,7 +857,7 @@ pub mod tests {
                 assert_eq!(*level, start..start + 2 * s, "{format:?}");
                 start = level.end;
             }
-            assert_eq!(t.bytes() as usize, size);
+            assert_eq!(t.bytes(0) as usize, size);
             file.pop();
             assert!(parse(file).is_err(), "{format:?} a byte short");
         }
@@ -692,15 +888,13 @@ pub mod tests {
     }
 
     #[test]
-    fn a_cap_drops_the_levels_over_it() {
-        let ramp = || parse(RAMP.to_vec()).unwrap();
-        let mut t = ramp();
-        t.cap(4);
-        assert_eq!((t.width, t.height, t.levels.len()), (4, 4, 3));
-        assert_eq!(t.source, [8, 8]);
-        assert!(t.capped());
+    fn a_cap_starts_at_the_first_level_within_it() {
+        let t = parse(RAMP.to_vec()).unwrap();
+        assert_eq!(t.first(4), 1);
+        assert_eq!(t.extent(1), (4, 4));
+        assert_eq!(t.bytes(1), 680 - 8 * 8 * 8);
         // The ramp's level 1, which holds its own texel centres at 4×4.
-        let bytes = levels(&t);
+        let bytes = levels(&t, 1);
         assert_eq!(bytes, RAMP[40 + 8 * 8 * 8..], "the levels from 4×4 on");
         let texel = |x: usize, y: usize| {
             let at = (y * 4 + x) * 8;
@@ -708,34 +902,41 @@ pub mod tests {
             [f(0), f(4)]
         };
         assert_eq!(texel(1, 2), [1.5 / 4.0, 2.5 / 4.0]);
-        t.cap(1);
-        assert_eq!((t.width, t.height, t.levels.len()), (1, 1, 1));
+        assert_eq!((t.first(3), t.first(2), t.first(1)), (2, 2, 3));
 
         // The controls: a cap of none, or one the source fits, keeps all.
         for cap in [0, 8, 4096] {
-            let mut t = ramp();
-            t.cap(cap);
-            assert_eq!(
-                (t.width, t.levels.len(), t.bytes()),
-                (8, 4, 680),
-                "cap {cap}"
-            );
-            assert!(!t.capped(), "cap {cap}");
+            assert_eq!(t.first(cap), 0, "cap {cap}");
         }
 
         // A 5×3 image: its levels are 5×3, 2×1 and 1×1, so a cap of 4 or
-        // 3 keeps 2×1, as the bake tool's halving once did.
+        // 3 starts at 2×1, as the bake tool's halving once did.
         let mut file = b"pika".to_vec();
         for word in [5u32, 3, 1, 3, 100, 0, 0, 1, 0] {
             file.extend_from_slice(&word.to_le_bytes());
         }
         file.resize(40 + 4 * (15 + 2 + 1), 0);
+        let t = parse(file).unwrap();
         for cap in [4, 3, 2] {
-            let mut t = parse(file.clone()).unwrap();
-            t.cap(cap);
-            assert_eq!((t.width, t.height, t.levels.len()), (2, 1, 2), "cap {cap}");
-            assert_eq!(t.levels[0], 100..108);
+            assert_eq!(t.first(cap), 1, "cap {cap}");
+            assert_eq!(t.extent(1), (2, 1));
+            assert_eq!(t.levels[1], 100..108);
         }
+        assert_eq!(t.first(1), 2);
+    }
+
+    #[test]
+    fn a_load_past_the_frames_bytes_starts_coarser() {
+        let t = parse(RAMP.to_vec()).unwrap();
+        // The ramp's levels from 8×8, 4×4, 2×2 and 1×1 on.
+        assert_eq!([0, 1, 2, 3].map(|first| t.bytes(first)), [680, 168, 40, 8]);
+        assert_eq!(fit(&t, 0, UPLOAD), 0, "the frame's first upload");
+        assert_eq!(fit(&t, 0, 680), 0, "the control: every level fits");
+        assert_eq!(fit(&t, 0, 679), 1);
+        assert_eq!(fit(&t, 0, 40), 2);
+        assert_eq!(fit(&t, 0, 0), 3, "the last level, whatever is left");
+        assert_eq!(fit(&t, 2, 168), 2, "never finer than the target");
+        assert_eq!(fit(&t, 1, UPLOAD - 1), 1);
     }
 
     #[test]

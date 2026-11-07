@@ -28,8 +28,9 @@ LINES = (
     ("cpu", ("record_ms", "wait_ms"), 2.0),
     ("period", ("period_ms",), BUDGET_MS),
 )
-# Frame counts of material work going on: none may be in a warm window.
-BUILDING = ("pending_materials", "compiled_surfaces", "baked_textures")
+# Frame counts of material and texture work going on: none may be in a
+# warm window.
+BUILDING = ("pending_materials", "pending_textures", "compiled_surfaces", "baked_textures")
 
 
 def read(path):

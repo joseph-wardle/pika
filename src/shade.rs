@@ -5,7 +5,8 @@
 //! headlight (`shaders/frame.slang`). A material is built off the render
 //! thread (`bake`) and drawn clay until its first build lands, and as it
 //! was until an edit's does; a value edit writes its block in place and
-//! rebinds its samplers.
+//! rebinds its samplers, and a texture swapped for the cap's levels
+//! (`Textures::swap`) rebinds the views of the materials reading it.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,13 +41,11 @@ pub struct Shade {
     /// Whether a look changed since the textures no look binds were last
     /// dropped.
     prune: bool,
-    /// The last frame's texture cap, 0 for none; None before the first.
-    cap: Option<u32>,
-    /// The textures loaded since the last build landed whose source the
-    /// cap shrank, warned of in one line when every build has: a scene's
-    /// worth at once, rather than a line per texture, thousands on a
-    /// production asset.
-    capped: usize,
+    /// Whether a texture loaded or swapped since the textures the cap
+    /// shrinks were last warned of, in one line when every build and swap
+    /// is done: a scene's worth at once, rather than a line per texture,
+    /// thousands on a production asset.
+    warn: bool,
     /// `material::clay`, drawn where `looks` has no entry.
     clay: Material,
     /// `material::pink`, drawn for `Look::Failed`.
@@ -70,11 +69,6 @@ impl Look {
     }
 }
 
-/// The baked bytes a frame installs, past which the builds that landed
-/// wait for the next: creating and copying a texture's levels costs the
-/// render thread about 0.8 ms a MiB on the RTX 4070 Ti SUPER.
-const INSTALL: u64 = 32 << 20;
-
 /// One shader structure: the pipelines of every material sharing a document.
 pub struct Surface {
     device: ash::Device,
@@ -95,9 +89,9 @@ struct Material {
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-    /// What the textures were baked from, cap included, in the surface's
-    /// order: a material edit that keeps them and the document only
-    /// rewrites the block.
+    /// What the textures were baked from, in the surface's order: a
+    /// material edit that keeps them and the document only rewrites the
+    /// block.
     sources: Vec<Source>,
     /// The baked textures bound, by key, in the surface's order.
     textures: Vec<String>,
@@ -110,20 +104,20 @@ pub struct Update {
     pub compiled: usize,
     /// Textures the bake tool baked, likewise.
     pub baked: usize,
-    /// The baked bytes the textures loaded uploaded.
+    /// The baked bytes the textures loaded and swapped uploaded.
     pub loaded: u64,
-    /// The textures loaded whose source the cap shrank.
-    pub capped: usize,
-    /// Reading the loaded textures' levels from their files.
+    /// Reading those textures' levels from their files.
     pub read: Duration,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
+    /// Textures whose image does not hold the cap's levels yet.
+    pub pending_textures: usize,
 }
 
 impl Shade {
     pub fn new(device: &gpu::Device) -> Result<Self, String> {
         let bake = Bake::new()?;
-        let mut textures = Textures::new(device);
+        let mut textures = Textures::new(device)?;
         let mut surfaces = BTreeMap::new();
         let mut builtin = |network: Network| -> Result<Material, String> {
             let document = material::document(&network)?.expect("Pika's networks have a surface");
@@ -141,22 +135,22 @@ impl Shade {
             surfaces,
             looks: BTreeMap::new(),
             prune: false,
-            cap: None,
-            capped: 0,
+            warn: false,
             clay,
             pink,
         })
     }
 
     /// Rewrites the block of each material whose network changed its
-    /// values alone, and submits a build of each whose structure, textures
-    /// or, when the texture cap `cap` (0 for none) changed, cap did, drawn
-    /// as it was until it lands; installs the builds that landed, `INSTALL`
-    /// bytes of textures a frame, within the device's memory budget. A
-    /// material that cannot be built or installed is warned of and drawn
-    /// pink, and a texture whose file is missing is warned of and drawn as
-    /// its node's fallback; the frame goes on. Records into `cb`, outside
-    /// rendering, the uploads. No GPU work may be pending.
+    /// values alone, and submits a build of each whose structure or
+    /// textures did, drawn as it was until it lands; installs the builds
+    /// that landed, within the device's memory budget, and swaps textures
+    /// for the levels within the texture cap `cap` (0 for none), loads and
+    /// swaps uploading `texture::UPLOAD` bytes a frame. A material that
+    /// cannot be built or installed is warned of and drawn pink, and a
+    /// texture whose file is missing is warned of and drawn as its node's
+    /// fallback; the frame goes on. Records into `cb`, outside rendering,
+    /// the uploads. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -183,16 +177,19 @@ impl Shade {
             self.textures.retain(&used);
             self.prune = false;
         }
+        // Before the builds land, so they load under the new cap.
+        let recapped = self.textures.set_cap(cap);
+        self.warn |= recapped;
+        let mut ids: BTreeSet<u64> = moved.materials.iter().copied().collect();
+        if recapped {
+            // A material refused at the old cap may fit under the new one.
+            let failed = self
+                .looks
+                .iter()
+                .filter(|(_, look)| matches!(look, Look::Failed));
+            ids.extend(failed.map(|(&id, _)| id));
+        }
         let mut update = Update::default();
-        let ids: Vec<u64> = if self.cap == Some(cap) {
-            moved.materials.iter().copied().collect()
-        } else {
-            // Every material is built again under the new cap, so the
-            // tally warned of names the textures capped to it alone.
-            self.capped = 0;
-            store.materials().keys().copied().collect()
-        };
-        self.cap = Some(cap);
         for id in ids {
             let Some(material) = store.materials().get(&id) else {
                 continue;
@@ -204,13 +201,13 @@ impl Shade {
             if let Some(Look::Failed) = self.looks.get(&id) {
                 self.looks.remove(&id);
             }
-            if let Err(e) = self.material(id, network, &material.document, cap) {
+            if let Err(e) = self.material(id, network, &material.document) {
                 eprintln!("pika: warning: material {}: {e}; drawn pink", material.path);
                 self.looks.insert(id, Look::Failed);
                 self.prune = true;
             }
         }
-        for built in self.builder.drain(INSTALL) {
+        for built in self.builder.drain() {
             let Some(material) = store.materials().get(&built.id) else {
                 continue;
             };
@@ -235,24 +232,43 @@ impl Shade {
                 }
             }
         }
+        let (swapped, bytes, read) = self.textures.swap(device, cb);
+        (update.loaded, update.read) = (update.loaded + bytes, update.read + read);
+        if !swapped.is_empty() {
+            for drawn in self.looks.values().filter_map(Look::built) {
+                if drawn.textures.iter().any(|key| swapped.contains(key)) {
+                    drawn.bind_views(&self.textures, &self.surfaces[&drawn.hash])?;
+                }
+            }
+        }
         update.pending = self.builder.len();
-        self.capped += update.capped;
-        if update.pending == 0 && self.capped > 0 {
-            let (textures, were) = match self.capped {
+        update.pending_textures = self.textures.pending();
+        self.warn |= update.loaded > 0;
+        if update.pending == 0 && update.pending_textures == 0 && self.warn {
+            let capped = self.textures.capped();
+            let (textures, were) = match capped {
                 1 => ("texture", "was"),
                 _ => ("textures", "were"),
             };
-            eprintln!(
-                "pika: warning: {} {textures} {were} capped to {cap} texels a side by pika:textureCap",
-                self.capped
-            );
-            self.capped = 0;
+            if capped > 0 {
+                eprintln!(
+                    "pika: warning: {capped} {textures} {were} capped to {cap} texels a side by \
+                     pika:textureCap"
+                );
+            }
+            self.warn = false;
         }
         Ok(update)
     }
 
+    /// Whether every build has landed and every texture holds the cap's
+    /// levels, which a host rendering until converged waits for.
+    pub fn settled(&self) -> bool {
+        self.builder.is_empty() && self.textures.pending() == 0
+    }
+
     /// Rewrites material `id`'s block from `network` when it keeps its
-    /// document and its textures under `cap`, else submits its build,
+    /// document and its textures, else submits its build,
     /// leaving the material as it was, clay before its first, until the
     /// build lands. A network with no surface leaves the material drawn clay.
     fn material(
@@ -260,7 +276,6 @@ impl Shade {
         id: u64,
         network: &Network,
         document: &Result<Option<Document>, String>,
-        cap: u32,
     ) -> Result<(), String> {
         let Some(document) = document.as_ref().map_err(String::clone)? else {
             self.builder.forget(id);
@@ -271,7 +286,7 @@ impl Shade {
             && drawn.hash == document.hash
         {
             let surface = &self.surfaces[&document.hash];
-            if bake::sources(&surface.manifest, document, network, cap)? == drawn.sources {
+            if bake::sources(&surface.manifest, document, network)? == drawn.sources {
                 self.builder.forget(id);
                 uniforms::pack(
                     &surface.manifest,
@@ -284,15 +299,15 @@ impl Shade {
                 return drawn.bind(&mut self.textures, surface, document, network);
             }
         }
-        (self.builder).submit(id, document.clone(), network.clone(), cap)
+        (self.builder).submit(id, document.clone(), network.clone())
     }
 
     /// Installs a build that landed: its surface into `surfaces` unless
     /// another material's build put it there, its uniforms, and its
     /// textures, loaded now into `textures` with their uploads recorded
     /// into `cb`, unless the ones not loaded yet would take the process
-    /// past the device's memory budget; counts into `update` what the
-    /// build did.
+    /// past the device's memory budget at the cap's levels; counts into
+    /// `update` what the build did.
     fn install(
         device: &gpu::Device,
         surfaces: &mut BTreeMap<u64, Surface>,
@@ -321,13 +336,13 @@ impl Shade {
         // By key: a texture that two of its nodes read loads once.
         let mut fresh = BTreeMap::new();
         for b in output.textures.iter().filter(|b| !textures.holds(&b.key)) {
-            fresh.insert(&b.key, &b.texture);
+            fresh.insert(&b.key, (&b.texture, b.texture.first(textures.cap())));
         }
-        for texture in fresh.values() {
-            texture.needs(device, &mut needs)?;
+        for (texture, first) in fresh.values() {
+            texture.needs(device, *first, &mut needs)?;
         }
         if gpu::overflow(&heaps, &needs).is_some() {
-            let fresh: u64 = fresh.values().map(|t| t.bytes()).sum();
+            let fresh: u64 = fresh.values().map(|(t, first)| t.bytes(*first)).sum();
             return Err(format!(
                 "its textures, {} baked, do not fit the device's memory budget: set or lower \
                  pika:textureCap",
@@ -343,12 +358,11 @@ impl Shade {
             &built.network,
             drawn.buffer.bytes(),
         )?;
-        for baked in &output.textures {
-            let (loaded, read) = textures.load(device, cb, &baked.key, &baked.texture)?;
+        for baked in output.textures {
+            let (loaded, read) = textures.load(device, cb, &baked.key, baked.texture)?;
             update.loaded += loaded;
             update.read += read;
-            update.capped += usize::from(loaded > 0 && baked.texture.capped());
-            drawn.textures.push(baked.key.clone());
+            drawn.textures.push(baked.key);
         }
         drawn.bind(textures, surface, &built.document, &built.network)?;
         drawn.sources = output.sources;
@@ -657,6 +671,33 @@ impl Material {
         }
         // SAFETY: the set, buffers, views and samplers were created on
         // `device`, which is live, and the infos outlive the call.
+        unsafe { self.device.update_descriptor_sets(&writes, &[]) };
+        Ok(())
+    }
+}
+
+impl Material {
+    /// Rewrites the set's views, each of `self.textures` as it is loaded
+    /// now, after a swap replaced its image; the samplers and tile tables
+    /// stay. The GPU must not be reading the set.
+    fn bind_views(&self, textures: &Textures, surface: &Surface) -> Result<(), String> {
+        let mut views = Vec::new();
+        for key in &self.textures {
+            views.push([vk::DescriptorImageInfo::default()
+                .image_view(textures.binding(key)?.view)
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)]);
+        }
+        let writes: Vec<_> = (surface.layout.textures.iter().zip(&views))
+            .map(|(texture, info)| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(texture.image)
+                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                    .image_info(info)
+            })
+            .collect();
+        // SAFETY: the set and views were created on `device`, which is
+        // live, and the infos outlive the call.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }

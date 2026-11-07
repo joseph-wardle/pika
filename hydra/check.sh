@@ -240,8 +240,10 @@ first=${fixtures[0]}
     >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
 
 DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" \
-    "$ROOT/hydra/scenes/painted.usda" >"$OUT/engine.log" 2>&1 ||
-    fail "the host does not see Pika's stats, or a pending material is not clay or as it was (see $OUT/engine.log)"
+    "$ROOT/hydra/scenes/painted.usda" "$ROOT/hydra/scenes/mipped.usda" >"$OUT/engine.log" 2>&1 ||
+    fail "the host does not see Pika's stats, a pending material is not clay or as it was, or a cap change in session differs from a fresh session (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
+grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; kept at 2×2$" "$OUT/engine.log" ||
+    fail "engine: the swap whose read failed was not warned of (see $OUT/engine.log)"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1
