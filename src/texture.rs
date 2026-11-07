@@ -40,7 +40,7 @@ pub struct Texture {
     pub contents: Contents,
 }
 
-/// Where a texture's levels are read from when it uploads (`read_levels`).
+/// Where a texture's levels are read from when it uploads (`Texture::read_at`).
 pub enum Contents {
     /// The baked file, open from its header's read, so a build holds no
     /// level bytes in memory however large its textures.
@@ -71,14 +71,12 @@ impl Texture {
         self.levels[first..].iter().map(|l| l.len() as u64).sum()
     }
 
-    /// Reads its levels from `first` on, finest first, into `into`, which
-    /// is `bytes(first)` long.
-    pub fn read_levels(&self, first: usize, into: &mut [u8]) -> std::io::Result<()> {
-        let start = self.levels[first].start;
+    /// Reads its file's bytes from `from` on into `into`, which they fill.
+    pub fn read_at(&self, from: usize, into: &mut [u8]) -> std::io::Result<()> {
         match &self.contents {
-            Contents::Open(file) => file.read_exact_at(into, start as u64),
+            Contents::Open(file) => file.read_exact_at(into, from as u64),
             Contents::Memory(file) => {
-                into.copy_from_slice(&file[start..]);
+                into.copy_from_slice(&file[from..from + into.len()]);
                 Ok(())
             }
         }
@@ -218,11 +216,73 @@ pub fn level_size(format: vk::Format, width: u32, height: u32) -> Option<usize> 
     })
 }
 
+/// The rows of texels a row of `format`'s blocks spans: 4 for the block
+/// formats, 1 for the rest.
+fn block_rows(format: vk::Format) -> u32 {
+    match format {
+        vk::Format::BC4_UNORM_BLOCK | vk::Format::BC7_UNORM_BLOCK | vk::Format::BC7_SRGB_BLOCK => 4,
+        _ => 1,
+    }
+}
+
+/// The copies that upload `texture`'s levels from `first` on, from byte
+/// `done` of them, in whole rows of blocks of one layer, as many as
+/// `budget` bytes hold, none when not a row does: each copy's buffer
+/// offset counts from `done`. The copies, and the byte after the last.
+fn copies(
+    texture: &Texture,
+    first: usize,
+    done: u64,
+    budget: u64,
+) -> (Vec<vk::BufferImageCopy>, u64) {
+    let base = texture.levels[first].start as u64;
+    let rows = block_rows(texture.format);
+    let (mut copies, mut at) = (Vec::new(), done);
+    let holds = |at: u64, l: usize| texture.levels[l].end as u64 - base > at;
+    while let Some(level) = (first..texture.levels.len()).find(|&l| holds(at, l)) {
+        let (width, height) = texture.extent(level);
+        let range = &texture.levels[level];
+        let layer_bytes = range.len() as u64 / u64::from(texture.layers);
+        let bands = u64::from(height.div_ceil(rows));
+        let band_bytes = layer_bytes / bands;
+        let within = at - (range.start as u64 - base);
+        let (layer, band) = (within / layer_bytes, within % layer_bytes / band_bytes);
+        let count = (budget.saturating_sub(at - done) / band_bytes).min(bands - band);
+        if count == 0 {
+            break;
+        }
+        let y = band as u32 * rows;
+        copies.push(
+            vk::BufferImageCopy::default()
+                .buffer_offset(at - done)
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: (level - first) as u32,
+                    base_array_layer: layer as u32,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D {
+                    x: 0,
+                    y: y as i32,
+                    z: 0,
+                })
+                .image_extent(vk::Extent3D {
+                    width,
+                    height: (count as u32 * rows).min(height - y),
+                    depth: 1,
+                }),
+        );
+        at += count * band_bytes;
+    }
+    (copies, at)
+}
+
 /// The bytes of levels a frame uploads, loads and swaps together, past
 /// which the rest wait for the next: reading and copying a texture's levels
 /// costs the render thread about 0.8 ms a MiB on the RTX 4070 Ti SUPER. A
-/// frame's first upload goes however large, so a texture larger than this
-/// still loads, alone in its frame.
+/// swap uploads whole rows of blocks of one layer (`copies`), so a texture
+/// larger than this swaps over frames into its new image; a load lands
+/// whole, at its floor of a few blocks.
 pub const UPLOAD: u64 = 32 << 20;
 
 /// The longest side, in texels, of the coarsest level a texture is lowered
@@ -257,6 +317,9 @@ struct Loaded {
     texture: Texture,
     tiles: Buffer,
     image: Image,
+    /// The image a swap is uploading for its target, which replaces
+    /// `image` once whole.
+    incoming: Option<Incoming>,
     chain: Chain,
     /// The first level its image is to hold, `fit`'s.
     target: usize,
@@ -266,6 +329,13 @@ struct Loaded {
     /// The last frame a reader was drawn whose need was not estimated, 0
     /// for never.
     unestimated: u64,
+}
+
+/// A swap's new image, uploaded over frames: its levels' bytes before
+/// `done` are copied.
+struct Incoming {
+    image: Image,
+    done: u64,
 }
 
 /// What the view needs of the loaded textures, within `need::WINDOW`.
@@ -346,34 +416,37 @@ impl Chain {
     }
 }
 
+/// Where lowering `chain` from `level` falls in a fit, the greatest first.
+/// First the chains no view drew, then levels finer than a chain's need,
+/// which no view sees go; then a level below its need, the chain left
+/// least far below its own first, so the blur spreads evenly, then the one
+/// needing the coarsest levels, the farthest from the camera. Within each,
+/// the longest side goes first, then the most bytes.
+fn order(chain: &Chain, level: usize) -> impl Ord {
+    let (seen, below, need) = match chain.need {
+        None => (0, 0, 0),
+        Some(need) if level < need => (1, 0, need),
+        Some(need) => (2, level - need, need),
+    };
+    let tier = (Reverse(seen), Reverse(below), need);
+    (tier, chain.extent(level), chain.sizes[level])
+}
+
 /// Each chain's first level, by index: its ceiling, lowered a level at a
 /// time while its heap's images take more than `capacity`, bytes by heap
-/// index, none past its floor. First the chains no view drew, then levels
-/// finer than a chain's need, which no view sees go; then a level below
-/// its need, the chain left least far below its own first, so the blur
-/// spreads evenly, then the one needing the coarsest levels, the farthest
-/// from the camera. Within each, the longest side goes first, then the
-/// most bytes, then the lowest index. A chain's place in the order hangs
-/// on its own level alone, so more capacity stops earlier in the same
-/// sequence: a chain is never raised by less capacity, nor lowered by more.
+/// index, none past its floor, in `order`, then the lowest index first. A
+/// chain's place in the order hangs on its own level alone, so more
+/// capacity stops earlier in the same sequence: a chain is never raised by
+/// less capacity, nor lowered by more.
 fn fit(chains: &[&Chain], capacity: &[u64]) -> Vec<usize> {
     let mut targets: Vec<usize> = chains.iter().map(|c| c.ceiling).collect();
     let mut totals = totals(chains, &targets, capacity.len());
-    let key = |i: usize, level: usize| {
-        let c = chains[i];
-        let (seen, below, need) = match c.need {
-            None => (0, 0, 0),
-            Some(need) if level < need => (1, 0, need),
-            Some(need) => (2, level - need, need),
-        };
-        let order = (Reverse(seen), Reverse(below), need);
-        (order, c.extent(level), c.sizes[level], Reverse(i))
-    };
+    let key = |i: usize, level: usize| (order(chains[i], level), Reverse(i));
     let mut queue: BinaryHeap<_> = (0..chains.len())
         .filter(|&i| chains[i].ceiling < chains[i].floor)
         .map(|i| key(i, chains[i].ceiling))
         .collect();
-    while let Some((_, _, _, Reverse(i))) = queue.pop() {
+    while let Some((_, Reverse(i))) = queue.pop() {
         let (c, target) = (chains[i], &mut targets[i]);
         if totals[c.heap] <= capacity[c.heap] {
             continue;
@@ -407,6 +480,23 @@ fn settle(chains: &[&Chain], current: &[usize], room: &[u64], afresh: bool) -> (
         return (fitted, true);
     }
     (kept, false)
+}
+
+/// The order a frame's swaps go in, by index, of the chains whose image
+/// holds the levels from `firsts` and is to hold those from `targets`:
+/// those `begun` first, so their images finish before others take memory,
+/// then lowers, which free it, then raises, first the chain the fit would
+/// lower last from its level now (`order`): the furthest below its need,
+/// then the nearest.
+fn queue(chains: &[&Chain], firsts: &[usize], targets: &[usize], begun: &[bool]) -> Vec<usize> {
+    let mut queue: Vec<usize> = (0..chains.len())
+        .filter(|&i| begun[i] || targets[i] != firsts[i])
+        .collect();
+    queue.sort_by_key(|&i| {
+        let raise = targets[i] < firsts[i];
+        (Reverse(begun[i]), raise, order(chains[i], firsts[i]))
+    });
+    queue
 }
 
 /// The bytes the chains' images from `targets` take, by heap index.
@@ -489,12 +579,10 @@ impl Image {
         Ok(i)
     }
 
-    /// Records into `cb`, outside rendering, the copies of its levels of
-    /// `texture` from `staging`, where they start at `at`, and the move into
-    /// the layout the material pass samples. `staging` must live until the
-    /// GPU has run `cb`.
-    fn record(&self, cb: vk::CommandBuffer, staging: &Buffer, at: u64, texture: &Texture) {
-        let to_copy = vk::ImageMemoryBarrier2::default()
+    /// Records into `cb`, outside rendering, the move of its levels of
+    /// `texture`, whose contents are discarded, into the layout copies write.
+    fn to_copy(&self, cb: vk::CommandBuffer, texture: &Texture) {
+        let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::NONE)
             .dst_stage_mask(vk::PipelineStageFlags2::COPY)
             .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -502,7 +590,14 @@ impl Image {
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .image(self.image)
             .subresource_range(self.range(texture));
-        let to_sample = vk::ImageMemoryBarrier2::default()
+        self.barrier(cb, barrier);
+    }
+
+    /// Records into `cb`, outside rendering, the move of its levels of
+    /// `texture` from the layout copies write into the one the material
+    /// pass samples, after every copy into them submitted before.
+    fn to_sample(&self, cb: vk::CommandBuffer, texture: &Texture) {
+        let barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
@@ -511,39 +606,28 @@ impl Image {
             .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             .image(self.image)
             .subresource_range(self.range(texture));
-        let start = texture.levels[self.first].start;
-        let copies: Vec<_> = (self.first..texture.levels.len())
-            .map(|level| {
-                let (width, height) = texture.extent(level);
-                vk::BufferImageCopy::default()
-                    .buffer_offset(at + (texture.levels[level].start - start) as u64)
-                    .image_subresource(vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: (level - self.first) as u32,
-                        base_array_layer: 0,
-                        layer_count: texture.layers,
-                    })
-                    .image_extent(vk::Extent3D {
-                        width,
-                        height,
-                        depth: 1,
-                    })
-            })
-            .collect();
-        let d = &self.device;
+        self.barrier(cb, barrier);
+    }
+
+    fn barrier(&self, cb: vk::CommandBuffer, barrier: vk::ImageMemoryBarrier2) {
+        let barriers = [barrier];
+        let info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
+        // SAFETY: `cb` is recording outside rendering on `device`, and the
+        // barrier names this image's own levels.
+        unsafe { self.device.cmd_pipeline_barrier2(cb, &info) };
+    }
+
+    /// Records into `cb`, outside rendering, `copies` into its levels, in
+    /// the layout copies write, from `staging`, which must live until the
+    /// GPU has run `cb`.
+    fn copy(&self, cb: vk::CommandBuffer, staging: &Buffer, copies: &[vk::BufferImageCopy]) {
+        let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
         // SAFETY: `cb` is recording outside rendering, the image was created
-        // on `d` with TRANSFER_DST usage for these levels of `texture`, and
-        // `staging` holds them at the offsets copied from.
+        // on `device` with TRANSFER_DST usage for the levels copied
+        // (`copies`), and `staging` holds them at the offsets copied from.
         unsafe {
-            let barriers = [to_copy];
-            let barrier = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            d.cmd_pipeline_barrier2(cb, &barrier);
-            let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-            d.cmd_copy_buffer_to_image(cb, staging.raw, self.image, layout, &copies);
-            let barriers = [to_sample];
-            let barrier = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-            d.cmd_pipeline_barrier2(cb, &barrier);
-        }
+            (self.device).cmd_copy_buffer_to_image(cb, staging.raw, self.image, layout, copies)
+        };
     }
 
     fn range(&self, texture: &Texture) -> vk::ImageSubresourceRange {
@@ -572,7 +656,7 @@ impl Drop for Image {
 /// The host memory a frame's level reads land in, which its commands copy
 /// into the images: one buffer of `UPLOAD` bytes kept from frame to frame,
 /// since on ALab a buffer of a texture's own cost seven times its read to
-/// create and free, and one of its own for an upload past what is left.
+/// create and free, and one of its own for a load past what is left.
 struct Staging {
     buffer: Buffer,
     /// The bytes of `buffer` this frame's uploads hold.
@@ -589,6 +673,11 @@ impl Staging {
         })
     }
 
+    /// The bytes left in its buffer this frame.
+    fn free(&self) -> u64 {
+        (self.buffer.size).saturating_sub(self.used.next_multiple_of(16))
+    }
+
     /// Room for an upload of `size` bytes: the buffer and where in it.
     fn room(&mut self, device: &gpu::Device, size: u64) -> Result<(&mut Buffer, u64), String> {
         // A copy's buffer offset is a multiple of its format's block size,
@@ -603,27 +692,55 @@ impl Staging {
     }
 }
 
-/// The image of `texture`'s levels from `first` on, created now, and their
-/// upload recorded into `cb` from `staging`; the time reading them took.
+/// Uploads `image`'s levels of `texture` from byte `done` of them on, as
+/// many rows as `budget` bytes hold (`copies`), read now into `staging` and
+/// copied by commands recorded into `cb`: the first part moves the image
+/// into the layout copies write, the last into the one the material pass
+/// samples. The byte after the last uploaded, `done` when not a row fits,
+/// and the time the read took.
 fn upload(
     device: &gpu::Device,
     cb: vk::CommandBuffer,
     texture: &Texture,
-    first: usize,
+    image: &Image,
+    (done, budget): (u64, u64),
     staging: &mut Staging,
-) -> Result<(Image, Duration), String> {
-    let image = Image::new(device, texture, first)?;
-    // The levels alone: each starts at a multiple of its format's block
-    // size then, which a copy's buffer offset must be; the header is not
-    // one.
-    let size = texture.bytes(first);
+) -> Result<(u64, Duration), String> {
+    let (mut copies, end) = copies(texture, image.first, done, budget);
+    if end == done {
+        return Ok((done, Duration::ZERO));
+    }
+    // The levels alone, whole rows of blocks: each starts at a multiple of
+    // its format's block size then, which a copy's buffer offset must be;
+    // the header is not one.
+    let size = end - done;
     let (buffer, at) = staging.room(device, size)?;
     let start = Instant::now();
     let into = &mut buffer.bytes()[at as usize..(at + size) as usize];
-    (texture.read_levels(first, into)).map_err(|e| format!("cannot read its levels: {e}"))?;
+    let from = texture.levels[image.first].start + done as usize;
+    (texture.read_at(from, into)).map_err(|e| format!("cannot read its levels: {e}"))?;
     let read = start.elapsed();
-    image.record(cb, buffer, at, texture);
-    Ok((image, read))
+    for copy in &mut copies {
+        copy.buffer_offset += at;
+    }
+    if done == 0 {
+        image.to_copy(cb, texture);
+    }
+    image.copy(cb, buffer, &copies);
+    if end == texture.bytes(image.first) {
+        image.to_sample(cb, texture);
+    }
+    Ok((end, read))
+}
+
+/// Keeps the texture keyed `key` as it is, warned of, after a swap that
+/// failed with `e`, until the cap changes.
+fn keep(key: &str, loaded: &mut Loaded, e: &str) {
+    let first = loaded.image.first;
+    let (w, h) = loaded.texture.extent(first);
+    eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
+    loaded.target = first;
+    (loaded.chain.ceiling, loaded.chain.floor) = (first, first);
 }
 
 /// The textures loaded for the materials drawn, by `bake::Baked::key`, each
@@ -642,8 +759,6 @@ pub struct Textures {
     retired: Vec<Image>,
     /// The texels a side of the cap, 0 for none.
     cap: u32,
-    /// The bytes this frame may still upload.
-    left: u64,
     /// The heaps' use and budgets when the targets were last set.
     heaps: Vec<gpu::Heap>,
     /// Whether the textures or their limits changed since then, so the
@@ -670,7 +785,6 @@ impl Textures {
             staging: Staging::new(device)?,
             retired: Vec::new(),
             cap: 0,
-            left: UPLOAD,
             heaps: Vec::new(),
             dirty: false,
             fresh: false,
@@ -684,7 +798,6 @@ impl Textures {
     pub fn begin(&mut self) {
         (self.staging.used, self.staging.own) = (0, Vec::new());
         self.retired.clear();
-        self.left = UPLOAD;
         self.fresh = false;
         self.frame += 1;
     }
@@ -724,16 +837,17 @@ impl Textures {
         }
         let chain = Chain::new(device, &texture, self.cap).map_err(|e| format!("{key}: {e}"))?;
         let first = chain.floor;
-        let (image, read) = upload(device, cb, &texture, first, &mut self.staging)
+        let image = Image::new(device, &texture, first).map_err(|e| format!("{key}: {e}"))?;
+        let all = (0, u64::MAX);
+        let (size, read) = upload(device, cb, &texture, &image, all, &mut self.staging)
             .map_err(|e| format!("{key}: {e}"))?;
-        let size = texture.bytes(first);
-        self.left = self.left.saturating_sub(size);
         let loaded = Loaded {
             seen: vec![0; texture.levels.len()],
             unestimated: 0,
             texture,
             tiles,
             image,
+            incoming: None,
             chain,
             target: first,
         };
@@ -756,7 +870,7 @@ impl Textures {
         self.moved = false;
         self.heaps = heaps.to_vec();
         let mut ours = vec![0; heaps.len()];
-        for image in self.loaded.values().map(|l| &l.image).chain(&self.retired) {
+        for image in self.images() {
             ours[image.heap] += image.bytes;
         }
         let room: Vec<u64> = (heaps.iter().zip(&ours))
@@ -782,17 +896,18 @@ impl Textures {
     }
 
     /// Swaps each image not holding its target's levels for one that does,
-    /// read from its file, while the frame's bytes last (`UPLOAD`), in key
-    /// order, lowers before raises: the new image is made and uploaded
-    /// first, and the old one retired once the materials binding it are
-    /// rebound, so a swap that fails keeps the old. A raise goes only if
-    /// its image fits the budgets of `heaps` beside the old, else waits
-    /// for the images this frame retires to be freed, or for a refit to
-    /// leave the margin. A swap that fails, or a raise that still does not
-    /// fit, is warned of, and its texture kept as it is until the cap
-    /// changes. Records the uploads into `cb`; the keys swapped, which the
-    /// caller rebinds before the next frame begins, the bytes uploaded and
-    /// the time their read took.
+    /// read from its file into a new image while the frame's bytes last
+    /// (`UPLOAD`), over as many frames as it takes, in `queue`'s order: the
+    /// old image is drawn until the new one is whole, then retired once the
+    /// materials binding it are rebound, so a swap that fails keeps the
+    /// old. A swap begun toward a target that has since moved starts again.
+    /// A raise begins only if its image fits the budgets of `heaps` beside
+    /// the old, else waits for the images this frame retires to be freed,
+    /// or for a refit to leave the margin. A swap that fails, or a raise
+    /// that still does not fit, is warned of, and its texture kept as it
+    /// is until the cap changes. Records the uploads into `cb`; the keys
+    /// swapped, which the caller rebinds before the next frame begins, the
+    /// bytes uploaded and the time their read took.
     pub fn swap(
         &mut self,
         device: &gpu::Device,
@@ -801,19 +916,30 @@ impl Textures {
     ) -> (BTreeSet<String>, u64, Duration) {
         let (mut keys, mut bytes, mut read) = (BTreeSet::new(), 0, Duration::ZERO);
         let mut added = vec![0; heaps.len()];
-        for raises in [false, true] {
-            for (key, loaded) in &mut self.loaded {
+        let order: Vec<String> = {
+            let loaded: Vec<(&String, &Loaded)> = self.loaded.iter().collect();
+            let chains: Vec<&Chain> = loaded.iter().map(|(_, l)| &l.chain).collect();
+            let firsts: Vec<usize> = loaded.iter().map(|(_, l)| l.image.first).collect();
+            let targets: Vec<usize> = loaded.iter().map(|(_, l)| l.target).collect();
+            let begun: Vec<bool> = loaded.iter().map(|(_, l)| l.incoming.is_some()).collect();
+            let queue = queue(&chains, &firsts, &targets, &begun);
+            queue.into_iter().map(|i| loaded[i].0.clone()).collect()
+        };
+        for key in order {
+            let loaded = self.loaded.get_mut(&key).expect("queued from the loaded");
+            // No commands recorded this frame read its image yet.
+            if (loaded.incoming.as_ref()).is_some_and(|i| i.image.first != loaded.target) {
+                loaded.incoming = None;
+            }
+            if loaded.incoming.is_none() {
                 let (texture, chain, target) = (&loaded.texture, &loaded.chain, loaded.target);
-                if target == loaded.image.first || (target < loaded.image.first) != raises {
-                    continue;
-                }
-                let size = texture.bytes(target);
-                if self.left < UPLOAD && size > self.left {
+                if target == loaded.image.first {
                     continue;
                 }
                 let mut needs = added.clone();
                 needs[chain.heap] += chain.sizes[target];
-                let swapped = if raises && gpu::overflow(heaps, &needs).is_some() {
+                let raises = target < loaded.image.first;
+                let made = if raises && gpu::overflow(heaps, &needs).is_some() {
                     if !keys.is_empty() {
                         continue;
                     }
@@ -827,25 +953,38 @@ impl Textures {
                          image now"
                     ))
                 } else {
-                    upload(device, cb, texture, target, &mut self.staging)
+                    Image::new(device, texture, target)
                 };
-                match swapped {
-                    Ok((image, time)) => {
-                        let old = std::mem::replace(&mut loaded.image, image);
-                        self.retired.push(old);
-                        self.left = self.left.saturating_sub(size);
-                        (bytes, read) = (bytes + size, read + time);
+                match made {
+                    Ok(image) => {
+                        loaded.incoming = Some(Incoming { image, done: 0 });
                         added = needs;
-                        keys.insert(key.clone());
                     }
                     Err(e) => {
-                        let first = loaded.image.first;
-                        let (w, h) = texture.extent(first);
-                        eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
-                        loaded.target = first;
-                        (loaded.chain.ceiling, loaded.chain.floor) = (first, first);
+                        keep(&key, loaded, &e);
                         self.dirty = true;
+                        continue;
                     }
+                }
+            }
+            let incoming = loaded.incoming.as_mut().expect("begun above");
+            let part = (incoming.done, self.staging.free());
+            let image = &incoming.image;
+            match upload(device, cb, &loaded.texture, image, part, &mut self.staging) {
+                Ok((end, _)) if end == incoming.done => break,
+                Ok((end, time)) => {
+                    (bytes, read) = (bytes + end - incoming.done, read + time);
+                    incoming.done = end;
+                    if end == loaded.texture.bytes(incoming.image.first) {
+                        let new = loaded.incoming.take().expect("begun above").image;
+                        self.retired.push(std::mem::replace(&mut loaded.image, new));
+                        keys.insert(key);
+                    }
+                }
+                Err(e) => {
+                    loaded.incoming = None;
+                    keep(&key, loaded, &e);
+                    self.dirty = true;
                 }
             }
         }
@@ -984,10 +1123,18 @@ impl Textures {
         Ok(sampler)
     }
 
-    /// The images' bytes, retired ones included, and the tile tables' and
-    /// staging's on the host side.
+    /// Every image it holds: those drawn, those swaps are uploading, and
+    /// those retired.
+    fn images(&self) -> impl Iterator<Item = &Image> {
+        (self.loaded.values())
+            .flat_map(|l| std::iter::once(&l.image).chain(l.incoming.as_ref().map(|i| &i.image)))
+            .chain(&self.retired)
+    }
+
+    /// The images' bytes, those swaps are uploading and retired ones
+    /// included, and the tile tables' and staging's on the host side.
     pub fn memory(&self) -> gpu::Memory {
-        let images = self.loaded.values().map(|l| &l.image).chain(&self.retired);
+        let images = self.images();
         let mut memory = gpu::Memory {
             device: images.map(|i| i.bytes).sum(),
             host: 0,
@@ -1026,14 +1173,14 @@ pub mod tests {
         assert_eq!(t.first(1), 0);
         assert_eq!(level_size(t.format, 1, 1), Some(16));
         let mut texel = [0; 16];
-        t.read_levels(0, &mut texel).unwrap();
+        t.read_at(t.levels[0].start, &mut texel).unwrap();
         assert_eq!(f32::from_le_bytes(texel[4..8].try_into().unwrap()), 0.4);
     }
 
     /// `t`'s levels from `first` on as an upload reads them.
     fn levels(t: &Texture, first: usize) -> Vec<u8> {
         let mut bytes = vec![0; t.bytes(first) as usize];
-        t.read_levels(first, &mut bytes).unwrap();
+        t.read_at(t.levels[first].start, &mut bytes).unwrap();
         bytes
     }
 
@@ -1093,7 +1240,7 @@ pub mod tests {
         file.set_len(RAMP.len() as u64 - 8).unwrap();
         let mut bytes = vec![0; t.bytes(0) as usize];
         assert!(
-            t.read_levels(0, &mut bytes).is_err(),
+            t.read_at(t.levels[0].start, &mut bytes).is_err(),
             "cut short after its header was read"
         );
         file.set_len(40).unwrap();
@@ -1373,6 +1520,132 @@ pub mod tests {
         // A longer side on another heap is not lowered for this one's.
         let small = chain(0, 16);
         assert_eq!(fit(&[&other, &small], &[0, u64::MAX]), [0, 2]);
+    }
+
+    /// A texture of `format`, `width`×`height` with `layers` layers, whose
+    /// level bytes differ from their neighbours, to see where copies put
+    /// them.
+    fn numbered(format: vk::Format, (width, height, layers): (u32, u32, u32)) -> Texture {
+        let levels = 32 - width.max(height).leading_zeros();
+        let mut file = b"pika".to_vec();
+        for word in [
+            width,
+            height,
+            layers,
+            levels,
+            format.as_raw() as u32,
+            0,
+            0,
+            1,
+            0,
+        ] {
+            file.extend_from_slice(&word.to_le_bytes());
+        }
+        let (mut w, mut h, mut size) = (width, height, 0);
+        for _ in 0..levels {
+            size += level_size(format, w, h).unwrap() * layers as usize;
+            (w, h) = ((w / 2).max(1), (h / 2).max(1));
+        }
+        file.extend((0..size).map(|i| (i * 7 % 251) as u8));
+        parse(file).unwrap()
+    }
+
+    /// Writes `staging` where `copies` put it in the levels of `t` from
+    /// `first` on, as `vkCmdCopyBufferToImage` reads tightly packed rows of
+    /// blocks, into `image`, laid out as the file lays them, counting each
+    /// byte's writes into `writes`.
+    fn copied(
+        t: &Texture,
+        first: usize,
+        copies: &[vk::BufferImageCopy],
+        staging: &[u8],
+        (image, writes): (&mut [u8], &mut [u32]),
+    ) {
+        let base = t.levels[first].start;
+        let rows = block_rows(t.format);
+        for c in copies {
+            let level = first + c.image_subresource.mip_level as usize;
+            let (w, h) = t.extent(level);
+            assert_eq!(
+                (c.image_offset.x, c.image_extent.width),
+                (0, w),
+                "whole rows"
+            );
+            assert_eq!(c.image_subresource.layer_count, 1);
+            let row = level_size(t.format, w, 1).unwrap();
+            let layer = level_size(t.format, w, h).unwrap();
+            let at = t.levels[level].start - base
+                + c.image_subresource.base_array_layer as usize * layer
+                + c.image_offset.y as usize / rows as usize * row;
+            let len = c.image_extent.height.div_ceil(rows) as usize * row;
+            let from = c.buffer_offset as usize;
+            image[at..at + len].copy_from_slice(&staging[from..from + len]);
+            writes[at..at + len].iter_mut().for_each(|w| *w += 1);
+        }
+    }
+
+    #[test]
+    fn an_upload_in_parts_copies_every_byte_once() {
+        for (format, shape) in [
+            (vk::Format::BC7_SRGB_BLOCK, (16, 8, 2)),
+            (vk::Format::BC4_UNORM_BLOCK, (13, 6, 3)),
+            (vk::Format::R32_SFLOAT, (5, 3, 2)),
+        ] {
+            let t = numbered(format, shape);
+            for first in [0, 1] {
+                let (total, file) = (t.bytes(first), levels(&t, first));
+                for budget in [64, 100, 333, u64::MAX] {
+                    let mut image = vec![0; total as usize];
+                    let mut writes = vec![0; total as usize];
+                    let mut done = 0;
+                    while done < total {
+                        let (copies, end) = copies(&t, first, done, budget);
+                        assert!(done < end && end - done <= budget, "{format:?} at {done}");
+                        let staging = &file[done as usize..end as usize];
+                        copied(&t, first, &copies, staging, (&mut image, &mut writes));
+                        done = end;
+                    }
+                    let what = format!("{format:?} from level {first} in parts of {budget}");
+                    assert_eq!(image, file, "{what}");
+                    assert!(writes.iter().all(|&w| w == 1), "{what}: each byte once");
+                }
+            }
+        }
+        // Uploaded whole, a copy per layer of each level.
+        let t = numbered(vk::Format::BC7_SRGB_BLOCK, (16, 8, 2));
+        let (whole, end) = copies(&t, 0, 0, u64::MAX);
+        assert_eq!((whole.len(), end), (5 * 2, t.bytes(0)));
+        // The controls: a budget under a row of 4 blocks of 16 bytes
+        // uploads nothing, and a copy left out is seen.
+        let (none, end) = copies(&t, 0, 0, 63);
+        assert_eq!((none.len(), end), (0, 0));
+        let (file, len) = (levels(&t, 0), t.bytes(0) as usize);
+        let (mut image, mut writes) = (vec![0; len], vec![0; len]);
+        copied(&t, 0, &whole[1..], &file, (&mut image, &mut writes));
+        assert_ne!(image, file, "a layer missing");
+    }
+
+    #[test]
+    fn swaps_go_begun_then_lowers_then_the_most_blurred_raise() {
+        // Four 64-texel chains holding level 3: one needing level 0, one
+        // level 2, one no view drew, all to be raised, and one lowered.
+        let (mut near, mut far, unseen, mut lower) =
+            (chain(0, 64), chain(0, 64), chain(0, 64), chain(0, 64));
+        (near.need, far.need, lower.need) = (Some(0), Some(2), Some(3));
+        let (firsts, targets) = ([3; 4], [0, 1, 2, 4]);
+        let none = [false; 4];
+        let chains = [&near, &far, &unseen, &lower];
+        assert_eq!(queue(&chains, &firsts, &targets, &none), [3, 0, 1, 2]);
+        // The reversed control: with the needs swapped, the other goes
+        // first, so the order follows the needs, not the index.
+        (near.need, far.need) = (Some(2), Some(0));
+        let chains = [&near, &far, &unseen, &lower];
+        assert_eq!(queue(&chains, &firsts, &targets, &none), [3, 1, 0, 2]);
+        // A swap begun finishes first, even toward the level it holds; one
+        // holding its target and not begun is not queued.
+        let begun = [false, false, true, false];
+        assert_eq!(queue(&chains, &firsts, &targets, &begun), [2, 3, 1, 0]);
+        assert_eq!(queue(&chains, &firsts, &[3, 1, 3, 4], &none), [3, 1]);
     }
 
     #[test]
