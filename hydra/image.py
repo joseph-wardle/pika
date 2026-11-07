@@ -103,6 +103,11 @@ CAPPED = {"capped": 1}
 # both hosts must warn of in one line.
 BUDGET = {"lowered": 1}
 TAIL = 4
+# The scenes whose texture husk draws coarser than the camera needs, on the
+# first frame rendered and the last (src/need.rs), (0, 0) for the rest: at
+# frame 1 a pixel of the lowered scene covers 2√2 texels of its 8×8, level
+# 1, which its 4×4 floor holds; at frame 2 √2, level 0, which it does not.
+BLURRED = {"lowered": (0, 1)}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
@@ -1161,12 +1166,30 @@ def budget(name):
 def husk(scene, out):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.husk.log")
+    env = budget(name)
+    env["PIKA_STATS"] = os.path.join(out, f"{name}.husk.stats")
     with open(log, "w") as f:
         subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur",
                         "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
-                       stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
+                       stdout=f, stderr=subprocess.STDOUT, check=True, env=env)
     return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in FRAMES}, log
+
+
+def blurred(stats, name):
+    """Failures unless the `stats` husk wrote report BLURRED's textures
+    drawn coarser than needed on the first frame and the last."""
+    counts = []
+    with open(stats) as f:
+        for line in f:
+            words = line.split()
+            if words and words[0] == "frame":
+                counts.append(int(dict(zip(words[2::2], words[3::2]))["blurred_textures"]))
+    expected = BLURRED.get(name, (0, 0))
+    if not counts or (counts[0], counts[-1]) != expected:
+        found = (counts[0], counts[-1]) if counts else "no frames"
+        return [f"{name}: {found} textures drawn blurred on the first and last frames, not {expected}"]
+    return []
 
 
 def usdrecord(scene, out, width):
@@ -1267,6 +1290,7 @@ def main():
             print(f"{name} in husk ({log}):")
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
             failures += f + warned(log, name, CAPPED.get(name, 0), int(name in BUDGET))
+            failures += blurred(log.replace(".husk.log", ".husk.stats"), name)
             changed |= c
             if s not in records:
                 continue

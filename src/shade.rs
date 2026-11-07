@@ -18,11 +18,12 @@ use crate::bake::{self, Bake, Builder, Built};
 use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Network, Source};
+use crate::need::Footprint;
 use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
 use crate::stats;
 use crate::store::{Moved, Store};
 use crate::target;
-use crate::texture::{Binding, Textures};
+use crate::texture::{Binding, Needs, Textures};
 use crate::uniforms::{self, Layout, Manifest};
 use crate::view::View;
 
@@ -114,6 +115,7 @@ pub struct Update {
     pub pending_textures: usize,
     /// Textures lowered past the cap's levels to fit the device's memory.
     pub lowered_textures: usize,
+    pub needs: Needs,
 }
 
 impl Shade {
@@ -160,6 +162,7 @@ impl Shade {
         store: &Store,
         moved: &Moved,
         cap: u32,
+        footprints: &BTreeMap<u64, Footprint>,
         cb: vk::CommandBuffer,
     ) -> Result<Update, String> {
         self.textures.begin();
@@ -242,6 +245,20 @@ impl Shade {
                 }
             }
         }
+        for (id, footprint) in footprints {
+            let Some(drawn) = self.looks.get(id).and_then(Look::built) else {
+                continue;
+            };
+            for (key, source) in drawn.textures.iter().zip(&drawn.sources) {
+                if footprint.uv_per_pixel.is_finite() && !source.transformed {
+                    self.textures.need(key, Some(footprint.uv_per_pixel));
+                }
+                if footprint.unestimated || source.transformed {
+                    self.textures.need(key, None);
+                }
+            }
+        }
+        update.needs = self.textures.needs();
         update.pending = self.builder.len();
         update.pending_textures = self.textures.pending();
         let (lowered, finest) = self.textures.lowered();

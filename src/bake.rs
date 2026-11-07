@@ -614,7 +614,7 @@ pub fn sources(
     (manifest.textures.iter())
         .map(|name| {
             let (path, node, input) = document.reader(network, name)?;
-            material::source(path, node, input)
+            material::source(network, path, node, input)
         })
         .collect()
 }
@@ -655,6 +655,7 @@ mod tests {
             space: space.to_owned(),
             encoding,
             default: Vec::new(),
+            transformed: false,
         };
         bake.texture_path(&source, &tiles(Path::new(&source.file))?)
     }

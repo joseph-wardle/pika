@@ -29,6 +29,7 @@ use ash::vk;
 
 use crate::commands::Commands;
 use crate::gpu::{self, Buffer};
+use crate::need::{self, Footprint};
 use crate::smooth::{self, Smooth};
 use crate::store::{
     self, Instancer, Interpolation, Mesh, Moved, Normals, Refined, Scheme, Store, Texcoord,
@@ -67,6 +68,9 @@ struct Range {
     /// How far a refined point can lie outside its cage's box, as a fraction
     /// of the box's size on each axis (see `stencils`); 0 when not refined.
     spread: f32,
+    /// Its texcoord's units per unit of its own space (`need::density`),
+    /// recomputed when its texcoord moves, not its points.
+    density: Option<f32>,
 }
 
 /// The triangles of the faces of one mesh bound to one material: those in
@@ -171,7 +175,8 @@ struct Row {
 /// Each drawn mesh's rows, one per part.
 type Rows = BTreeMap<u64, Vec<Row>>;
 
-/// The instances and their draw records, before upload.
+/// The instances and their draw records.
+#[derive(Default)]
 struct DrawTables {
     instances: Vec<Instance>,
     /// Each instance's draw record.
@@ -200,10 +205,9 @@ struct Draws {
     owners: Buffer,
     boxes: Buffer,
     records: Buffer,
-    count: u32,
-    instance_count: u32,
-    groups: Vec<Group>,
-    rows: Rows,
+    /// What the buffers hold, kept on the host for the need estimate
+    /// (`footprints`); a patch writes both.
+    tables: DrawTables,
     /// The render tags they were written for.
     tags: Vec<String>,
 }
@@ -302,14 +306,19 @@ impl Geometry {
             true => Some(self.rebuild(device, store)?),
             false => None,
         };
-        let layout = self.layout.as_ref().expect("rebuilt above");
+        let layout = self.layout.as_mut().expect("rebuilt above");
+        for id in &moved.texcoord {
+            if let Some(range) = layout.ranges.get_mut(id) {
+                range.density = need::density(&store.meshes()[id]);
+            }
+        }
+        let layout = &*layout;
 
         let kept = (self.draws.as_ref()).filter(|d| !rebuilt && !moved.draws && d.tags == tags);
-        let patched = kept.and_then(|d| patch(store, &layout.ranges, &d.rows, moved, tags));
-        let rewritten = match &patched {
-            Some(_) => None,
-            None => Some(rewrite(device, store, layout, tags, &mut self.draws)?),
-        };
+        let patched = kept.and_then(|d| patch(store, &layout.ranges, &d.tables.rows, moved, tags));
+        if patched.is_none() {
+            rewrite(device, store, layout, tags, &mut self.draws)?;
+        }
         let draws = self.draws.as_ref().expect("rewritten above");
 
         let mut copies = Vec::new();
@@ -328,14 +337,16 @@ impl Geometry {
                 copies.extend(texcoord_upload(mesh, range, layout));
             }
         }
-        if let Some(p) = &patched {
-            copies.extend(patch_uploads(p, draws));
-        }
-        if let Some(t) = &rewritten {
-            copies.extend(draw_uploads(t, draws));
+        match &patched {
+            Some(p) => copies.extend(patch_uploads(p, draws)),
+            None => copies.extend(draw_uploads(draws)),
         }
         let bytes = upload(device, &mut self.staging, &copies, commands.buffer())?;
         commands.mark("upload")?;
+        if let (Some(p), Some(d)) = (&patched, self.draws.as_mut()) {
+            p.apply(&mut d.tables);
+        }
+        let layout = self.layout.as_ref().expect("rebuilt above");
 
         let rewrite = match rebuilt {
             true => Rewrite {
@@ -350,7 +361,7 @@ impl Geometry {
         Ok(Update {
             bytes,
             layout: rebuilt,
-            draws: rewritten.is_some(),
+            draws: patched.is_none(),
         })
     }
 
@@ -437,14 +448,62 @@ impl Geometry {
             boxes: draws.boxes.address,
             indices: layout.indices.raw,
             records: draws.records.raw,
-            count: draws.count,
-            instance_count: draws.instance_count,
+            count: draws.tables.records.len() as u32,
+            instance_count: draws.tables.instances.len() as u32,
         })
     }
 
     /// The draw records by material, once `update` has run.
     pub fn groups(&self) -> &[Group] {
-        self.draws.as_ref().map_or(&[], |d| &d.groups)
+        self.draws.as_ref().map_or(&[], |d| &d.tables.groups)
+    }
+
+    /// Where each material's meshes are drawn through `view_projection`
+    /// into `size` pixels, by the store's material id, once `update` has
+    /// run: an instance outside the view adds nothing, and a material
+    /// with none inside has no entry.
+    pub fn footprints(
+        &self,
+        view_projection: &[[f32; 4]; 4],
+        size: [u32; 2],
+    ) -> BTreeMap<u64, Footprint> {
+        let mut footprints = BTreeMap::new();
+        let (Some(layout), Some(draws)) = (&self.layout, &self.draws) else {
+            return footprints;
+        };
+        let t = &draws.tables;
+        let mut materials = vec![None; t.records.len()];
+        for g in &t.groups {
+            materials[g.first as usize..(g.first + g.count) as usize].fill(g.material);
+        }
+        for (id, rows) in &t.rows {
+            let density = layout.ranges[id].density;
+            for row in rows {
+                let Some(material) = materials[row.record as usize] else {
+                    continue;
+                };
+                let bounds = &t.boxes[row.record as usize];
+                for instance in &t.instances[row.instances.clone()] {
+                    let world = instance.world();
+                    let seen = match density {
+                        Some(d) => need::uv_per_pixel(view_projection, size, world, bounds, d),
+                        None => need::uv_per_pixel(view_projection, size, world, bounds, 1.0)
+                            .map(|_| f32::INFINITY),
+                    };
+                    let Some(uv_per_pixel) = seen else {
+                        continue;
+                    };
+                    let footprint = Footprint {
+                        uv_per_pixel,
+                        unestimated: density.is_none(),
+                    };
+                    (footprints.entry(material))
+                        .or_insert(Footprint::NONE)
+                        .add(footprint);
+                }
+            }
+        }
+        footprints
     }
 
     /// The bytes of every buffer, the staging buffer on the host side.
@@ -737,6 +796,7 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
                     index_count: (tables.indices.len() - first_index) as u32,
                     parts,
                     spread: t.refined.as_ref().map_or(0.0, spread),
+                    density: need::density(mesh),
                 },
             );
             points += drawn as u64;
@@ -1388,16 +1448,15 @@ fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Op
     path.and_then(|p| materials.get(p).copied())
 }
 
-/// Rewrites every instance and draw record of render `tags` into `slot`'s
-/// buffers, replaced when they are too small, and returns the tables to
-/// upload into them.
+/// Rewrites every instance and draw record of render `tags` into `slot`,
+/// its buffers replaced when they are too small, for `draw_uploads`.
 fn rewrite(
     device: &gpu::Device,
     store: &Store,
     layout: &Layout,
     tags: &[String],
     slot: &mut Option<Draws>,
-) -> Result<DrawTables, String> {
+) -> Result<(), String> {
     let t = draws(store, &layout.ranges, tags);
     let draws = match slot.take() {
         Some(d)
@@ -1416,27 +1475,22 @@ fn rewrite(
                 owners: Buffer::device_local(device, size(&t.owners), storage)?,
                 boxes: Buffer::device_local(device, size(&t.boxes), storage)?,
                 records: Buffer::device_local(device, size(&t.records), copied)?,
-                count: 0,
-                instance_count: 0,
-                groups: Vec::new(),
-                rows: Rows::new(),
+                tables: DrawTables::default(),
                 tags: Vec::new(),
             }
         }
     };
     *slot = Some(Draws {
-        count: t.records.len() as u32,
-        instance_count: t.instances.len() as u32,
-        groups: t.groups.clone(),
-        rows: t.rows.clone(),
+        tables: t,
         tags: tags.to_vec(),
         ..draws
     });
-    Ok(t)
+    Ok(())
 }
 
 /// The uploads of rewritten draws.
-fn draw_uploads<'a>(t: &'a DrawTables, d: &Draws) -> [Upload<'a>; 4] {
+fn draw_uploads(d: &Draws) -> [Upload<'_>; 4] {
+    let t = &d.tables;
     [
         Upload::table(bytes(&t.instances), &d.instances),
         Upload::table(bytes(&t.owners), &d.owners),
@@ -1451,6 +1505,18 @@ fn draw_uploads<'a>(t: &'a DrawTables, d: &Draws) -> [Upload<'a>; 4] {
 struct Patch {
     instances: Vec<(usize, Vec<Instance>)>,
     boxes: Vec<(u32, [f32; 6])>,
+}
+
+impl Patch {
+    /// Writes it into the tables it was made against.
+    fn apply(&self, t: &mut DrawTables) {
+        for (first, instances) in &self.instances {
+            t.instances[*first..first + instances.len()].copy_from_slice(instances);
+        }
+        for (record, b) in &self.boxes {
+            t.boxes[*record as usize] = *b;
+        }
+    }
 }
 
 /// The patch for the meshes in `moved`. `None` when a mesh's instance count
@@ -1949,6 +2015,7 @@ mod tests {
                     index_count: 9,
                 }],
                 spread: 0.0,
+                density: None,
             };
             ranges.insert(id, range);
         }
@@ -2128,23 +2195,18 @@ mod tests {
     #[test]
     fn moved_transforms_patch_their_rows() {
         let (mut store, ranges) = drawn(&[("/a", "render"), ("/b", "render"), ("/c", "render")]);
-        let DrawTables {
-            mut instances,
-            rows,
-            ..
-        } = draws(&store, &ranges, &[]);
+        let mut tables = draws(&store, &ranges, &[]);
+        let rows = tables.rows.clone();
         let ids: Vec<u64> = ranges.keys().copied().collect();
         let mut moved = IDENTITY;
         moved[12] = 2.0;
         store.set_transform(ids[1], moved).unwrap();
         let moved = store.take_moved();
         let rewritten = draws(&store, &ranges, &[]).instances;
-        assert_ne!(instances, rewritten);
+        assert_ne!(tables.instances, rewritten);
         let patched = patch(&store, &ranges, &rows, &moved, &[]).unwrap();
-        for (first, p) in patched.instances {
-            instances[first..first + p.len()].copy_from_slice(&p);
-        }
-        assert_eq!(instances, rewritten);
+        patched.apply(&mut tables);
+        assert_eq!(tables.instances, rewritten);
         assert!(patched.boxes.is_empty());
 
         // The control: a transform that flattens the mesh drops its instance,

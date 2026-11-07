@@ -124,6 +124,8 @@ def main(path, warm=None):
           f"targets {size(last['target_bytes'])}, host {size(last['host_bytes'])}; "
           f"vram {size(last['vram_used_bytes'])} used of {size(last['vram_budget_bytes'])}")
     print(f"  materials: {size(last['material_bytes'])}, {last['lowered_textures']:.0f} textures lowered to fit")
+    print(f"  textures: {last['blurred_textures']:.0f} drawn coarser than the view needs, "
+          f"{last['unseen_textures']:.0f} unseen, {last['unestimated_textures']:.0f} not estimated")
 
 
 if __name__ == "__main__":

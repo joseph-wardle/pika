@@ -19,6 +19,7 @@ use crate::shader;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
 use crate::target::Target;
+use crate::texture::Needs;
 use crate::transform::Camera;
 use crate::view::View;
 
@@ -180,6 +181,8 @@ struct Pending {
     pending: usize,
     pending_textures: usize,
     lowered_textures: usize,
+    need: Duration,
+    needs: Needs,
 }
 
 impl Renderer {
@@ -346,8 +349,17 @@ impl Renderer {
             &inputs.render_tags,
             &mut self.commands,
         )?;
-        let shading =
-            (self.shade).update(&self.device, &self.store, &moved, inputs.texture_cap, cb)?;
+        let estimating = Instant::now();
+        let footprints = (self.geometry).footprints(&camera.view_projection, [w, h]);
+        let need = estimating.elapsed();
+        let shading = (self.shade).update(
+            &self.device,
+            &self.store,
+            &moved,
+            inputs.texture_cap,
+            &footprints,
+            cb,
+        )?;
         self.commands.mark("texture")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
@@ -408,6 +420,8 @@ impl Renderer {
             pending: shading.pending,
             pending_textures: shading.pending_textures,
             lowered_textures: shading.lowered_textures,
+            need,
+            needs: shading.needs,
         };
         if latent {
             self.pending = Some(pending);
@@ -489,6 +503,8 @@ impl Renderer {
             pending: pending.pending,
             pending_textures: pending.pending_textures,
             lowered_textures: pending.lowered_textures,
+            need: pending.need,
+            needs: pending.needs,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

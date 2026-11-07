@@ -14,6 +14,7 @@ use crate::commands::Times;
 use crate::geometry::Update;
 use crate::gpu;
 use crate::store::{Census, Stats as Pulled};
+use crate::texture::Needs;
 
 /// The records so far, their file, and the clocks the periods come from.
 pub struct Stats {
@@ -76,6 +77,10 @@ pub struct Frame {
     pub pending_textures: usize,
     /// Textures lowered past the cap's levels to fit the device's memory.
     pub lowered_textures: usize,
+    /// Estimating where each material's meshes are drawn
+    /// (`Geometry::footprints`), on the render thread.
+    pub need: Duration,
+    pub needs: Needs,
 }
 
 /// What each owner holds on the GPU, and what the driver says the process
@@ -283,6 +288,7 @@ impl Frame {
             ("wait_ms".into(), ms(self.times.wait)),
             ("place_ms".into(), ms(self.place)),
             ("texture_read_ms".into(), ms(self.texture_read)),
+            ("need_ms".into(), ms(self.need)),
         ]);
         pairs.extend(
             (self.times.spans.iter()).map(|(label, t)| (format!("gpu_{label}_ms"), ms(*t))),
@@ -313,6 +319,9 @@ impl Frame {
             ("pending_materials", self.pending as u64),
             ("pending_textures", self.pending_textures as u64),
             ("lowered_textures", self.lowered_textures as u64),
+            ("unseen_textures", self.needs.unseen as u64),
+            ("unestimated_textures", self.needs.unestimated as u64),
+            ("blurred_textures", self.needs.blurred as u64),
         ];
         pairs.extend(counts.map(|(k, v)| (k.to_string(), v as f64)));
         pairs
@@ -417,19 +426,26 @@ mod tests {
             pending: 1,
             pending_textures: 2,
             lowered_textures: 3,
+            need: ms(0.5),
+            needs: Needs {
+                unseen: 4,
+                unestimated: 5,
+                blurred: 6,
+            },
         }
     }
 
     #[test]
     fn frame_line_is_key_value_pairs_named_by_mark() {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
-             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
+             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
-             pending_textures 2 lowered_textures 3\n";
+             pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \
+             blurred_textures 6\n";
         assert_eq!(line("frame", 7, &frame(Some(29.0)).pairs()), expected);
         // A first frame has no period, so it is not the reference's line
         // with the period zeroed.

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use ash::vk;
 
 use crate::gpu::{self, Buffer};
+use crate::need;
 
 pub struct Texture {
     pub width: u32,
@@ -257,6 +258,24 @@ struct Loaded {
     chain: Chain,
     /// The first level its image is to hold, `fit`'s.
     target: usize,
+    /// For each level, the last frame it was the finest a reader drawn
+    /// needed, 0 for never (`need::finest`).
+    seen: Vec<u64>,
+    /// The last frame a reader was drawn whose need was not estimated, 0
+    /// for never.
+    unestimated: u64,
+}
+
+/// What the view needs of the loaded textures, within `need::WINDOW`.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Needs {
+    /// Textures no reader was drawn of.
+    pub unseen: usize,
+    /// Textures a reader was drawn of whose need was not estimated.
+    pub unestimated: usize,
+    /// Textures whose image holds coarser levels than the finest needed,
+    /// within the cap: what fitting them to the memory blurs.
+    pub blurred: usize,
 }
 
 /// What `fit` weighs of a loaded texture.
@@ -616,6 +635,8 @@ pub struct Textures {
     fresh: bool,
     /// The bytes the targets take past the heaps' room, at their floors.
     short: u64,
+    /// The frames begun, which the textures' needs are stamped with.
+    frame: u64,
 }
 
 impl Textures {
@@ -632,6 +653,7 @@ impl Textures {
             dirty: false,
             fresh: false,
             short: 0,
+            frame: 0,
         })
     }
 
@@ -641,6 +663,7 @@ impl Textures {
         self.retired.clear();
         self.left = UPLOAD;
         self.fresh = false;
+        self.frame += 1;
     }
 
     /// Sets the cap to `cap` texels a side, 0 for none, and so each loaded
@@ -683,6 +706,8 @@ impl Textures {
         let size = texture.bytes(first);
         self.left = self.left.saturating_sub(size);
         let loaded = Loaded {
+            seen: vec![0; texture.levels.len()],
+            unestimated: 0,
             texture,
             tiles,
             image,
@@ -807,6 +832,41 @@ impl Textures {
         (self.loaded.values())
             .filter(|l| l.image.first != l.target)
             .count()
+    }
+
+    /// Notes that a reader of the texture keyed `key` is drawn this frame
+    /// where a pixel covers `uv_per_pixel` texture coordinate units, or,
+    /// for `None`, where its need is not estimated.
+    pub fn need(&mut self, key: &str, uv_per_pixel: Option<f32>) {
+        let Some(loaded) = self.loaded.get_mut(key) else {
+            return;
+        };
+        match uv_per_pixel {
+            Some(uv) => {
+                let level = need::level(loaded.chain.side, uv);
+                let last = loaded.seen.len() - 1;
+                loaded.seen[level.min(last)] = self.frame;
+            }
+            None => loaded.unestimated = self.frame,
+        }
+    }
+
+    /// What the view needed of the loaded textures within the window.
+    pub fn needs(&self) -> Needs {
+        let mut needs = Needs::default();
+        let recent = |frame: u64| frame > 0 && self.frame - frame < need::WINDOW;
+        for loaded in self.loaded.values() {
+            let finest = need::finest(&loaded.seen, self.frame);
+            needs.unestimated += usize::from(recent(loaded.unestimated));
+            match finest {
+                None if !recent(loaded.unestimated) => needs.unseen += 1,
+                Some(level) if level.max(loaded.chain.ceiling) < loaded.image.first => {
+                    needs.blurred += 1
+                }
+                _ => {}
+            }
+        }
+        needs
     }
 
     /// The textures lowered past their ceiling to fit, and the longest side
