@@ -10,8 +10,10 @@ whether the host edits the material in place (Houdini 22) or resyncs it,
 removing it and inserting it again at its path (Houdini 21). Then, for a
 third scene, a texture magnified, that changing the texture cap in one
 session, from none to 4, 2 and none again, builds no material and draws
-at each cap what a session started at it draws, and that a swap whose
-read fails, its baked file cut short, keeps the image it had.
+at each cap what a session started at it draws, that a raise whose
+read fails, its baked file cut short, keeps the image it had and still
+converges, and that once the file is whole again a cap change releases
+it, drawing what a session at that cap draws.
 
     hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda>
 
@@ -205,17 +207,30 @@ def main(clay, painted, mipped):
             sys.exit(f"engine: under the cap {cap}, {differ} pixels differ from a session started at it")
         print(f"engine: the cap changed to {cap} in {frames} frames, building nothing, as a session at it draws")
     recap(engine, stage, params, fbo, 2)
-    # The file the swap back to every level reads, cut to its header: the
-    # read fails, and the texture keeps its 2×2 levels.
+    # The file the raise back to every level reads, cut to its header: the
+    # read fails, and the texture is held at its 2×2 levels.
     baked = glob.glob(os.path.join(os.environ["PIKA_CACHE"], "textures", "**", "mips.exr", "*"), recursive=True)
     if not baked:
         sys.exit("engine: mips.exr has no bake under PIKA_CACHE")
+    whole = {}
     for path in baked:
+        with open(path, "rb") as f:
+            whole[path] = f.read()
         os.truncate(path, 40)
     image, frames = recap(engine, stage, params, fbo, 0)
     if image != fresh[2]:
-        sys.exit("engine: a swap whose read failed did not keep the 2×2 levels")
-    print(f"engine: a swap whose read failed kept the cap 2 image, converged in {frames} frames")
+        sys.exit("engine: a raise whose read failed did not keep the 2×2 levels")
+    print(f"engine: a raise whose read failed kept the cap 2 image, converged in {frames} frames")
+    # Written back in place, as the session reads the file it holds open:
+    # the cap changing releases the hold. Unreleased, it would draw the 2×2
+    # levels, which differ from the cap 4 image (the control above).
+    for path, data in whole.items():
+        with open(path, "r+b") as f:
+            f.write(data)
+    image, frames = recap(engine, stage, params, fbo, 4)
+    if image != fresh[4]:
+        sys.exit("engine: the cap changing did not release the held raise")
+    print(f"engine: the cap changed to 4 released the held raise in {frames} frames")
 
 
 if __name__ == "__main__":

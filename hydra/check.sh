@@ -244,7 +244,7 @@ DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scene
     "$ROOT/hydra/scenes/painted.usda" "$ROOT/hydra/scenes/mipped.usda" >"$OUT/engine.log" 2>&1 ||
     fail "the host does not see Pika's stats, a pending material is not clay or as it was, or a cap change in session differs from a fresh session (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
-grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; kept at 2×2$" "$OUT/engine.log" ||
-    fail "engine: the swap whose read failed was not warned of (see $OUT/engine.log)"
+grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; held at 2×2 until the memory budget grows or the textures change$" "$OUT/engine.log" ||
+    fail "engine: the raise whose read failed was not warned of (see $OUT/engine.log)"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

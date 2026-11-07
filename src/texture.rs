@@ -280,9 +280,10 @@ fn copies(
 /// The bytes of levels a frame uploads, loads and swaps together, past
 /// which the rest wait for the next: reading and copying a texture's levels
 /// costs the render thread about 0.8 ms a MiB on the RTX 4070 Ti SUPER. A
-/// swap uploads whole rows of blocks of one layer (`copies`), so a texture
-/// larger than this swaps over frames into its new image; a load lands
-/// whole, at its floor of a few blocks.
+/// raise uploads whole rows of blocks of one layer (`copies`), so a texture
+/// larger than this raises over frames into its new image; a load lands
+/// whole, at its floor of a few blocks. A lower uploads nothing: it copies
+/// its levels from the old image on the GPU.
 pub const UPLOAD: u64 = 32 << 20;
 
 /// The longest side, in texels, of the coarsest level a texture is lowered
@@ -296,6 +297,14 @@ pub const TAIL: u32 = 4;
 /// other processes or this one's geometry, without a target moving.
 /// Hypothesis: enough on ALab beside usdview and Houdini.
 pub const MARGIN: u64 = 256 << 20;
+
+/// The bytes of a heap's budget that the images swaps begin leave free,
+/// since the driver can refuse an allocation the budget allows: on the RTX
+/// 4070 Ti SUPER, in ALab's cut run, which lowers hundreds of textures at
+/// each cut, raises of 3 and 4 MB that fit the frame's budget failed with
+/// the budget filled to 1 MB; with this left free, none did. Hypothesis:
+/// enough elsewhere.
+pub const RESERVE: u64 = 64 << 20;
 
 /// A texture's levels on the GPU from `first` on: a 2D array image, in the
 /// layout the material pass samples once its upload has run.
@@ -317,7 +326,7 @@ struct Loaded {
     texture: Texture,
     tiles: Buffer,
     image: Image,
-    /// The image a swap is uploading for its target, which replaces
+    /// The image a raise is uploading for its target, which replaces
     /// `image` once whole.
     incoming: Option<Incoming>,
     chain: Chain,
@@ -329,9 +338,12 @@ struct Loaded {
     /// The last frame a reader was drawn whose need was not estimated, 0
     /// for never.
     unestimated: u64,
+    /// Whether its lower failed and is tried again each frame, warned of
+    /// once.
+    failing: bool,
 }
 
-/// A swap's new image, uploaded over frames: its levels' bytes before
+/// A raise's new image, uploaded over frames: its levels' bytes before
 /// `done` are copied.
 struct Incoming {
     image: Image,
@@ -361,15 +373,17 @@ struct Chain {
     /// driver sizes it with alignment and tiling.
     sizes: Vec<u64>,
     /// The finest level its image may hold: the cap's, or its image's own
-    /// once a swap failed, until the cap changes.
+    /// while a raise that failed is held.
     ceiling: usize,
-    /// The coarsest: the first within `TAIL`, or the ceiling past it, or
-    /// likewise its image's own once a swap failed.
+    /// The coarsest: the first within `TAIL`, or the cap's past it.
     floor: usize,
     /// The finest level a view needed within `need::WINDOW`, the finest
     /// of all when a reader's need was not estimated; `None` when no view
     /// drew it.
     need: Option<usize>,
+    /// The room its heap had for textures when a raise of it failed, which
+    /// holds it at its image's levels (`fail`) until `released`.
+    held: Option<u64>,
 }
 
 impl Chain {
@@ -383,6 +397,7 @@ impl Chain {
             ceiling: 0,
             floor: 0,
             need: None,
+            held: None,
         };
         for first in 0..texture.levels.len() {
             let info = image_info(texture, first);
@@ -404,10 +419,33 @@ impl Chain {
         Ok(chain)
     }
 
-    /// Sets its ceiling and floor for the cap `cap`, 0 for none.
+    /// Sets its ceiling and floor for the cap `cap`, 0 for none, releasing
+    /// it if held.
     fn limit(&mut self, texture: &Texture, cap: u32) {
         self.ceiling = texture.first(cap);
         self.floor = texture.first(TAIL).max(self.ceiling);
+        self.held = None;
+    }
+
+    /// The level to target after its swap from `first` toward `target`
+    /// failed while its heap had `room` bytes for textures. A lower keeps
+    /// its target, tried again next frame, as the others' lowers free
+    /// memory. A raise is held at `first`, its ceiling, until `released`:
+    /// tried each frame, it would fail each frame and never settle.
+    fn fail(&mut self, first: usize, target: usize, room: u64) -> usize {
+        if target > first {
+            return target;
+        }
+        (self.ceiling, self.held) = (first, Some(room));
+        first
+    }
+
+    /// Whether it is held and to be released, by heap index the rooms
+    /// `room`: once the textures or their limits `changed`, or its heap's
+    /// room grew past the room it was held at by more than `MARGIN`, so the
+    /// budget wandering retries nothing.
+    fn released(&self, room: &[u64], changed: bool) -> bool {
+        (self.held).is_some_and(|held| changed || room[self.heap] > held.saturating_add(MARGIN))
     }
 
     /// The longest side of its level `level`.
@@ -484,17 +522,21 @@ fn settle(chains: &[&Chain], current: &[usize], room: &[u64], afresh: bool) -> (
 
 /// The order a frame's swaps go in, by index, of the chains whose image
 /// holds the levels from `firsts` and is to hold those from `targets`:
-/// those `begun` first, so their images finish before others take memory,
-/// then lowers, which free it, then raises, first the chain the fit would
-/// lower last from its level now (`order`): the furthest below its need,
-/// then the nearest.
+/// lowers first, which free memory and upload nothing, then raises, those
+/// `begun` first, so their images finish before others take memory, then
+/// first the chain the fit would lower last from its level now (`order`):
+/// the furthest below its need, then the nearest.
 fn queue(chains: &[&Chain], firsts: &[usize], targets: &[usize], begun: &[bool]) -> Vec<usize> {
     let mut queue: Vec<usize> = (0..chains.len())
         .filter(|&i| begun[i] || targets[i] != firsts[i])
         .collect();
     queue.sort_by_key(|&i| {
-        let raise = targets[i] < firsts[i];
-        (Reverse(begun[i]), raise, order(chains[i], firsts[i]))
+        let lower = targets[i] > firsts[i];
+        (
+            Reverse(lower),
+            Reverse(begun[i]),
+            order(chains[i], firsts[i]),
+        )
     });
     queue
 }
@@ -535,7 +577,11 @@ fn image_info(texture: &Texture, first: usize) -> vk::ImageCreateInfo<'static> {
         .mip_levels((texture.levels.len() - first) as u32)
         .array_layers(texture.layers)
         .samples(vk::SampleCountFlags::TYPE_1)
-        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+        .usage(
+            vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST,
+        )
 }
 
 impl Image {
@@ -628,6 +674,64 @@ impl Image {
         unsafe {
             (self.device).cmd_copy_buffer_to_image(cb, staging.raw, self.image, layout, copies)
         };
+    }
+
+    /// Records into `cb`, outside rendering, the copy into its levels of
+    /// `texture` of `old`'s, which holds them and finer ones, sampled: `old`
+    /// moves into the layout copies read from and back, after the material
+    /// pass of every frame submitted before, and before this frame's.
+    fn copy_from(&self, cb: vk::CommandBuffer, old: &Image, texture: &Texture) {
+        let layers = |level: usize| vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: level as u32,
+            base_array_layer: 0,
+            layer_count: texture.layers,
+        };
+        let regions: Vec<vk::ImageCopy> = (self.first..texture.levels.len())
+            .map(|level| {
+                let (width, height) = texture.extent(level);
+                vk::ImageCopy::default()
+                    .src_subresource(layers(level - old.first))
+                    .dst_subresource(layers(level - self.first))
+                    .extent(vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    })
+            })
+            .collect();
+        let (sampled, source) = (
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+        );
+        let out = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .old_layout(sampled)
+            .new_layout(source)
+            .image(old.image)
+            .subresource_range(old.range(texture));
+        old.barrier(cb, out);
+        self.to_copy(cb, texture);
+        let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+        // SAFETY: `cb` is recording outside rendering, both images were
+        // created on `device` with the transfer usages, each region's
+        // levels exist in both at the same extent, and the barriers above
+        // put each in the layout named.
+        unsafe {
+            (self.device).cmd_copy_image(cb, old.image, source, self.image, layout, &regions)
+        };
+        let back = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+            .old_layout(source)
+            .new_layout(sampled)
+            .image(old.image)
+            .subresource_range(old.range(texture));
+        old.barrier(cb, back);
+        self.to_sample(cb, texture);
     }
 
     fn range(&self, texture: &Texture) -> vk::ImageSubresourceRange {
@@ -733,14 +837,22 @@ fn upload(
     Ok((end, read))
 }
 
-/// Keeps the texture keyed `key` as it is, warned of, after a swap that
-/// failed with `e`, until the cap changes.
-fn keep(key: &str, loaded: &mut Loaded, e: &str) {
+/// Leaves the texture keyed `key` to `Chain::fail` after a swap that failed
+/// with `e` while its heap had `room` bytes for textures, warned of: a
+/// raise as it is held, a lower once until it succeeds.
+fn fail(key: &str, loaded: &mut Loaded, room: u64, e: &str) {
     let first = loaded.image.first;
     let (w, h) = loaded.texture.extent(first);
-    eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
-    loaded.target = first;
-    (loaded.chain.ceiling, loaded.chain.floor) = (first, first);
+    loaded.target = loaded.chain.fail(first, loaded.target, room);
+    if loaded.target == first {
+        eprintln!(
+            "pika: warning: texture {key}: {e}; held at {w}×{h} until the memory budget grows \
+             or the textures change"
+        );
+    } else if !loaded.failing {
+        eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}, lowered again each frame");
+    }
+    loaded.failing = loaded.target != first;
 }
 
 /// The textures loaded for the materials drawn, by `bake::Baked::key`, each
@@ -761,9 +873,14 @@ pub struct Textures {
     cap: u32,
     /// The heaps' use and budgets when the targets were last set.
     heaps: Vec<gpu::Heap>,
+    /// The room each heap then had for textures, by heap index.
+    room: Vec<u64>,
     /// Whether the textures or their limits changed since then, so the
-    /// targets are fitted afresh.
+    /// targets are fitted afresh and held raises released.
     dirty: bool,
+    /// Whether a raise did not fit beside its old image under targets only
+    /// raised, so the next are fitted afresh, leaving `MARGIN`.
+    crowded: bool,
     /// Whether this frame's targets were fitted afresh, leaving `MARGIN`
     /// free for its raises.
     fresh: bool,
@@ -786,7 +903,9 @@ impl Textures {
             retired: Vec::new(),
             cap: 0,
             heaps: Vec::new(),
+            room: Vec::new(),
             dirty: false,
+            crowded: false,
             fresh: false,
             short: 0,
             frame: 0,
@@ -804,7 +923,7 @@ impl Textures {
 
     /// Sets the cap to `cap` texels a side, 0 for none, and so each loaded
     /// texture's ceiling, which the next `refit` fits under; whether it
-    /// changed. A texture kept as it was by a failed swap is tried again.
+    /// changed. A raise held after it failed is tried again.
     pub fn set_cap(&mut self, cap: u32) -> bool {
         if cap == self.cap {
             return false;
@@ -850,6 +969,7 @@ impl Textures {
             incoming: None,
             chain,
             target: first,
+            failing: false,
         };
         self.loaded.insert(key.to_owned(), loaded);
         self.dirty = true;
@@ -862,9 +982,10 @@ impl Textures {
     /// Targets that still fit the room are only raised, so the budget
     /// moving by less than the margin moves none; a load, a drop, a cap
     /// change or targets past the room fit them afresh. A need that moved
-    /// settles them as the budget moving does.
+    /// settles them as the budget moving does. A held raise is released
+    /// first (`Chain::released`).
     pub fn refit(&mut self, heaps: &[gpu::Heap]) {
-        if !self.dirty && !self.moved && self.heaps == heaps {
+        if !self.dirty && !self.crowded && !self.moved && self.heaps == heaps {
             return;
         }
         self.moved = false;
@@ -879,10 +1000,16 @@ impl Textures {
                 allowed => allowed.saturating_sub(h.used.saturating_sub(ours)),
             })
             .collect();
+        for loaded in self.loaded.values_mut() {
+            if loaded.chain.released(&room, self.dirty) {
+                loaded.chain.limit(&loaded.texture, self.cap);
+            }
+        }
         let chains: Vec<&Chain> = self.loaded.values().map(|l| &l.chain).collect();
         let current: Vec<usize> = self.loaded.values().map(|l| l.target).collect();
         let targets;
-        (targets, self.fresh) = settle(&chains, &current, &room, self.dirty);
+        let afresh = self.dirty || self.crowded;
+        (targets, self.fresh) = settle(&chains, &current, &room, afresh);
         let totals = totals(&chains, &targets, heaps.len());
         self.short = totals
             .iter()
@@ -892,22 +1019,26 @@ impl Textures {
         for (loaded, target) in self.loaded.values_mut().zip(targets) {
             loaded.target = target;
         }
-        self.dirty = false;
+        self.room = room;
+        (self.dirty, self.crowded) = (false, false);
     }
 
     /// Swaps each image not holding its target's levels for one that does,
-    /// read from its file into a new image while the frame's bytes last
-    /// (`UPLOAD`), over as many frames as it takes, in `queue`'s order: the
+    /// in `queue`'s order: a lower copies its levels from the old image on
+    /// the GPU, a raise reads them from its file into a new image while the
+    /// frame's bytes last (`UPLOAD`), over as many frames as it takes. The
     /// old image is drawn until the new one is whole, then retired once the
     /// materials binding it are rebound, so a swap that fails keeps the
-    /// old. A swap begun toward a target that has since moved starts again.
-    /// A raise begins only if its image fits the budgets of `heaps` beside
-    /// the old, else waits for the images this frame retires to be freed,
-    /// or for a refit to leave the margin. A swap that fails, or a raise
-    /// that still does not fit, is warned of, and its texture kept as it
-    /// is until the cap changes. Records the uploads into `cb`; the keys
-    /// swapped, which the caller rebinds before the next frame begins, the
-    /// bytes uploaded and the time their read took.
+    /// old. A raise begun toward a target that has since moved starts
+    /// again. A swap begins only if its image fits its heap's budget in
+    /// `heaps` less `RESERVE`, beside the old and those begun this frame,
+    /// else waits for the images this frame retires to be freed; with none,
+    /// a lower goes ahead, and a raise waits for a refit to leave the
+    /// margin. A swap that fails, or a
+    /// raise that still does not fit, is warned of and left to `fail`.
+    /// Records the copies and uploads into `cb`; the keys swapped, which
+    /// the caller rebinds before the next frame begins, the bytes uploaded
+    /// and the time their read took.
     pub fn swap(
         &mut self,
         device: &gpu::Device,
@@ -927,45 +1058,58 @@ impl Textures {
         };
         for key in order {
             let loaded = self.loaded.get_mut(&key).expect("queued from the loaded");
+            let (first, target) = (loaded.image.first, loaded.target);
+            let room = self.room.get(loaded.chain.heap).copied().unwrap_or(0);
             // No commands recorded this frame read its image yet.
-            if (loaded.incoming.as_ref()).is_some_and(|i| i.image.first != loaded.target) {
+            if (loaded.incoming.as_ref()).is_some_and(|i| i.image.first != target) {
                 loaded.incoming = None;
             }
+            if target == first {
+                continue;
+            }
             if loaded.incoming.is_none() {
-                let (texture, chain, target) = (&loaded.texture, &loaded.chain, loaded.target);
-                if target == loaded.image.first {
-                    continue;
-                }
+                let (texture, chain) = (&loaded.texture, &loaded.chain);
+                let size = chain.sizes[target];
                 let mut needs = added.clone();
-                needs[chain.heap] += chain.sizes[target];
-                let raises = target < loaded.image.first;
-                let made = if raises && gpu::overflow(heaps, &needs).is_some() {
-                    if !keys.is_empty() {
-                        continue;
-                    }
-                    if !self.fresh {
-                        self.dirty = true;
-                        continue;
-                    }
+                needs[chain.heap] += size + RESERVE;
+                // A lower frees more than its image takes once its old one
+                // is freed, so past its budget it waits only for the
+                // images this frame retires; a raise also for a refit to
+                // leave the margin.
+                let lowers = target > first;
+                let fits = gpu::overflow(heaps, &needs).is_none();
+                let made = if fits || (lowers && keys.is_empty()) {
+                    Image::new(device, texture, target)
+                } else if !keys.is_empty() {
+                    continue;
+                } else if !self.fresh {
+                    self.crowded = true;
+                    continue;
+                } else {
                     let (w, h) = texture.extent(target);
                     Err(format!(
                         "its {w}×{h} levels do not fit the device's memory budget beside its \
                          image now"
                     ))
-                } else {
-                    Image::new(device, texture, target)
                 };
-                match made {
-                    Ok(image) => {
-                        loaded.incoming = Some(Incoming { image, done: 0 });
-                        added = needs;
-                    }
+                let image = match made {
+                    Ok(image) => image,
                     Err(e) => {
-                        keep(&key, loaded, &e);
-                        self.dirty = true;
+                        fail(&key, loaded, room, &e);
+                        self.moved = true;
                         continue;
                     }
+                };
+                added[chain.heap] += size;
+                if lowers {
+                    image.copy_from(cb, &loaded.image, &loaded.texture);
+                    self.retired
+                        .push(std::mem::replace(&mut loaded.image, image));
+                    loaded.failing = false;
+                    keys.insert(key);
+                    continue;
                 }
+                loaded.incoming = Some(Incoming { image, done: 0 });
             }
             let incoming = loaded.incoming.as_mut().expect("begun above");
             let part = (incoming.done, self.staging.free());
@@ -983,8 +1127,8 @@ impl Textures {
                 }
                 Err(e) => {
                     loaded.incoming = None;
-                    keep(&key, loaded, &e);
-                    self.dirty = true;
+                    fail(&key, loaded, room, &e);
+                    self.moved = true;
                 }
             }
         }
@@ -1040,7 +1184,7 @@ impl Textures {
             needs.unestimated += usize::from(unestimated);
             match loaded.chain.need {
                 None => needs.unseen += 1,
-                Some(level) if level.max(loaded.chain.ceiling) < loaded.image.first => {
+                Some(level) if level.max(loaded.texture.first(self.cap)) < loaded.image.first => {
                     needs.blurred += 1
                 }
                 _ => {}
@@ -1049,10 +1193,10 @@ impl Textures {
         needs
     }
 
-    /// The textures lowered past their ceiling to fit, and the longest side
-    /// of the finest level any of them holds.
+    /// The textures lowered past the cap to fit, a held raise included,
+    /// and the longest side of the finest level any of them holds.
     pub fn lowered(&self) -> (usize, u32) {
-        let lowered = self.loaded.values().filter(|l| l.target > l.chain.ceiling);
+        let lowered = (self.loaded.values()).filter(|l| l.target > l.texture.first(self.cap));
         let finest = lowered.clone().map(|l| l.chain.extent(l.target)).max();
         (lowered.count(), finest.unwrap_or(0))
     }
@@ -1123,7 +1267,7 @@ impl Textures {
         Ok(sampler)
     }
 
-    /// Every image it holds: those drawn, those swaps are uploading, and
+    /// Every image it holds: those drawn, those raises are uploading, and
     /// those retired.
     fn images(&self) -> impl Iterator<Item = &Image> {
         (self.loaded.values())
@@ -1363,6 +1507,7 @@ pub mod tests {
             ceiling: 0,
             floor,
             need: None,
+            held: None,
         }
     }
 
@@ -1512,8 +1657,8 @@ pub mod tests {
             "the other heap's budget"
         );
         assert_eq!(fit(&chains, &[0, u64::MAX]), [4, 0]);
-        // A ceiling past the floor, as a cap under `TAIL` or a failed swap
-        // makes it: the chain stays where it is.
+        // A ceiling past the floor, as a cap under `TAIL` makes it: the
+        // chain stays where it is.
         let mut kept = chain(0, 64);
         (kept.ceiling, kept.floor) = (5, 5);
         assert_eq!(fit(&[&kept], &[0]), [5]);
@@ -1641,11 +1786,43 @@ pub mod tests {
         (near.need, far.need) = (Some(2), Some(0));
         let chains = [&near, &far, &unseen, &lower];
         assert_eq!(queue(&chains, &firsts, &targets, &none), [3, 1, 0, 2]);
-        // A swap begun finishes first, even toward the level it holds; one
-        // holding its target and not begun is not queued.
+        // Lowers go first, then a raise begun, even toward the level it
+        // holds; one holding its target and not begun is not queued.
         let begun = [false, false, true, false];
-        assert_eq!(queue(&chains, &firsts, &targets, &begun), [2, 3, 1, 0]);
+        assert_eq!(queue(&chains, &firsts, &targets, &begun), [3, 2, 1, 0]);
+        assert_eq!(queue(&chains, &firsts, &[0, 1, 3, 4], &begun), [3, 2, 1, 0]);
         assert_eq!(queue(&chains, &firsts, &[3, 1, 3, 4], &none), [3, 1]);
+    }
+
+    #[test]
+    fn a_failed_raise_is_held_until_the_room_grows_and_a_failed_lower_is_not() {
+        // Two 64-texel chains on one heap, room for one whole and the
+        // other at level 3: the first's raise from level 3 failed.
+        let (mut held, other) = (chain(0, 64), chain(0, 64));
+        let capacity = held.sizes[3] + other.sizes[0];
+        let room = 10_000;
+        assert_eq!(held.fail(3, 0, room), 3, "held where it is");
+        assert_eq!((held.ceiling, held.held), (3, Some(room)));
+        // The fit leaves it there and gives the other the room it freed.
+        assert_eq!(fit(&[&held, &other], &[capacity]), [3, 0]);
+        // The room the same, or grown by the margin alone, holds it.
+        assert!(!held.released(&[room], false));
+        assert!(!held.released(&[room + MARGIN], false));
+        // Grown past that, or the textures changed, releases it; one never
+        // held is never released.
+        assert!(held.released(&[room + MARGIN + 1], false));
+        assert!(held.released(&[room], true));
+        assert!(!other.released(&[u64::MAX], true));
+        // The control: released, it competes for the room again, both
+        // lowered a level, so the fit differs.
+        held.limit(&numbered(vk::Format::R32_SFLOAT, (64, 64, 1)), 0);
+        assert_eq!((held.ceiling, held.held), (0, None));
+        assert_eq!(fit(&[&held, &other], &[capacity]), [1, 1]);
+        // A failed lower keeps its target, to be tried again, and holds
+        // nothing.
+        let mut lowered = chain(0, 64);
+        assert_eq!(lowered.fail(1, 3, room), 3);
+        assert_eq!((lowered.ceiling, lowered.held), (0, None));
     }
 
     #[test]
