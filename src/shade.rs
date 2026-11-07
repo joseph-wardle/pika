@@ -228,6 +228,20 @@ impl Shade {
                 }
             }
         }
+        for (id, footprint) in footprints {
+            let Some(drawn) = self.looks.get(id).and_then(Look::built) else {
+                continue;
+            };
+            for (key, source) in drawn.textures.iter().zip(&drawn.sources) {
+                if footprint.uv_per_pixel.is_finite() && !source.transformed {
+                    self.textures.need(key, Some(footprint.uv_per_pixel));
+                }
+                if footprint.unestimated || source.transformed {
+                    self.textures.need(key, None);
+                }
+            }
+        }
+        self.textures.weigh();
         // Once the scene's builds have landed, so its first textures are
         // not raised past what the whole fits, then lowered again: a
         // 34-tile set at 4K uploads 750 MB in a frame. Loads meanwhile draw
@@ -242,19 +256,6 @@ impl Shade {
             for drawn in self.looks.values().filter_map(Look::built) {
                 if drawn.textures.iter().any(|key| swapped.contains(key)) {
                     drawn.bind_views(&self.textures, &self.surfaces[&drawn.hash])?;
-                }
-            }
-        }
-        for (id, footprint) in footprints {
-            let Some(drawn) = self.looks.get(id).and_then(Look::built) else {
-                continue;
-            };
-            for (key, source) in drawn.textures.iter().zip(&drawn.sources) {
-                if footprint.uv_per_pixel.is_finite() && !source.transformed {
-                    self.textures.need(key, Some(footprint.uv_per_pixel));
-                }
-                if footprint.unestimated || source.transformed {
-                    self.textures.need(key, None);
                 }
             }
         }

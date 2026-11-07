@@ -4,7 +4,9 @@
 //! texture cap, and the set of them loaded for the materials drawn, with
 //! the samplers they are read through. Each texture holds the levels within
 //! the cap unless they do not all fit the device's memory, when the textures
-//! with the longest sides are lowered first (`fit`). A texture whose levels
+//! no view drew are lowered first, then levels finer than the view needs,
+//! then the rest by how far below their need they fall (`fit`, `need`). A
+//! texture whose levels
 //! should change swaps its image for one of its new levels, read from the
 //! file, a frame's worth of bytes at a time; nothing is baked or built again.
 
@@ -294,6 +296,10 @@ struct Chain {
     /// The coarsest: the first within `TAIL`, or the ceiling past it, or
     /// likewise its image's own once a swap failed.
     floor: usize,
+    /// The finest level a view needed within `need::WINDOW`, the finest
+    /// of all when a reader's need was not estimated; `None` when no view
+    /// drew it.
+    need: Option<usize>,
 }
 
 impl Chain {
@@ -306,6 +312,7 @@ impl Chain {
             sizes: Vec::new(),
             ceiling: 0,
             floor: 0,
+            need: None,
         };
         for first in 0..texture.levels.len() {
             let info = image_info(texture, first);
@@ -341,20 +348,32 @@ impl Chain {
 
 /// Each chain's first level, by index: its ceiling, lowered a level at a
 /// time while its heap's images take more than `capacity`, bytes by heap
-/// index, the chain whose image has the longest side first, then the most
-/// bytes, then the lowest index, none past its floor. The order of
-/// lowering is fixed, so more capacity stops earlier in the same sequence:
-/// a chain is never raised by less capacity, nor lowered by more.
+/// index, none past its floor. First the chains no view drew, then levels
+/// finer than a chain's need, which no view sees go; then a level below
+/// its need, the chain left least far below its own first, so the blur
+/// spreads evenly, then the one needing the coarsest levels, the farthest
+/// from the camera. Within each, the longest side goes first, then the
+/// most bytes, then the lowest index. A chain's place in the order hangs
+/// on its own level alone, so more capacity stops earlier in the same
+/// sequence: a chain is never raised by less capacity, nor lowered by more.
 fn fit(chains: &[&Chain], capacity: &[u64]) -> Vec<usize> {
     let mut targets: Vec<usize> = chains.iter().map(|c| c.ceiling).collect();
     let mut totals = totals(chains, &targets, capacity.len());
-    let key =
-        |i: usize, level: usize| (chains[i].extent(level), chains[i].sizes[level], Reverse(i));
+    let key = |i: usize, level: usize| {
+        let c = chains[i];
+        let (seen, below, need) = match c.need {
+            None => (0, 0, 0),
+            Some(need) if level < need => (1, 0, need),
+            Some(need) => (2, level - need, need),
+        };
+        let order = (Reverse(seen), Reverse(below), need);
+        (order, c.extent(level), c.sizes[level], Reverse(i))
+    };
     let mut queue: BinaryHeap<_> = (0..chains.len())
         .filter(|&i| chains[i].ceiling < chains[i].floor)
         .map(|i| key(i, chains[i].ceiling))
         .collect();
-    while let Some((_, _, Reverse(i))) = queue.pop() {
+    while let Some((_, _, _, Reverse(i))) = queue.pop() {
         let (c, target) = (chains[i], &mut targets[i]);
         if totals[c.heap] <= capacity[c.heap] {
             continue;
@@ -637,6 +656,9 @@ pub struct Textures {
     short: u64,
     /// The frames begun, which the textures' needs are stamped with.
     frame: u64,
+    /// Whether a texture's need changed since the targets were last set,
+    /// so they are settled again (`weigh`).
+    moved: bool,
 }
 
 impl Textures {
@@ -654,6 +676,7 @@ impl Textures {
             fresh: false,
             short: 0,
             frame: 0,
+            moved: false,
         })
     }
 
@@ -724,11 +747,13 @@ impl Textures {
     /// its budget less what the process holds besides them, less `MARGIN`.
     /// Targets that still fit the room are only raised, so the budget
     /// moving by less than the margin moves none; a load, a drop, a cap
-    /// change or targets past the room fit them afresh.
+    /// change or targets past the room fit them afresh. A need that moved
+    /// settles them as the budget moving does.
     pub fn refit(&mut self, heaps: &[gpu::Heap]) {
-        if !self.dirty && self.heaps == heaps {
+        if !self.dirty && !self.moved && self.heaps == heaps {
             return;
         }
+        self.moved = false;
         self.heaps = heaps.to_vec();
         let mut ours = vec![0; heaps.len()];
         for image in self.loaded.values().map(|l| &l.image).chain(&self.retired) {
@@ -851,15 +876,31 @@ impl Textures {
         }
     }
 
-    /// What the view needed of the loaded textures within the window.
+    /// Sets each texture's need from what the views needed within the
+    /// window, which the next `refit` weighs.
+    pub fn weigh(&mut self) {
+        let frame = self.frame;
+        for loaded in self.loaded.values_mut() {
+            let unestimated = loaded.unestimated > 0 && frame - loaded.unestimated < need::WINDOW;
+            let need = match unestimated {
+                true => Some(0),
+                false => need::finest(&loaded.seen, frame),
+            };
+            self.moved |= need != loaded.chain.need;
+            loaded.chain.need = need;
+        }
+    }
+
+    /// What the views needed of the loaded textures within the window, as
+    /// `weigh` last set it.
     pub fn needs(&self) -> Needs {
         let mut needs = Needs::default();
-        let recent = |frame: u64| frame > 0 && self.frame - frame < need::WINDOW;
         for loaded in self.loaded.values() {
-            let finest = need::finest(&loaded.seen, self.frame);
-            needs.unestimated += usize::from(recent(loaded.unestimated));
-            match finest {
-                None if !recent(loaded.unestimated) => needs.unseen += 1,
+            let unestimated =
+                loaded.unestimated > 0 && self.frame - loaded.unestimated < need::WINDOW;
+            needs.unestimated += usize::from(unestimated);
+            match loaded.chain.need {
+                None => needs.unseen += 1,
                 Some(level) if level.max(loaded.chain.ceiling) < loaded.image.first => {
                     needs.blurred += 1
                 }
@@ -1174,6 +1215,7 @@ pub mod tests {
             sizes,
             ceiling: 0,
             floor,
+            need: None,
         }
     }
 
@@ -1213,6 +1255,56 @@ pub mod tests {
         let mut last = fit(&chains, &[0]);
         for capacity in 0..6000 {
             let targets = fit(&chains, &[capacity]);
+            assert!(
+                targets.iter().zip(&last).all(|(t, l)| t <= l),
+                "at {capacity}"
+            );
+            last = targets;
+        }
+    }
+
+    #[test]
+    fn a_fit_lowers_what_no_view_needs_first() {
+        // Three 64-texel chains: from level 0 they take 5461 bytes, from 1
+        // 1365, 2 341, 3 85 and 4, their floor, 21. The near one needs
+        // level 0, the far one level 2, and no view drew the third.
+        let (mut near, mut far, unseen) = (chain(0, 64), chain(0, 64), chain(0, 64));
+        (near.need, far.need) = (Some(0), Some(2));
+        let chains = [&near, &far, &unseen];
+        assert_eq!(fit(&chains, &[u64::MAX]), [0, 0, 0], "the control: all fit");
+        assert_eq!(fit(&chains, &[3 * 5461]), [0, 0, 0]);
+        // The unseen one first, to its floor.
+        assert_eq!(fit(&chains, &[3 * 5461 - 1]), [0, 0, 1]);
+        assert_eq!(fit(&chains, &[2 * 5461 + 21]), [0, 0, 4]);
+        // Then the far one's levels finer than it needs, which no view sees.
+        assert_eq!(fit(&chains, &[2 * 5461 + 20]), [0, 1, 4]);
+        assert_eq!(fit(&chains, &[5461 + 341 + 21]), [0, 2, 4]);
+        // Then a level below a need: the far one's first, then the near
+        // one's, each one below before either goes two.
+        assert_eq!(fit(&chains, &[5461 + 341 + 20]), [0, 3, 4]);
+        assert_eq!(fit(&chains, &[5461 + 85 + 20]), [1, 3, 4]);
+        assert_eq!(fit(&chains, &[1365 + 85 + 20]), [1, 4, 4]);
+        assert_eq!(fit(&chains, &[0]), [4, 4, 4], "no further than the floors");
+        // The reversed control: with the needs swapped, the other chain
+        // stays sharp, so the order follows the needs, not the index.
+        (near.need, far.need) = (Some(2), Some(0));
+        assert_eq!(fit(&[&near, &far, &unseen], &[5461 + 341 + 20]), [3, 0, 4]);
+
+        // A level no view sees goes before one it does, however coarse: a
+        // chain capped to level 3 that needs it keeps it while another
+        // drops a level finer than its need of 1.
+        let (mut capped, mut fine) = (chain(0, 64), chain(0, 64));
+        (capped.ceiling, capped.need, fine.need) = (3, Some(3), Some(1));
+        assert_eq!(fit(&[&capped, &fine], &[85 + 5461 - 1]), [3, 1]);
+
+        // The fixed point and the monotony hold as they do without needs.
+        (near.need, far.need) = (Some(0), Some(2));
+        let chains = [&near, &far, &unseen];
+        let mut last = fit(&chains, &[0]);
+        for capacity in (0..17_000).step_by(7) {
+            let targets = fit(&chains, &[capacity]);
+            let taken = totals(&chains, &targets, 1)[0];
+            assert_eq!(fit(&chains, &[taken]), targets, "under {capacity}");
             assert!(
                 targets.iter().zip(&last).all(|(t, l)| t <= l),
                 "at {capacity}"
