@@ -19,4 +19,4 @@ struct Tile {
 
 // Bakes the image, or UDIM set, `set` into the texture file `out`.
 void texture(std::vector<Tile> const &set, std::string const &space, std::string const &encoding,
-             unsigned cap, std::string const &config, std::string const &out);
+             std::string const &config, std::string const &out);

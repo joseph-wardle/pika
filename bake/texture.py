@@ -31,22 +31,22 @@ def fail(what):
 
 
 def header(path):
-    """The header's five numbers, the source's size, the wrap modes (u, v),
-    the tile table and the levels' bytes."""
+    """The header's five numbers, the wrap modes (u, v), the tile table and
+    the levels' bytes."""
     with open(path, "rb") as f:
         bytes = f.read()
-    magic, width, height, layers, levels, fmt, *rest = struct.unpack("<4s10I", bytes[:44])
+    magic, width, height, layers, levels, fmt, *rest = struct.unpack("<4s8I", bytes[:36])
     if magic != b"pika":
         raise ValueError(f"{path} is not a texture file")
-    source, wrap, entries = tuple(rest[:2]), tuple(rest[2:4]), rest[4]
-    table = struct.unpack(f"<{entries}I", bytes[44:44 + 4 * entries])
-    return width, height, layers, levels, fmt, source, wrap, table, bytes[44 + 4 * entries:]
+    wrap, entries = tuple(rest[:2]), rest[2]
+    table = struct.unpack(f"<{entries}I", bytes[36:36 + 4 * entries])
+    return width, height, layers, levels, fmt, wrap, table, bytes[36 + 4 * entries:]
 
 
 def decode(path):
     """Each level as an array of shape (height, width, channels), or for a
     float texture of several layers (layers, height, width, channels)."""
-    width, height, layers, levels, fmt, _, _, _, data = header(path)
+    width, height, layers, levels, fmt, _, _, data = header(path)
     if fmt in FLOAT:
         out, offset, w, h = [], 0, width, height
         for _ in range(levels):
@@ -99,10 +99,10 @@ def check(out):
     fixtures = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
     swatch = np.asarray(oiio.ImageBuf(os.path.join(fixtures, "swatch.png")).get_pixels(oiio.UINT8))
 
-    def baked(name, want, source=None, wrap=(0, 0), table=(0,)):
+    def baked(name, want, wrap=(0, 0), table=(0,)):
         path = os.path.join(out, name + ".texture")
-        got = header(path)[:8]
-        want = want + (source or want[:2], wrap, table)
+        got = header(path)[:7]
+        want = want + (wrap, table)
         if got != want:
             fail(f"{name}: the header says {got}, not {want}")
         return decode(path)
@@ -153,6 +153,8 @@ def check(out):
     centre = (np.clip((np.arange(8) + 0.5) / 2 - 0.5, 0, 3) + 0.5) / 4
     want = np.stack(np.meshgrid(centre, centre), -1)
     expect("mixed level 0 tile 1002", levels[0][1], want, 1e-6)
+    # Where the set's level is the smaller tile's size, the tile's own.
+    expect("mixed level 1 tile 1002", levels[1][1], textures.ramp_pixels(1.0, 4), 0)
 
     # The wrap modes a file states are kept, u then v; one stating none
     # (the ramp, the swatch) bakes black.
@@ -162,15 +164,12 @@ def check(out):
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)
 
-    # The stored levels are used from the first within the cap, the header
-    # keeping the source's size; those a filter would produce differ from
-    # them by construction (textures.py).
-    levels = baked("mips", (4, 4, 1, 3, 145), source=(8, 8))
-    for i, (level, grey) in enumerate(zip(levels, (128, 64, 32))):
-        expect(f"mips level {i}", level[..., :3], np.full(level.shape[:2] + (3,), grey), 1)
-    levels = baked("mips8", (8, 8, 1, 4, 145))
-    expect("mips8 level 0", levels[0][..., :3], swatch, 2)
-    expect("mips8 level 1", levels[1][..., :3], np.full((4, 4, 3), 128), 1)
+    # Every level is kept, the stored ones as stored: those a filter would
+    # produce differ from them by construction (textures.py).
+    levels = baked("mips", (8, 8, 1, 4, 145))
+    expect("mips level 0", levels[0][..., :3], swatch, 2)
+    for i, grey in enumerate((128, 64, 32), 1):
+        expect(f"mips level {i}", levels[i][..., :3], np.full(levels[i].shape[:2] + (3,), grey), 1)
 
 
 if __name__ == "__main__":

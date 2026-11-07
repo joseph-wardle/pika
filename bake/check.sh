@@ -94,42 +94,37 @@ fi
 grep -q "u_time" "$OUT/time.err" || fail "time: the error does not name the uniform"
 
 texture() {
-    "$BAKE" texture "$2" "$3" "$4" "" "$OUT/textures/$5.texture" 0 "$FIXTURES/$1" || fail "$5: texture failed"
+    "$BAKE" texture "$2" "$3" "" "$OUT/textures/$4.texture" 0 "$FIXTURES/$1" || fail "$4: texture failed"
 }
-texture ramp.exr raw float 4096 ramp
+texture ramp.exr raw float ramp
 cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp.texture" || fail "ramp: the bake differs from the reference"
-texture swatch.png srgb_texture color 4096 swatch
-texture swatch.png raw color 4096 swatch_raw
-texture swatch.png raw single 4096 single
-texture mips.exr raw data 4 mips
-texture wrapped.exr raw data 4096 wrapped
-texture mips.exr raw data 8 mips8
-# A cap of 0 is none: the whole chain, as under a cap the source fits.
-texture mips.exr raw data 4096 mips4096
-texture mips.exr raw data 0 mips0
-cmp "$OUT/textures/mips4096.texture" "$OUT/textures/mips0.texture" || fail "mips0: a cap of 0 is not none"
+texture swatch.png srgb_texture color swatch
+texture swatch.png raw color swatch_raw
+texture swatch.png raw single single
+texture mips.exr raw data mips
+texture wrapped.exr raw data wrapped
 # "auto" is sRGB for an 8-bit image and raw for a float one.
-texture swatch.png auto color 4096 swatch_auto
+texture swatch.png auto color swatch_auto
 cmp "$OUT/textures/swatch.texture" "$OUT/textures/swatch_auto.texture" || fail "swatch_auto: auto is not sRGB for a PNG"
-texture ramp.exr auto float 4096 ramp_auto
+texture ramp.exr auto float ramp_auto
 cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_auto: auto is not raw for an EXR"
 # A JPEG reads, and a space the config knows beyond sRGB is converted.
-texture greys.jpg auto color 4096 greys
-texture acescg.exr acescg color 4096 acescg
+texture greys.jpg auto color greys
+texture acescg.exr acescg color acescg
 # A UDIM set, its tiles listed as the renderer lists them, is one array, a
 # layer per tile, with a table from tile to layer; a tile numbered past the
 # hundred is refused.
-"$BAKE" texture raw float 4096 "" "$OUT/textures/udim.texture" 1001 "$FIXTURES/udim.1001.exr" 1012 "$FIXTURES/udim.1012.exr" ||
+"$BAKE" texture raw float "" "$OUT/textures/udim.texture" 1001 "$FIXTURES/udim.1001.exr" 1012 "$FIXTURES/udim.1012.exr" ||
     fail "udim: texture failed"
-"$BAKE" texture raw float 4096 "" "$OUT/textures/mixed.texture" 1001 "$FIXTURES/mixed.1001.exr" 1002 "$FIXTURES/mixed.1002.exr" ||
+"$BAKE" texture raw float "" "$OUT/textures/mixed.texture" 1001 "$FIXTURES/mixed.1001.exr" 1002 "$FIXTURES/mixed.1002.exr" ||
     fail "mixed: texture failed"
-if "$BAKE" texture raw float 4096 "" "$OUT/textures/none.texture" 1101 "$FIXTURES/udim.1001.exr" 2> "$OUT/textures/none.err"; then
+if "$BAKE" texture raw float "" "$OUT/textures/none.texture" 1101 "$FIXTURES/udim.1001.exr" 2> "$OUT/textures/none.err"; then
     fail "none: a tile numbered 1101 baked"
 fi
 grep -q "1101" "$OUT/textures/none.err" || fail "none: the error does not name the tile"
 ! cmp -s "$OUT/textures/swatch.texture" "$OUT/textures/swatch_raw.texture" || fail "swatch_raw: raw and sRGB bake alike, so the auto checks prove nothing"
 "$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
-if "$BAKE" texture bogus color 4096 "" "$OUT/textures/bogus.texture" 0 "$FIXTURES/swatch.png" 2> "$OUT/textures/bogus.err"; then
+if "$BAKE" texture bogus color "" "$OUT/textures/bogus.texture" 0 "$FIXTURES/swatch.png" 2> "$OUT/textures/bogus.err"; then
     fail "bogus: a texture in an unknown colour space baked"
 fi
 grep -q "bogus" "$OUT/textures/bogus.err" || fail "bogus: the error does not name the colour space"

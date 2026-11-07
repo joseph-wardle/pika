@@ -400,7 +400,7 @@ impl Device<'_> {
     /// allocations come from its heap alone, so each is checked on its
     /// own: a GPU's second device-local heap, the small window the CPU
     /// writes through, holds no textures however much of it is free.
-    pub fn heaps(&self) ->ll`[] Vec<Heap> {
+    pub fn heaps(&self) -> Vec<Heap> {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut properties = vk::PhysicalDeviceMemoryProperties2::default();
         if self.memory_budget {

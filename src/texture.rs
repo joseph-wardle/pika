@@ -19,7 +19,8 @@ pub struct Texture {
     pub height: u32,
     pub layers: u32,
     pub format: vk::Format,
-    /// The source's width and height before the cap, a set's largest tile's.
+    /// Its baked width and height before the cap (`cap`), a set's largest
+    /// tile's.
     pub source: [u32; 2],
     /// The wrap modes the source's metadata states, u then v, in the image
     /// nodedefs' enumeration (black, clamp, periodic, mirror), black where
@@ -51,6 +52,16 @@ impl Texture {
     /// Whether the cap shrank it: its source was larger.
     pub fn capped(&self) -> bool {
         self.source != [self.width, self.height]
+    }
+
+    /// Drops its levels with a side over `cap` texels, 0 for none: the file
+    /// holds every level, so a cap reads fewer of it and bakes nothing.
+    pub fn cap(&mut self, cap: u32) {
+        while cap > 0 && self.levels.len() > 1 && self.width.max(self.height) > cap {
+            self.levels.remove(0);
+            self.width = (self.width / 2).max(1);
+            self.height = (self.height / 2).max(1);
+        }
     }
 
     /// Adds into `needs`, bytes by heap index, what loading it allocates as
@@ -100,7 +111,9 @@ const TILES: vk::BufferUsageFlags = vk::BufferUsageFlags::STORAGE_BUFFER;
 const STAGING: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_SRC;
 
 /// The longest header: the fixed words and a set's tile table.
-const HEADER: usize = 44 + 4 * 100;
+const HEADER: usize = FIXED + 4 * 100;
+/// "pika" and eight words before the tile table.
+const FIXED: usize = 36;
 
 /// A 1×1 texture of `texel`: what an image whose file is missing is drawn
 /// as (`bake::build`). Periodic, so a node reading the file's wrap modes
@@ -140,21 +153,20 @@ pub fn parse(file: Vec<u8>) -> Result<Texture, String> {
 /// The texture whose file of `len` bytes begins with `head`, the file
 /// itself or at least its `HEADER` bytes, its levels in `contents`.
 fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String> {
-    if head.len() < 44 || &head[..4] != b"pika" {
+    if head.len() < FIXED || &head[..4] != b"pika" {
         return Err("is not a baked texture".into());
     }
     let word = |i: usize| u32::from_le_bytes(head[4 + 4 * i..8 + 4 * i].try_into().unwrap());
     let (width, height, layers, levels) = (word(0), word(1), word(2), word(3));
     let format = vk::Format::from_raw(word(4) as i32);
-    let source = [word(5), word(6)];
-    let wrap = [word(7), word(8)];
-    let entries = word(9) as usize;
-    if entries != 1 && entries != 100 || head.len() < 44 + 4 * entries {
+    let wrap = [word(5), word(6)];
+    let entries = word(7) as usize;
+    if entries != 1 && entries != 100 || head.len() < FIXED + 4 * entries {
         return Err(format!(
             "has a tile table of {entries} entries, not 1 or 100"
         ));
     }
-    let tiles: Vec<u32> = (0..entries).map(|i| word(10 + i)).collect();
+    let tiles: Vec<u32> = (0..entries).map(|i| word(8 + i)).collect();
     if tiles
         .iter()
         .any(|&layer| layer != u32::MAX && layer >= layers)
@@ -169,12 +181,6 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
     if width == 0 || height == 0 || layers == 0 {
         return Err(format!("is {width}×{height} with {layers} layers"));
     }
-    if source[0] < width || source[1] < height {
-        return Err(format!(
-            "is {width}×{height} from a source of {}×{}",
-            source[0], source[1]
-        ));
-    }
     if let Some(mode) = wrap.iter().find(|&&m| m > 3) {
         return Err(format!(
             "states the wrap mode {mode}, not black, clamp, periodic or mirror"
@@ -187,7 +193,7 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
         ));
     }
     let mut ranges = Vec::new();
-    let (mut offset, mut w, mut h) = (44 + 4 * entries, width, height);
+    let (mut offset, mut w, mut h) = (FIXED + 4 * entries, width, height);
     for _ in 0..levels {
         let size = level_size(format, w, h).unwrap() * layers as usize;
         ranges.push(offset..offset + size);
@@ -207,7 +213,7 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
         height,
         layers,
         format,
-        source,
+        source: [width, height],
         wrap,
         tiles,
         levels: ranges,
@@ -575,10 +581,10 @@ pub mod tests {
         assert_eq!(t.wrap, [0, 0], "the ramp states no wrap mode: black");
         assert_eq!(t.tiles, [0]);
         assert_eq!(t.levels.len(), 4);
-        assert_eq!(t.levels[0].start, 48);
+        assert_eq!(t.levels[0].start, 40);
         let bytes = levels(&t);
         let texel = |level: usize, x: usize, y: usize| {
-            let at = t.levels[level].start - 48 + (y * (8 >> level) + x) * 8;
+            let at = t.levels[level].start - 40 + (y * (8 >> level) + x) * 8;
             let f = |i: usize| f32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap());
             [f(0), f(4)]
         };
@@ -597,16 +603,13 @@ pub mod tests {
         bad[20] = 0;
         assert!(parse(bad).is_err(), "an unknown format");
         let mut bad = RAMP.to_vec();
-        bad[24] = 4;
-        assert!(parse(bad).is_err(), "a source smaller than the bake");
-        let mut bad = RAMP.to_vec();
-        bad[36] = 4;
+        bad[28] = 4;
         assert!(parse(bad).is_err(), "a wrap mode past mirror");
         let mut bad = RAMP.to_vec();
-        bad[40] = 2;
+        bad[32] = 2;
         assert!(parse(bad).is_err(), "a table of two entries");
         let mut bad = RAMP.to_vec();
-        bad[44] = 1;
+        bad[36] = 1;
         assert!(parse(bad).is_err(), "a tile past the layers");
     }
 
@@ -616,7 +619,7 @@ pub mod tests {
         std::fs::write(&path, RAMP).unwrap();
         let t = read(&path).unwrap();
         assert!(matches!(t.contents, Contents::Open(_)));
-        assert_eq!(levels(&t), RAMP[48..], "the levels, not the header");
+        assert_eq!(levels(&t), RAMP[40..], "the levels, not the header");
 
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(RAMP.len() as u64 - 8).unwrap();
@@ -625,7 +628,7 @@ pub mod tests {
             t.read_levels(&mut bytes).is_err(),
             "cut short after its header was read"
         );
-        file.set_len(48).unwrap();
+        file.set_len(40).unwrap();
         let why = read(&path).err().unwrap();
         assert!(
             why.contains("holds 0 bytes of levels where 680 are expected"),
@@ -646,14 +649,14 @@ pub mod tests {
             (vk::Format::BC7_SRGB_BLOCK, [32, 16, 16]),
         ] {
             let mut file = b"pika".to_vec();
-            let words = [5, 3, 2, 3, format.as_raw() as u32, 5, 3, 0, 0, 1, 0];
+            let words = [5, 3, 2, 3, format.as_raw() as u32, 0, 0, 1, 0];
             for word in words {
                 file.extend_from_slice(&word.to_le_bytes());
             }
             let size: usize = sizes.iter().map(|s| 2 * s).sum();
-            file.resize(48 + size, 7);
+            file.resize(40 + size, 7);
             let t = parse(file.clone()).unwrap();
-            let mut start = 48;
+            let mut start = 40;
             for (level, s) in t.levels.iter().zip(sizes) {
                 assert_eq!(*level, start..start + 2 * s, "{format:?}");
                 start = level.end;
@@ -669,7 +672,7 @@ pub mod tests {
         // Two 1×1 R32_SFLOAT layers, periodic in u, clamped in v, tiles
         // 1001 and 1012.
         let mut file = b"pika".to_vec();
-        for word in [1u32, 1, 2, 1, 100, 1, 1, 2, 1, 100] {
+        for word in [1u32, 1, 2, 1, 100, 2, 1, 100] {
             file.extend_from_slice(&word.to_le_bytes());
         }
         let mut table = [u32::MAX; 100];
@@ -683,9 +686,56 @@ pub mod tests {
         assert_eq!((t.layers, t.tiles.len()), (2, 100));
         assert_eq!(t.wrap, [2, 1]);
         assert_eq!((t.tiles[0], t.tiles[11], t.tiles[1]), (0, 1, u32::MAX));
-        assert_eq!(t.levels, vec![444..452]);
+        assert_eq!(t.levels, vec![436..444]);
         file.truncate(file.len() - 4);
         assert!(parse(file).is_err(), "a layer missing");
+    }
+
+    #[test]
+    fn a_cap_drops_the_levels_over_it() {
+        let ramp = || parse(RAMP.to_vec()).unwrap();
+        let mut t = ramp();
+        t.cap(4);
+        assert_eq!((t.width, t.height, t.levels.len()), (4, 4, 3));
+        assert_eq!(t.source, [8, 8]);
+        assert!(t.capped());
+        // The ramp's level 1, which holds its own texel centres at 4×4.
+        let bytes = levels(&t);
+        assert_eq!(bytes, RAMP[40 + 8 * 8 * 8..], "the levels from 4×4 on");
+        let texel = |x: usize, y: usize| {
+            let at = (y * 4 + x) * 8;
+            let f = |i: usize| f32::from_le_bytes(bytes[at + i..at + i + 4].try_into().unwrap());
+            [f(0), f(4)]
+        };
+        assert_eq!(texel(1, 2), [1.5 / 4.0, 2.5 / 4.0]);
+        t.cap(1);
+        assert_eq!((t.width, t.height, t.levels.len()), (1, 1, 1));
+
+        // The controls: a cap of none, or one the source fits, keeps all.
+        for cap in [0, 8, 4096] {
+            let mut t = ramp();
+            t.cap(cap);
+            assert_eq!(
+                (t.width, t.levels.len(), t.bytes()),
+                (8, 4, 680),
+                "cap {cap}"
+            );
+            assert!(!t.capped(), "cap {cap}");
+        }
+
+        // A 5×3 image: its levels are 5×3, 2×1 and 1×1, so a cap of 4 or
+        // 3 keeps 2×1, as the bake tool's halving once did.
+        let mut file = b"pika".to_vec();
+        for word in [5u32, 3, 1, 3, 100, 0, 0, 1, 0] {
+            file.extend_from_slice(&word.to_le_bytes());
+        }
+        file.resize(40 + 4 * (15 + 2 + 1), 0);
+        for cap in [4, 3, 2] {
+            let mut t = parse(file.clone()).unwrap();
+            t.cap(cap);
+            assert_eq!((t.width, t.height, t.levels.len()), (2, 1, 2), "cap {cap}");
+            assert_eq!(t.levels[0], 100..108);
+        }
     }
 
     #[test]

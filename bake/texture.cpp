@@ -1,9 +1,10 @@
 // The texture job: an image as authored in, or a UDIM set as the renderer
 // lists its tiles, the one file the renderer uploads out. OpenImageIO
-// decodes the source; its stored mip levels at or below `cap` texels on a
-// side are kept and the missing ones are built by box filtering;
-// OpenColorIO converts the declared colour space to lin_rec709, Pika's
-// working space; then the levels are encoded:
+// decodes the source; its stored mip levels are kept and the missing ones
+// are built by box filtering, every level down to 1×1, so one bake serves
+// every cap the renderer loads under (src/texture.rs); OpenColorIO
+// converts the declared colour space to lin_rec709, Pika's working space;
+// then the levels are encoded:
 //
 //   float    32-bit floats, one, two or four channels as the source has them
 //   color    BC7, stored sRGB-encoded so that sampling decodes to linear
@@ -11,13 +12,14 @@
 //   single   BC4, the first channel at linear 8 bits
 //
 // A set's tiles are numbered 1001 to 1100, each a layer in the order
-// given, all at the largest tile's size after the cap, smaller ones
-// enlarged bilinearly, so the renderer samples one array
+// given, all at the largest tile's size: a smaller tile's levels are its
+// own where they are of the set's level's size, and enlarged bilinearly
+// from its level 0 where the set's are larger, so the renderer samples one
+// array
 // (bake/libraries/stdlib/genslang/lib/mx_texture.slang).
 //
 // The file is a header of little-endian u32: "pika", width, height, layers,
-// levels, the VkFormat, the source's width and height before the cap (a
-// set's largest tile's), the wrap modes the source states, u then v (black,
+// levels, the VkFormat, the wrap modes the source states, u then v (black,
 // clamp, periodic, mirror), then the tile table's length and the table: one
 // entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
 // or 0xFFFFFFFF where the set lacks it. Then each level in order, every
@@ -69,37 +71,15 @@ struct Level {
 
 unsigned half(unsigned n) { return std::max(1u, n / 2); }
 
-// Whether a level of `width` by `height` is within the cap, 0 being none.
-bool fits(unsigned width, unsigned height, unsigned cap) {
-    return cap == 0 || (width <= cap && height <= cap);
-}
-
-// The size the source's first stored level at or below the cap (or its
-// smallest) takes once halved to fit the cap: the size it bakes at. And
-// the source's own, its level 0's, before the cap.
-void extent(std::string const &path, unsigned cap, unsigned &width, unsigned &height,
-            unsigned &source_width, unsigned &source_height) {
+// Widens `width` and `height` to the source's level 0, so a set bakes at
+// its largest tile's size.
+void extent(std::string const &path, unsigned &width, unsigned &height) {
     std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
     if (!in)
         throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
-    unsigned w = 0, h = 0;
-    for (int m = 0; in->seek_subimage(0, m); ++m) {
-        w = in->spec().width;
-        h = in->spec().height;
-        if (m == 0) {
-            source_width = std::max(source_width, w);
-            source_height = std::max(source_height, h);
-        }
-        if (fits(w, h, cap))
-            break;
-    }
+    width = std::max(width, unsigned(in->spec().width));
+    height = std::max(height, unsigned(in->spec().height));
     in->close();
-    while (!fits(w, h, cap)) {
-        w = half(w);
-        h = half(h);
-    }
-    width = std::max(width, w);
-    height = std::max(height, h);
 }
 
 // The wrap modes the file states in its `wrapmodes` attribute, which
@@ -148,25 +128,15 @@ Level read(OIIO::ImageInput &in, std::string const &path) {
     return level;
 }
 
-// The source's stored levels from the first at or below the cap, or from
-// the smallest when none is; later levels that do not halve the one before
-// (a ripmap's) are left to the filter.
-std::vector<Level> stored(std::string const &path, unsigned cap, int &channels,
-                          OIIO::TypeDesc &type) {
+// The source's stored levels; those that do not halve the one before (a
+// ripmap's) are left to the filter.
+std::vector<Level> stored(std::string const &path, int &channels, OIIO::TypeDesc &type) {
     std::unique_ptr<OIIO::ImageInput> in = OIIO::ImageInput::open(path);
     if (!in)
         throw std::runtime_error("cannot open " + path + ": " + OIIO::geterror());
-    int first = -1, count = 0;
-    for (; in->seek_subimage(0, count); ++count) {
-        if (first < 0 && fits(in->spec().width, in->spec().height, cap))
-            first = count;
-    }
-    if (first < 0)
-        first = count - 1;
     std::vector<Level> levels;
-    for (int m = first; m < count; ++m) {
-        in->seek_subimage(0, m);
-        if (m == first) {
+    for (int m = 0; in->seek_subimage(0, m); ++m) {
+        if (m == 0) {
             channels = std::min(in->spec().nchannels, 4);
             type = in->spec().format;
         }
@@ -379,7 +349,7 @@ std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string
 } // namespace
 
 void texture(std::vector<Tile> const &set, std::string const &space, std::string const &encoding,
-             unsigned cap, std::string const &config, std::string const &out) {
+             std::string const &config, std::string const &out) {
     if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
         throw std::runtime_error("the encoding " + encoding + " is not float, color, data or single");
     for (Tile const &tile : set) {
@@ -388,9 +358,9 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
             throw std::runtime_error("the tile " + std::to_string(tile.number) + " of " + tile.path +
                                      " is not 1001 to 1100, or 0 for an image on its own");
     }
-    unsigned width = 0, height = 0, source_width = 0, source_height = 0;
+    unsigned width = 0, height = 0;
     for (Tile const &tile : set)
-        extent(tile.path, cap, width, height, source_width, source_height);
+        extent(tile.path, width, height);
     std::array<uint32_t, 2> modes = wrap(set.front().path);
 
     // One tile at a time, keeping only its encoded bytes: a 4K tile is 256
@@ -403,7 +373,7 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
     for (Tile const &tile : set) {
         int tile_channels = 0;
         OIIO::TypeDesc type;
-        std::vector<Level> levels = stored(tile.path, cap, tile_channels, type);
+        std::vector<Level> levels = stored(tile.path, tile_channels, type);
         if (!conversion) {
             channels = tile_channels;
             // USD's "auto": sRGB for 8-bit images, raw for the rest. The
@@ -416,12 +386,22 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
             conversion = std::make_unique<Conversion>(resolved, config);
         }
         conversion->apply(levels);
-        while (!fits(levels.front().width, levels.front().height, cap))
-            levels.front() = halve(levels.front());
-        if (levels.front().width != width || levels.front().height != height)
-            levels = {enlarge(levels.front(), width, height)};
         while (levels.back().width > 1 || levels.back().height > 1)
             levels.push_back(halve(levels.back()));
+        if (levels.front().width != width || levels.front().height != height) {
+            // A smaller tile's own levels where they match the set's, so a
+            // cap at its size loads them as a bake at that size did.
+            std::vector<Level> chain;
+            for (unsigned w = width, h = height;; w = half(w), h = half(h)) {
+                auto own = std::find_if(levels.begin(), levels.end(), [&](Level const &level) {
+                    return level.width == w && level.height == h;
+                });
+                chain.push_back(own != levels.end() ? *own : enlarge(levels.front(), w, h));
+                if (w == 1 && h == 1)
+                    break;
+            }
+            levels = std::move(chain);
+        }
         layers.push_back(encode(levels, encoding, channels, format));
     }
 
@@ -436,8 +416,6 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
     put(file, uint32_t(set.size()));
     put(file, uint32_t(layers.front().size()));
     put(file, format);
-    put(file, source_width);
-    put(file, source_height);
     put(file, modes[0]);
     put(file, modes[1]);
     put(file, uint32_t(table.size()));

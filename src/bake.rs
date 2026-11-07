@@ -42,11 +42,24 @@ pub struct Generated {
 /// a missing file's node draws instead (`fallback`).
 pub struct Baked {
     /// What the renderer keys the loaded textures by: its file under the
-    /// cache, or `fallback` and its texel.
+    /// cache, with the size it loads at when a cap shrank it, or `fallback`
+    /// and its texel.
     pub key: String,
     pub texture: Texture,
     /// Whether the bake tool ran now rather than the cache answering.
     pub fresh: bool,
+}
+
+impl Baked {
+    /// Drops its levels over `cap` texels a side (`Texture::cap`), keyed
+    /// apart from the same file loaded whole.
+    pub fn cap(&mut self, cap: u32) {
+        self.texture.cap(cap);
+        if self.texture.capped() {
+            let (width, height) = (self.texture.width, self.texture.height);
+            self.key += &format!(" at {width}×{height}");
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -152,7 +165,7 @@ impl Bake {
     }
 
     /// Bakes `source`'s image, or the UDIM set its `<UDIM>` pattern names,
-    /// unless the cache holds it, and reads it.
+    /// unless the cache holds it, and reads it, every level (`Baked::cap`).
     pub fn texture(&self, source: &Source) -> Result<Baked, String> {
         let set = tiles(Path::new(&source.file))?;
         let path = self.texture_path(source, &set)?;
@@ -176,7 +189,7 @@ impl Bake {
         let mut command = tool();
         command
             .arg("texture")
-            .args([&source.space, source.encoding, &source.cap.to_string()])
+            .args([&source.space, source.encoding])
             .arg(&self.config)
             .arg(&tmp);
         for (number, tile) in &set {
@@ -200,8 +213,9 @@ impl Bake {
     /// Where `source`'s bake lives, its files being `set` (`tiles`): under
     /// `textures`, mirroring the source's own path so one asset's bakes can
     /// be found and deleted, named by a hash of each file's name, size and
-    /// modification time, the parameters, the config and the tool, so an
-    /// edited source, a tile added or a changed setting misses.
+    /// modification time, the space and encoding, the config and the tool,
+    /// so an edited source, a tile added or a changed setting misses. Not
+    /// the cap: the bake holds every level, and a cap loads fewer.
     pub fn texture_path(&self, source: &Source, set: &[(u32, PathBuf)]) -> Result<PathBuf, String> {
         let mut state = Vec::new();
         for (_, file) in set {
@@ -225,7 +239,6 @@ impl Bake {
             b"\0",
             self.config.as_bytes(),
             b"\0",
-            &source.cap.to_le_bytes(),
             &self.tool.to_le_bytes(),
         ]);
         let source = Path::new(&source.file);
@@ -605,7 +618,8 @@ fn build(
             textures.push(fallback(&source.default));
             continue;
         }
-        let baked = (bake.texture(source)).map_err(|e| format!("{path}'s {input}: {e}"))?;
+        let mut baked = (bake.texture(source)).map_err(|e| format!("{path}'s {input}: {e}"))?;
+        baked.cap(source.cap);
         textures.push(baked);
     }
     let compiled = shader::surface(&generated.dir)?;
@@ -717,7 +731,6 @@ mod tests {
         for (space, encoding, cap, config, tool) in [
             ("raw", "color", 4096, "", 1),
             ("srgb_texture", "data", 4096, "", 1),
-            ("srgb_texture", "color", 1024, "", 1),
             ("srgb_texture", "color", 4096, "studio.ocio", 1),
             ("srgb_texture", "color", 4096, "", 2),
         ] {
@@ -726,6 +739,12 @@ mod tests {
                 key(&bake(config, tool), &source, space, encoding, cap).unwrap()
             );
         }
+
+        // A cap is not part of the key: one bake serves every cap.
+        assert_eq!(
+            path,
+            key(&bake("", 1), &source, "srgb_texture", "color", 1024).unwrap()
+        );
 
         // The control: the same file saved again is another texture.
         let file = std::fs::File::options().write(true).open(&source).unwrap();
