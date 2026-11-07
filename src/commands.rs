@@ -102,6 +102,11 @@ impl Commands {
         Ok(self.buffer)
     }
 
+    /// The buffer `begin` began recording.
+    pub fn buffer(&self) -> vk::CommandBuffer {
+        self.buffer
+    }
+
     /// Names the work recorded since the last mark (or `begin`) `label`,
     /// timing it on the GPU, inside or outside rendering.
     pub fn mark(&mut self, label: &'static str) -> Result<(), String> {

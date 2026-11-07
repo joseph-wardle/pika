@@ -23,7 +23,8 @@ BUDGET_MS = 41.67
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
     ("shade", ("gpu_shade_ms",), 8.0),
-    ("update", ("gpu_update_ms",), 1.0),
+    ("update", ("gpu_upload_ms", "gpu_subdiv_ms", "gpu_smooth_ms", "gpu_tangent_ms",
+                "gpu_texture_ms"), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
     ("cpu", ("record_ms", "wait_ms"), 2.0),
     ("period", ("period_ms",), BUDGET_MS),

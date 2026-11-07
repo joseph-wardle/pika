@@ -376,7 +376,7 @@ mod tests {
             times: Times {
                 wait: ms(5.25),
                 spans: vec![
-                    ("update", ms(0.875)),
+                    ("upload", ms(0.875)),
                     ("cull", ms(0.125)),
                     ("draw", ms(2.0)),
                     ("readback", ms(1.375)),
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn frame_line_is_key_value_pairs_named_by_mark() {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
-             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 gpu_update_ms 0.875 gpu_cull_ms 0.125 \
+             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \

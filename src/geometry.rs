@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ash::vk;
 
+use crate::commands::Commands;
 use crate::gpu::{self, Buffer};
 use crate::smooth::{self, Smooth};
 use crate::store::{
@@ -282,19 +283,19 @@ impl Geometry {
         })
     }
 
-    /// Records into `cb` the uploads of what moved, the refined points,
-    /// smooth normals and tangents of meshes whose points moved, and
-    /// barriers making them visible to the mesh pass, which draws the
-    /// meshes of render `tags` (all of them when there are none). No GPU
-    /// work may be pending: buffers are replaced and the staging buffer
-    /// rewritten.
+    /// Records into `commands` the uploads of what moved, the refined
+    /// points, smooth normals and tangents of meshes whose points moved,
+    /// and barriers making them visible to the mesh pass, which draws the
+    /// meshes of render `tags` (all of them when there are none), marking
+    /// each step every frame, run or not. No GPU work may be pending:
+    /// buffers are replaced and the staging buffer rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
         store: &Store,
         moved: &Moved,
         tags: &[String],
-        cb: vk::CommandBuffer,
+        commands: &mut Commands,
     ) -> Result<Update, String> {
         let rebuilt = moved.layout || self.layout.is_none();
         let tables = match rebuilt {
@@ -333,7 +334,8 @@ impl Geometry {
         if let Some(t) = &rewritten {
             copies.extend(draw_uploads(t, draws));
         }
-        let bytes = upload(device, &mut self.staging, &copies, cb)?;
+        let bytes = upload(device, &mut self.staging, &copies, commands.buffer())?;
+        commands.mark("upload")?;
 
         let rewrite = match rebuilt {
             true => Rewrite {
@@ -344,7 +346,7 @@ impl Geometry {
             },
             false => moved_ranges(&layout.ranges, moved),
         };
-        self.refine(device, cb, layout, &rewrite);
+        self.refine(device, commands, layout, &rewrite)?;
         Ok(Update {
             bytes,
             layout: rebuilt,
@@ -363,14 +365,16 @@ impl Geometry {
 
     /// Records the stencil pass over the refined texcoord values and points
     /// in `rewrite`, the smooth normal pass over its points and the tangent
-    /// pass over its vertices, each with the barrier its readers need.
+    /// pass over its vertices, each with the barrier its readers need and
+    /// a mark after it.
     fn refine(
         &self,
         device: &gpu::Device,
-        cb: vk::CommandBuffer,
+        commands: &mut Commands,
         layout: &Layout,
         rewrite: &Rewrite,
-    ) {
+    ) -> Result<(), String> {
+        let cb = commands.buffer();
         if !rewrite.texcoords.is_empty() {
             let addresses =
                 (layout.texcoord_stencils).addresses(&layout.cage_texcoord, &layout.texcoord);
@@ -381,6 +385,7 @@ impl Geometry {
             self.subdiv.record(cb, addresses, 3, &rewrite.refined);
             barrier(device, cb, vk::PipelineStageFlags2::COMPUTE_SHADER);
         }
+        commands.mark("subdiv")?;
         if !rewrite.points.is_empty() {
             let addresses = smooth::Addresses {
                 points: layout.points.address,
@@ -390,6 +395,7 @@ impl Geometry {
             };
             self.smooth.record(cb, addresses, &rewrite.points);
         }
+        commands.mark("smooth")?;
         let summed = !(rewrite.texcoords.is_empty() && rewrite.points.is_empty());
         if !rewrite.vertices.is_empty() {
             if summed {
@@ -412,6 +418,7 @@ impl Geometry {
         if summed || !rewrite.vertices.is_empty() {
             barrier(device, cb, vk::PipelineStageFlags2::VERTEX_SHADER);
         }
+        commands.mark("tangent")
     }
 
     /// The buffers to draw from, once `update` has run.

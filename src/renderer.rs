@@ -339,12 +339,16 @@ impl Renderer {
             }
         };
         let cb = self.commands.begin()?;
-        let update =
-            self.geometry
-                .update(&self.device, &self.store, &moved, &inputs.render_tags, cb)?;
+        let update = (self.geometry).update(
+            &self.device,
+            &self.store,
+            &moved,
+            &inputs.render_tags,
+            &mut self.commands,
+        )?;
         let shading =
             (self.shade).update(&self.device, &self.store, &moved, inputs.texture_cap, cb)?;
-        self.commands.mark("update")?;
+        self.commands.mark("texture")?;
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
