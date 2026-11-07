@@ -100,7 +100,8 @@ CAPPED = {"capped": 1}
 # The scenes rendered under PIKA_BUDGET, bytes standing in for the device's
 # memory budget: at one byte no texture fits, so each is lowered to its
 # floor, its first level within TAIL texels a side (src/texture.rs), which
-# both hosts must warn of in one line.
+# both hosts must warn of in one line, and of the blur in another once a
+# frame draws it coarser than the camera needs (BLURRED).
 BUDGET = {"lowered": 1}
 TAIL = 4
 # The scenes whose texture husk draws coarser than the camera needs, on the
@@ -1224,6 +1225,13 @@ def differs(stage, host):
     return purposed or (settings and not host.settings) or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
 
 
+def budget_warnings(name):
+    """The warnings of the memory budget scene `name` must print: none, or
+    one that it is past it, and one more of the blur once a frame draws a
+    texture coarser than the camera needs."""
+    return int(name in BUDGET) + int(any(BLURRED.get(name, (0, 0))))
+
+
 def warned(log, name, capped, lowered):
     """Failures unless `log` holds `capped` warnings of textures the cap
     shrinks and `lowered` of textures lowered to fit."""
@@ -1289,7 +1297,7 @@ def main():
             renders, log = husks[s].result()
             print(f"{name} in husk ({log}):")
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
-            failures += f + warned(log, name, CAPPED.get(name, 0), int(name in BUDGET))
+            failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name))
             failures += blurred(log.replace(".husk.log", ".husk.stats"), name)
             changed |= c
             if s not in records:
@@ -1297,7 +1305,7 @@ def main():
             renders, log = records[s].result()
             print(f"{name} in usdrecord ({log}):")
             failures += check(f"{name} (usdrecord)", renders, recorded.get(s, refs[s]).result(), ["color"])[0]
-            failures += warned(log, f"{name} (usdrecord)", 0, int(name in BUDGET))
+            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name))
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")

@@ -343,6 +343,18 @@ struct Loaded {
     failing: bool,
 }
 
+impl Loaded {
+    /// Whether its image holds coarser levels than the finest a view
+    /// needed, within `cap`: what fitting it to the memory blurs.
+    fn blurred(&self, cap: u32) -> bool {
+        let need = self
+            .chain
+            .need
+            .map(|level| level.max(self.texture.first(cap)));
+        need.is_some_and(|level| level < self.image.first)
+    }
+}
+
 /// A raise's new image, uploaded over frames: its levels' bytes before
 /// `done` are copied.
 struct Incoming {
@@ -1182,23 +1194,27 @@ impl Textures {
             let unestimated =
                 loaded.unestimated > 0 && self.frame - loaded.unestimated < need::WINDOW;
             needs.unestimated += usize::from(unestimated);
-            match loaded.chain.need {
-                None => needs.unseen += 1,
-                Some(level) if level.max(loaded.texture.first(self.cap)) < loaded.image.first => {
-                    needs.blurred += 1
-                }
-                _ => {}
-            }
+            needs.unseen += usize::from(loaded.chain.need.is_none());
+            needs.blurred += usize::from(loaded.blurred(self.cap));
         }
         needs
     }
 
-    /// The textures lowered past the cap to fit, a held raise included,
-    /// and the longest side of the finest level any of them holds.
-    pub fn lowered(&self) -> (usize, u32) {
-        let lowered = (self.loaded.values()).filter(|l| l.target > l.texture.first(self.cap));
-        let finest = lowered.clone().map(|l| l.chain.extent(l.target)).max();
-        (lowered.count(), finest.unwrap_or(0))
+    /// The textures lowered past the cap to fit, a held raise included.
+    pub fn lowered(&self) -> usize {
+        (self.loaded.values())
+            .filter(|l| l.target > l.texture.first(self.cap))
+            .count()
+    }
+
+    /// The longest side of the finest level any blurred texture's image
+    /// holds (`Needs::blurred`), 0 when none is.
+    pub fn blurred_side(&self) -> u32 {
+        (self.loaded.values())
+            .filter(|l| l.blurred(self.cap))
+            .map(|l| l.chain.extent(l.image.first))
+            .max()
+            .unwrap_or(0)
     }
 
     /// The bytes the textures take past the room their heaps have, at the

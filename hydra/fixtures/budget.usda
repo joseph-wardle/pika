@@ -7,12 +7,13 @@
 
 # A texture past the device's memory budget, here a budget of one byte that
 # nothing fits: its material builds, its 8×8 texture is lowered to its 4×4
-# floor, with one warning saying by how much textures still exceed it,
-# and the device goes on rendering. The edit disconnects the texture.
+# floor, which blurs nothing since no view draws it, with one warning
+# saying by how much textures still exceed it, and the device goes on
+# rendering. The edit disconnects the texture.
 #
 # compiles: 1 then 1
 # bakes: 1 then 0
-# warned: 1 texture was lowered to 4 texels a side or less to fit the device's memory budget, and textures still take
+# warned: none of the textures can be lowered to fit the device's memory budget, and textures still take
 # budget: 1
 def Xform "world"
 {
