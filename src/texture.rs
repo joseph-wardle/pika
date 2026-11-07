@@ -2,11 +2,14 @@
 //! set under the cache, laid out as bake/texture.cpp says, as the renderer
 //! reads it, the image it is uploaded to, holding the levels within the
 //! texture cap, and the set of them loaded for the materials drawn, with
-//! the samplers they are read through. A changed cap swaps each image for
-//! one of its new levels, read from the file, a frame's worth of bytes at
-//! a time; nothing is baked or built again.
+//! the samplers they are read through. Each texture holds the levels within
+//! the cap unless they do not all fit the device's memory, when the textures
+//! with the longest sides are lowered first (`fit`). A texture whose levels
+//! should change swaps its image for one of its new levels, read from the
+//! file, a frame's worth of bytes at a time; nothing is baked or built again.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
@@ -63,36 +66,6 @@ impl Texture {
     /// The bytes of its levels from `first` on: what loading them uploads.
     pub fn bytes(&self, first: usize) -> u64 {
         self.levels[first..].iter().map(|l| l.len() as u64).sum()
-    }
-
-    /// Adds into `needs`, bytes by heap index, what loading its levels
-    /// from `first` on allocates as the driver sizes it: their image with
-    /// alignment and tiling, its tile table and at most a staging buffer of
-    /// its own. Nothing is created.
-    pub fn needs(
-        &self,
-        device: &gpu::Device,
-        first: usize,
-        needs: &mut [u64],
-    ) -> Result<(), String> {
-        let info = image_info(self, first);
-        let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
-        let mut image = vk::MemoryRequirements2::default();
-        // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
-        // outlives the call.
-        unsafe {
-            device
-                .raw
-                .get_device_image_memory_requirements(&ask, &mut image)
-        };
-        let image = image.memory_requirements;
-        let tiles = Buffer::host_needs(device, 4 * self.tiles.len() as u64, TILES);
-        let staging = Buffer::host_needs(device, self.bytes(first), STAGING);
-        let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        needs[device.heap(image.memory_type_bits, local)?] += image.size;
-        needs[device.heap(tiles.memory_type_bits, HOST)?] += tiles.size;
-        needs[device.heap(staging.memory_type_bits, HOST)?] += staging.size;
-        Ok(())
     }
 
     /// Reads its levels from `first` on, finest first, into `into`, which
@@ -249,6 +222,18 @@ pub fn level_size(format: vk::Format, width: u32, height: u32) -> Option<usize> 
 /// still loads, alone in its frame.
 pub const UPLOAD: u64 = 32 << 20;
 
+/// The longest side, in texels, of the coarsest level a texture is lowered
+/// to, and loads at: a 4×4 block, the smallest level the block formats
+/// store whole. Each coarser level takes a block too, so lowering past it
+/// saves next to nothing.
+pub const TAIL: u32 = 4;
+
+/// The bytes of a heap's budget that fitting leaves free: room for a
+/// raise's old image beside its new one, and for the budget to move, by
+/// other processes or this one's geometry, without a target moving.
+/// Hypothesis: enough on ALab beside usdview and Houdini.
+pub const MARGIN: u64 = 256 << 20;
+
 /// A texture's levels on the GPU from `first` on: a 2D array image, in the
 /// layout the material pass samples once its upload has run.
 struct Image {
@@ -258,18 +243,141 @@ struct Image {
     memory: vk::DeviceMemory,
     view: vk::ImageView,
     bytes: u64,
+    /// The memory heap `memory` is from.
+    heap: usize,
     first: usize,
 }
 
-/// A texture loaded: its file, its tile table, which a swap keeps, and the
-/// image of its levels now.
+/// A texture loaded: its file, its tile table, which a swap keeps, the
+/// image of its levels now, and what fitting it weighs.
 struct Loaded {
     texture: Texture,
     tiles: Buffer,
     image: Image,
-    /// The first level its image is to hold: the cap's, or the image's own
-    /// once a swap to the cap's failed, until the cap changes.
+    chain: Chain,
+    /// The first level its image is to hold, `fit`'s.
     target: usize,
+}
+
+/// What `fit` weighs of a loaded texture.
+#[derive(Clone, Debug, PartialEq)]
+struct Chain {
+    /// The memory heap its images are allocated from.
+    heap: usize,
+    /// The longest side of its level 0.
+    side: u32,
+    /// The bytes of its image holding the levels from each on, as the
+    /// driver sizes it with alignment and tiling.
+    sizes: Vec<u64>,
+    /// The finest level its image may hold: the cap's, or its image's own
+    /// once a swap failed, until the cap changes.
+    ceiling: usize,
+    /// The coarsest: the first within `TAIL`, or the ceiling past it, or
+    /// likewise its image's own once a swap failed.
+    floor: usize,
+}
+
+impl Chain {
+    /// Sizes each image of `texture`'s levels without creating any, and
+    /// limits them to `cap`.
+    fn new(device: &gpu::Device, texture: &Texture, cap: u32) -> Result<Self, String> {
+        let mut chain = Chain {
+            heap: 0,
+            side: texture.width.max(texture.height),
+            sizes: Vec::new(),
+            ceiling: 0,
+            floor: 0,
+        };
+        for first in 0..texture.levels.len() {
+            let info = image_info(texture, first);
+            let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
+            let mut needs = vk::MemoryRequirements2::default();
+            // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
+            // outlives the call.
+            unsafe {
+                device
+                    .raw
+                    .get_device_image_memory_requirements(&ask, &mut needs)
+            };
+            let needs = needs.memory_requirements;
+            let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+            chain.heap = device.heap(needs.memory_type_bits, local)?;
+            chain.sizes.push(needs.size);
+        }
+        chain.limit(texture, cap);
+        Ok(chain)
+    }
+
+    /// Sets its ceiling and floor for the cap `cap`, 0 for none.
+    fn limit(&mut self, texture: &Texture, cap: u32) {
+        self.ceiling = texture.first(cap);
+        self.floor = texture.first(TAIL).max(self.ceiling);
+    }
+
+    /// The longest side of its level `level`.
+    fn extent(&self, level: usize) -> u32 {
+        (self.side >> level).max(1)
+    }
+}
+
+/// Each chain's first level, by index: its ceiling, lowered a level at a
+/// time while its heap's images take more than `capacity`, bytes by heap
+/// index, the chain whose image has the longest side first, then the most
+/// bytes, then the lowest index, none past its floor. The order of
+/// lowering is fixed, so more capacity stops earlier in the same sequence:
+/// a chain is never raised by less capacity, nor lowered by more.
+fn fit(chains: &[&Chain], capacity: &[u64]) -> Vec<usize> {
+    let mut targets: Vec<usize> = chains.iter().map(|c| c.ceiling).collect();
+    let mut totals = totals(chains, &targets, capacity.len());
+    let key =
+        |i: usize, level: usize| (chains[i].extent(level), chains[i].sizes[level], Reverse(i));
+    let mut queue: BinaryHeap<_> = (0..chains.len())
+        .filter(|&i| chains[i].ceiling < chains[i].floor)
+        .map(|i| key(i, chains[i].ceiling))
+        .collect();
+    while let Some((_, _, Reverse(i))) = queue.pop() {
+        let (c, target) = (chains[i], &mut targets[i]);
+        if totals[c.heap] <= capacity[c.heap] {
+            continue;
+        }
+        totals[c.heap] -= c.sizes[*target];
+        *target += 1;
+        totals[c.heap] += c.sizes[*target];
+        if *target < c.floor {
+            queue.push(key(i, *target));
+        }
+    }
+    targets
+}
+
+/// The chains' targets under `room`, bytes by heap index, from `current`,
+/// and whether they were fitted afresh: `fit`'s under the room less
+/// `MARGIN` when `afresh`, or when `current` raised toward them would not
+/// fit the room, else `current` only raised toward them. So the room
+/// moving back and forth by less than the margin raises a chain at most
+/// once, and lowers none.
+fn settle(chains: &[&Chain], current: &[usize], room: &[u64], afresh: bool) -> (Vec<usize>, bool) {
+    let capacity: Vec<u64> = room.iter().map(|r| r.saturating_sub(MARGIN)).collect();
+    let fitted = fit(chains, &capacity);
+    let kept: Vec<usize> = current
+        .iter()
+        .zip(&fitted)
+        .map(|(&c, &f)| c.min(f))
+        .collect();
+    let taken = totals(chains, &kept, room.len());
+    if afresh || taken.iter().zip(room).any(|(t, r)| t > r) {
+        return (fitted, true);
+    }
+    (kept, false)
+}
+
+/// The bytes the chains' images from `targets` take, by heap index.
+fn totals(chains: &[&Chain], targets: &[usize], heaps: usize) -> Vec<u64> {
+    let mut totals = vec![0; heaps];
+    for (c, &target) in chains.iter().zip(targets) {
+        totals[c.heap] += c.sizes[target];
+    }
+    totals
 }
 
 /// What a surface binds for one texture: its view and its tile table,
@@ -313,6 +421,7 @@ impl Image {
             memory: vk::DeviceMemory::null(),
             view: vk::ImageView::null(),
             bytes: 0,
+            heap: 0,
             first,
         };
         // SAFETY (this and every call below): `d` is live, each info struct
@@ -328,6 +437,7 @@ impl Image {
         let needs = unsafe { d.get_image_memory_requirements(i.image) };
         i.bytes = needs.size;
         let flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        i.heap = device.heap(needs.memory_type_bits, flags)?;
         i.memory = gpu::allocate(device, needs, flags, vk::MemoryAllocateFlags::empty())?;
         unsafe { d.bind_image_memory(i.image, i.memory, 0) }
             .map_err(|e| format!("vkBindImageMemory failed: {e}"))?;
@@ -421,20 +531,6 @@ impl Drop for Image {
     }
 }
 
-/// The first level of `texture` a frame with `left` bytes still to upload
-/// loads for a target of `target`: the target, unless its levels are more
-/// than are left and another upload went first, then the finest whose
-/// levels fit, its last at least, which swaps raise in later frames.
-fn fit(texture: &Texture, target: usize, left: u64) -> usize {
-    let last = texture.levels.len() - 1;
-    if left == UPLOAD {
-        return target;
-    }
-    (target..last)
-        .find(|&first| texture.bytes(first) <= left)
-        .unwrap_or(last)
-}
-
 /// The host memory a frame's level reads land in, which its commands copy
 /// into the images: one buffer of `UPLOAD` bytes kept from frame to frame,
 /// since on ALab a buffer of a texture's own cost seven times its read to
@@ -493,10 +589,10 @@ fn upload(
 }
 
 /// The textures loaded for the materials drawn, by `bake::Baked::key`, each
-/// holding the levels within the texture cap, and the samplers they are
-/// read through. Loads and swaps are recorded into a frame's commands,
-/// outside rendering, `UPLOAD` bytes a frame, and their staging is kept
-/// until the next frame begins, when the GPU has read it.
+/// holding the levels `fit` gives it, and the samplers they are read
+/// through. Loads and swaps are recorded into a frame's commands, outside
+/// rendering, `UPLOAD` bytes a frame, and their staging is kept until the
+/// next frame begins, when the GPU has read it.
 pub struct Textures {
     device: ash::Device,
     loaded: BTreeMap<String, Loaded>,
@@ -510,6 +606,16 @@ pub struct Textures {
     cap: u32,
     /// The bytes this frame may still upload.
     left: u64,
+    /// The heaps' use and budgets when the targets were last set.
+    heaps: Vec<gpu::Heap>,
+    /// Whether the textures or their limits changed since then, so the
+    /// targets are fitted afresh.
+    dirty: bool,
+    /// Whether this frame's targets were fitted afresh, leaving `MARGIN`
+    /// free for its raises.
+    fresh: bool,
+    /// The bytes the targets take past the heaps' room, at their floors.
+    short: u64,
 }
 
 impl Textures {
@@ -522,6 +628,10 @@ impl Textures {
             retired: Vec::new(),
             cap: 0,
             left: UPLOAD,
+            heaps: Vec::new(),
+            dirty: false,
+            fresh: false,
+            short: 0,
         })
     }
 
@@ -530,29 +640,28 @@ impl Textures {
         (self.staging.used, self.staging.own) = (0, Vec::new());
         self.retired.clear();
         self.left = UPLOAD;
-    }
-
-    pub fn cap(&self) -> u32 {
-        self.cap
+        self.fresh = false;
     }
 
     /// Sets the cap to `cap` texels a side, 0 for none, and so each loaded
-    /// texture's target, which `swap` moves its image to; whether it changed.
+    /// texture's ceiling, which the next `refit` fits under; whether it
+    /// changed. A texture kept as it was by a failed swap is tried again.
     pub fn set_cap(&mut self, cap: u32) -> bool {
         if cap == self.cap {
             return false;
         }
         self.cap = cap;
         for loaded in self.loaded.values_mut() {
-            loaded.target = loaded.texture.first(cap);
+            loaded.chain.limit(&loaded.texture, cap);
         }
+        self.dirty = true;
         true
     }
 
     /// The baked texture keyed `key`, read as `texture`, loaded now unless
-    /// it is: its levels within the cap, or as many of them as the frame's
-    /// bytes allow (`fit`), read into a staging buffer; the bytes that
-    /// uploaded, 0 when it was loaded, and the time their read took.
+    /// it is: its levels from its floor on, read into a staging buffer,
+    /// which `refit` and `swap` then raise; the bytes that uploaded, 0 when
+    /// it was loaded, and the time their read took.
     pub fn load(
         &mut self,
         device: &gpu::Device,
@@ -567,8 +676,8 @@ impl Textures {
         for (i, layer) in texture.tiles.iter().enumerate() {
             tiles.bytes()[4 * i..4 * i + 4].copy_from_slice(&layer.to_ne_bytes());
         }
-        let target = texture.first(self.cap);
-        let first = fit(&texture, target, self.left);
+        let chain = Chain::new(device, &texture, self.cap).map_err(|e| format!("{key}: {e}"))?;
+        let first = chain.floor;
         let (image, read) = upload(device, cb, &texture, first, &mut self.staging)
             .map_err(|e| format!("{key}: {e}"))?;
         let size = texture.bytes(first);
@@ -577,65 +686,116 @@ impl Textures {
             texture,
             tiles,
             image,
-            target,
+            chain,
+            target: first,
         };
         self.loaded.insert(key.to_owned(), loaded);
+        self.dirty = true;
         Ok((size, read))
+    }
+
+    /// Sets each loaded texture's target from the memory heaps' use and
+    /// budgets, `heaps`: `fit`'s under the room its heap has for textures,
+    /// its budget less what the process holds besides them, less `MARGIN`.
+    /// Targets that still fit the room are only raised, so the budget
+    /// moving by less than the margin moves none; a load, a drop, a cap
+    /// change or targets past the room fit them afresh.
+    pub fn refit(&mut self, heaps: &[gpu::Heap]) {
+        if !self.dirty && self.heaps == heaps {
+            return;
+        }
+        self.heaps = heaps.to_vec();
+        let mut ours = vec![0; heaps.len()];
+        for image in self.loaded.values().map(|l| &l.image).chain(&self.retired) {
+            ours[image.heap] += image.bytes;
+        }
+        let room: Vec<u64> = (heaps.iter().zip(&ours))
+            .map(|(h, &ours)| match h.allowed {
+                0 => u64::MAX,
+                allowed => allowed.saturating_sub(h.used.saturating_sub(ours)),
+            })
+            .collect();
+        let chains: Vec<&Chain> = self.loaded.values().map(|l| &l.chain).collect();
+        let current: Vec<usize> = self.loaded.values().map(|l| l.target).collect();
+        let targets;
+        (targets, self.fresh) = settle(&chains, &current, &room, self.dirty);
+        let totals = totals(&chains, &targets, heaps.len());
+        self.short = totals
+            .iter()
+            .zip(&room)
+            .map(|(t, r)| t.saturating_sub(*r))
+            .sum();
+        for (loaded, target) in self.loaded.values_mut().zip(targets) {
+            loaded.target = target;
+        }
+        self.dirty = false;
     }
 
     /// Swaps each image not holding its target's levels for one that does,
     /// read from its file, while the frame's bytes last (`UPLOAD`), in key
-    /// order: the new image is made and uploaded first, and the old one
-    /// retired once the materials binding it are rebound, so a swap that
-    /// fails keeps the old. A raise goes only if its image fits the
-    /// device's memory budget beside the old. A swap that fails is warned
-    /// of, and its texture kept as it is until the cap changes. Records
-    /// the uploads into `cb`; the keys swapped, which the caller rebinds
-    /// before the next frame begins, the bytes uploaded and the time
-    /// their read took.
+    /// order, lowers before raises: the new image is made and uploaded
+    /// first, and the old one retired once the materials binding it are
+    /// rebound, so a swap that fails keeps the old. A raise goes only if
+    /// its image fits the budgets of `heaps` beside the old, else waits
+    /// for the images this frame retires to be freed, or for a refit to
+    /// leave the margin. A swap that fails, or a raise that still does not
+    /// fit, is warned of, and its texture kept as it is until the cap
+    /// changes. Records the uploads into `cb`; the keys swapped, which the
+    /// caller rebinds before the next frame begins, the bytes uploaded and
+    /// the time their read took.
     pub fn swap(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
+        heaps: &[gpu::Heap],
     ) -> (BTreeSet<String>, u64, Duration) {
         let (mut keys, mut bytes, mut read) = (BTreeSet::new(), 0, Duration::ZERO);
-        let heaps = device.heaps();
-        let mut raised = vec![0; heaps.len()];
-        for (key, loaded) in &mut self.loaded {
-            let (texture, target) = (&loaded.texture, loaded.target);
-            if loaded.image.first == target {
-                continue;
-            }
-            let size = texture.bytes(target);
-            if self.left < UPLOAD && size > self.left {
-                continue;
-            }
-            let swapped = (|| {
-                if target < loaded.image.first {
-                    let mut needs = raised.clone();
-                    texture.needs(device, target, &mut needs)?;
-                    if gpu::overflow(&heaps, &needs).is_some() {
-                        let (w, h) = texture.extent(target);
-                        return Err(format!(
-                            "its {w}×{h} levels do not fit the device's memory budget"
-                        ));
+        let mut added = vec![0; heaps.len()];
+        for raises in [false, true] {
+            for (key, loaded) in &mut self.loaded {
+                let (texture, chain, target) = (&loaded.texture, &loaded.chain, loaded.target);
+                if target == loaded.image.first || (target < loaded.image.first) != raises {
+                    continue;
+                }
+                let size = texture.bytes(target);
+                if self.left < UPLOAD && size > self.left {
+                    continue;
+                }
+                let mut needs = added.clone();
+                needs[chain.heap] += chain.sizes[target];
+                let swapped = if raises && gpu::overflow(heaps, &needs).is_some() {
+                    if !keys.is_empty() {
+                        continue;
                     }
-                    raised = needs;
-                }
-                upload(device, cb, texture, target, &mut self.staging)
-            })();
-            match swapped {
-                Ok((image, time)) => {
-                    let old = std::mem::replace(&mut loaded.image, image);
-                    self.retired.push(old);
-                    self.left = self.left.saturating_sub(size);
-                    (bytes, read) = (bytes + size, read + time);
-                    keys.insert(key.clone());
-                }
-                Err(e) => {
-                    let (w, h) = texture.extent(loaded.image.first);
-                    eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
-                    loaded.target = loaded.image.first;
+                    if !self.fresh {
+                        self.dirty = true;
+                        continue;
+                    }
+                    let (w, h) = texture.extent(target);
+                    Err(format!(
+                        "its {w}×{h} levels do not fit the device's memory budget beside its \
+                         image now"
+                    ))
+                } else {
+                    upload(device, cb, texture, target, &mut self.staging)
+                };
+                match swapped {
+                    Ok((image, time)) => {
+                        let old = std::mem::replace(&mut loaded.image, image);
+                        self.retired.push(old);
+                        self.left = self.left.saturating_sub(size);
+                        (bytes, read) = (bytes + size, read + time);
+                        added = needs;
+                        keys.insert(key.clone());
+                    }
+                    Err(e) => {
+                        let first = loaded.image.first;
+                        let (w, h) = texture.extent(first);
+                        eprintln!("pika: warning: texture {key}: {e}; kept at {w}×{h}");
+                        loaded.target = first;
+                        (loaded.chain.ceiling, loaded.chain.floor) = (first, first);
+                        self.dirty = true;
+                    }
                 }
             }
         }
@@ -647,6 +807,20 @@ impl Textures {
         (self.loaded.values())
             .filter(|l| l.image.first != l.target)
             .count()
+    }
+
+    /// The textures lowered past their ceiling to fit, and the longest side
+    /// of the finest level any of them holds.
+    pub fn lowered(&self) -> (usize, u32) {
+        let lowered = self.loaded.values().filter(|l| l.target > l.chain.ceiling);
+        let finest = lowered.clone().map(|l| l.chain.extent(l.target)).max();
+        (lowered.count(), finest.unwrap_or(0))
+    }
+
+    /// The bytes the textures take past the room their heaps have, at the
+    /// floors they are not lowered past.
+    pub fn short(&self) -> u64 {
+        self.short
     }
 
     /// The textures the cap shrinks.
@@ -670,14 +844,11 @@ impl Textures {
         })
     }
 
-    /// Whether the texture keyed `key` is loaded.
-    pub fn holds(&self, key: &str) -> bool {
-        self.loaded.contains_key(key)
-    }
-
     /// Drops the textures not in `used`. No GPU work may be pending.
     pub fn retain(&mut self, used: &BTreeSet<String>) {
+        let before = self.loaded.len();
         self.loaded.retain(|key, _| used.contains(key));
+        self.dirty |= self.loaded.len() != before;
     }
 
     /// A trilinear sampler with the address modes `modes`, u then v, in
@@ -925,18 +1096,131 @@ pub mod tests {
         assert_eq!(t.first(1), 2);
     }
 
+    /// A chain on heap `heap` of a square texture `side` texels a side of
+    /// one byte a texel, with no cap.
+    fn chain(heap: usize, side: u32) -> Chain {
+        let levels = 32 - side.leading_zeros() as usize;
+        let sizes = (0..levels)
+            .map(|first| {
+                (first..levels)
+                    .map(|l| u64::from((side >> l) * (side >> l)))
+                    .sum()
+            })
+            .collect();
+        let floor = (0..levels).find(|&l| side >> l <= TAIL).unwrap();
+        Chain {
+            heap,
+            side,
+            sizes,
+            ceiling: 0,
+            floor,
+        }
+    }
+
     #[test]
-    fn a_load_past_the_frames_bytes_starts_coarser() {
-        let t = parse(RAMP.to_vec()).unwrap();
-        // The ramp's levels from 8×8, 4×4, 2×2 and 1×1 on.
-        assert_eq!([0, 1, 2, 3].map(|first| t.bytes(first)), [680, 168, 40, 8]);
-        assert_eq!(fit(&t, 0, UPLOAD), 0, "the frame's first upload");
-        assert_eq!(fit(&t, 0, 680), 0, "the control: every level fits");
-        assert_eq!(fit(&t, 0, 679), 1);
-        assert_eq!(fit(&t, 0, 40), 2);
-        assert_eq!(fit(&t, 0, 0), 3, "the last level, whatever is left");
-        assert_eq!(fit(&t, 2, 168), 2, "never finer than the target");
-        assert_eq!(fit(&t, 1, UPLOAD - 1), 1);
+    fn a_fit_lowers_the_longest_sides_first() {
+        let (big, small) = (chain(0, 64), chain(0, 16));
+        // From level 0: 5461 and 341 bytes; from 1, 1365 and 85.
+        assert_eq!(
+            (big.sizes[0], big.sizes[1], small.sizes[0]),
+            (5461, 1365, 341)
+        );
+        let chains = [&big, &small];
+        assert_eq!(fit(&chains, &[u64::MAX]), [0, 0], "the control: both fit");
+        assert_eq!(fit(&chains, &[5461 + 341]), [0, 0], "exactly");
+        assert_eq!(fit(&chains, &[5461 + 340]), [1, 0], "the longer side first");
+        // The big one at 32 texels, 1365 + 341, then at 16, as long as the
+        // small one's side.
+        assert_eq!(fit(&chains, &[1365 + 340]), [2, 0]);
+        // Floors: 4×4 from level 4 and level 2, 21 bytes each; none fits.
+        assert_eq!((big.floor, small.floor), (4, 2));
+        assert_eq!(fit(&chains, &[0]), [4, 2], "no further than the floors");
+        // Equal sides: the most bytes first, as a set's two layers have,
+        // then the lowest index.
+        let mut pair = chain(0, 16);
+        pair.sizes.iter_mut().for_each(|s| *s *= 2);
+        assert_eq!(fit(&[&small, &pair], &[341 + 681]), [0, 1]);
+        assert_eq!(fit(&[&pair, &small], &[341 + 681]), [1, 0]);
+        assert_eq!(fit(&[&small, &small], &[681]), [1, 0]);
+
+        // A fixed point: fitting under what a fit takes gives it again.
+        for capacity in [0, 100, 341 + 340, 1365 + 340, 5000, 5461 + 340] {
+            let targets = fit(&chains, &[capacity]);
+            let taken = totals(&chains, &targets, 1)[0];
+            assert_eq!(fit(&chains, &[taken]), targets, "under {capacity}");
+        }
+        // More capacity never lowers a chain.
+        let mut last = fit(&chains, &[0]);
+        for capacity in 0..6000 {
+            let targets = fit(&chains, &[capacity]);
+            assert!(
+                targets.iter().zip(&last).all(|(t, l)| t <= l),
+                "at {capacity}"
+            );
+            last = targets;
+        }
+    }
+
+    #[test]
+    fn budget_noise_under_the_margin_moves_nothing() {
+        let chains: Vec<Chain> = [256, 128, 64, 32].map(|side| chain(0, side)).into();
+        let chains: Vec<&Chain> = chains.iter().collect();
+        // A room that lowers some, 20 kB past the margin: the 256 to 64
+        // and the 128 to 64, 17748 bytes in all.
+        let room = MARGIN + 20_000;
+        let (start, fresh) = settle(&chains, &[0; 4], &[room], true);
+        assert!(fresh);
+        assert_eq!(start, [2, 1, 0, 0]);
+        // The room wanders over less than the margin around it: one raise,
+        // when it first rises past the next level, then nothing.
+        let mut targets = start.clone();
+        let mut moves = 0;
+        for step in 0..200u64 {
+            let wobble = (step * 0x9e37_79b9) % (MARGIN / 2);
+            let (next, fresh) = settle(&chains, &targets, &[room + wobble - MARGIN / 4], false);
+            assert!(!fresh, "step {step}");
+            moves += usize::from(next != targets);
+            assert!(
+                next.iter().zip(&targets).all(|(n, t)| n <= t),
+                "never lowered"
+            );
+            targets = next;
+        }
+        assert_eq!(moves, 1, "one raise, to every ceiling");
+        assert_eq!(targets, [0; 4]);
+        // The control: the room falling past the targets fits afresh, lower.
+        let (lower, fresh) = settle(&chains, &targets, &[30_000], false);
+        assert!(fresh);
+        assert!(lower.iter().zip(&targets).any(|(l, t)| l > t));
+        // A load, a drop or a cap change fits afresh at the room.
+        assert_eq!(settle(&chains, &targets, &[room], true), (start, true));
+    }
+
+    #[test]
+    fn a_fit_keeps_to_each_heap_and_the_limits() {
+        let mut capped = chain(0, 64);
+        capped.ceiling = 2;
+        let other = chain(1, 64);
+        let chains = [&capped, &other];
+        assert_eq!(
+            fit(&chains, &[u64::MAX, u64::MAX]),
+            [2, 0],
+            "the cap's level"
+        );
+        assert_eq!(
+            fit(&chains, &[u64::MAX, 0]),
+            [2, 4],
+            "the other heap's budget"
+        );
+        assert_eq!(fit(&chains, &[0, u64::MAX]), [4, 0]);
+        // A ceiling past the floor, as a cap under `TAIL` or a failed swap
+        // makes it: the chain stays where it is.
+        let mut kept = chain(0, 64);
+        (kept.ceiling, kept.floor) = (5, 5);
+        assert_eq!(fit(&[&kept], &[0]), [5]);
+        // A longer side on another heap is not lowered for this one's.
+        let small = chain(0, 16);
+        assert_eq!(fit(&[&other, &small], &[0, u64::MAX]), [0, 2]);
     }
 
     #[test]

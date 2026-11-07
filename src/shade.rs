@@ -5,7 +5,7 @@
 //! headlight (`shaders/frame.slang`). A material is built off the render
 //! thread (`bake`) and drawn clay until its first build lands, and as it
 //! was until an edit's does; a value edit writes its block in place and
-//! rebinds its samplers, and a texture swapped for the cap's levels
+//! rebinds its samplers, and a texture swapped for the levels that fit
 //! (`Textures::swap`) rebinds the views of the materials reading it.
 
 use std::collections::btree_map::Entry;
@@ -42,9 +42,9 @@ pub struct Shade {
     /// dropped.
     prune: bool,
     /// Whether a texture loaded or swapped since the textures the cap
-    /// shrinks were last warned of, in one line when every build and swap
-    /// is done: a scene's worth at once, rather than a line per texture,
-    /// thousands on a production asset.
+    /// shrinks, and those lowered to fit, were last warned of, in a line
+    /// each when every build and swap is done: a scene's worth at once,
+    /// rather than a line per texture, thousands on a production asset.
     warn: bool,
     /// `material::clay`, drawn where `looks` has no entry.
     clay: Material,
@@ -56,7 +56,7 @@ pub struct Shade {
 enum Look {
     Built(Box<Material>),
     /// Its build failed, warned of once when it did; `update` tries it
-    /// again only when its network moves or the cap changes.
+    /// again only when its network moves.
     Failed,
 }
 
@@ -110,8 +110,10 @@ pub struct Update {
     pub read: Duration,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
-    /// Textures whose image does not hold the cap's levels yet.
+    /// Textures whose image does not hold the levels that fit yet.
     pub pending_textures: usize,
+    /// Textures lowered past the cap's levels to fit the device's memory.
+    pub lowered_textures: usize,
 }
 
 impl Shade {
@@ -144,13 +146,14 @@ impl Shade {
     /// Rewrites the block of each material whose network changed its
     /// values alone, and submits a build of each whose structure or
     /// textures did, drawn as it was until it lands; installs the builds
-    /// that landed, within the device's memory budget, and swaps textures
-    /// for the levels within the texture cap `cap` (0 for none), loads and
-    /// swaps uploading `texture::UPLOAD` bytes a frame. A material that
-    /// cannot be built or installed is warned of and drawn pink, and a
-    /// texture whose file is missing is warned of and drawn as its node's
-    /// fallback; the frame goes on. Records into `cb`, outside rendering,
-    /// the uploads. No GPU work may be pending.
+    /// that landed, and swaps textures for the levels within the texture
+    /// cap `cap` (0 for none) that fit the device's memory
+    /// (`Textures::refit`), loads and swaps uploading `texture::UPLOAD`
+    /// bytes a frame. A material that cannot be built or installed is
+    /// warned of and drawn pink, and a texture whose file is missing is
+    /// warned of and drawn as its node's fallback; the frame goes on.
+    /// Records into `cb`, outside rendering, the uploads. No GPU work may
+    /// be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -178,19 +181,9 @@ impl Shade {
             self.prune = false;
         }
         // Before the builds land, so they load under the new cap.
-        let recapped = self.textures.set_cap(cap);
-        self.warn |= recapped;
-        let mut ids: BTreeSet<u64> = moved.materials.iter().copied().collect();
-        if recapped {
-            // A material refused at the old cap may fit under the new one.
-            let failed = self
-                .looks
-                .iter()
-                .filter(|(_, look)| matches!(look, Look::Failed));
-            ids.extend(failed.map(|(&id, _)| id));
-        }
+        self.warn |= self.textures.set_cap(cap);
         let mut update = Update::default();
-        for id in ids {
+        for &id in &moved.materials {
             let Some(material) = store.materials().get(&id) else {
                 continue;
             };
@@ -232,7 +225,15 @@ impl Shade {
                 }
             }
         }
-        let (swapped, bytes, read) = self.textures.swap(device, cb);
+        // Once the scene's builds have landed, so its first textures are
+        // not raised past what the whole fits, then lowered again: a
+        // 34-tile set at 4K uploads 750 MB in a frame. Loads meanwhile draw
+        // their floors.
+        let heaps = device.heaps();
+        if self.builder.is_empty() {
+            self.textures.refit(&heaps);
+        }
+        let (swapped, bytes, read) = self.textures.swap(device, cb, &heaps);
         (update.loaded, update.read) = (update.loaded + bytes, update.read + read);
         if !swapped.is_empty() {
             for drawn in self.looks.values().filter_map(Look::built) {
@@ -243,17 +244,38 @@ impl Shade {
         }
         update.pending = self.builder.len();
         update.pending_textures = self.textures.pending();
+        let (lowered, finest) = self.textures.lowered();
+        update.lowered_textures = lowered;
         self.warn |= update.loaded > 0;
         if update.pending == 0 && update.pending_textures == 0 && self.warn {
-            let capped = self.textures.capped();
-            let (textures, were) = match capped {
-                1 => ("texture", "was"),
-                _ => ("textures", "were"),
+            let counted = |n: usize| match n {
+                1 => "1 texture was".to_string(),
+                _ => format!("{n} textures were"),
             };
+            let capped = self.textures.capped();
             if capped > 0 {
                 eprintln!(
-                    "pika: warning: {capped} {textures} {were} capped to {cap} texels a side by \
-                     pika:textureCap"
+                    "pika: warning: {} capped to {cap} texels a side by pika:textureCap",
+                    counted(capped)
+                );
+            }
+            let short = self.textures.short();
+            let past = format!("textures still take {} past it", stats::size(short));
+            if lowered > 0 {
+                eprintln!(
+                    "pika: warning: {} lowered to {finest} texels a side or less to fit the \
+                     device's memory budget{}",
+                    counted(lowered),
+                    if short > 0 {
+                        format!(", and {past}")
+                    } else {
+                        String::new()
+                    }
+                );
+            } else if short > 0 {
+                eprintln!(
+                    "pika: warning: none of the textures can be lowered to fit the device's \
+                     memory budget, and {past}"
                 );
             }
             self.warn = false;
@@ -261,8 +283,8 @@ impl Shade {
         Ok(update)
     }
 
-    /// Whether every build has landed and every texture holds the cap's
-    /// levels, which a host rendering until converged waits for.
+    /// Whether every build has landed and every texture holds the levels
+    /// that fit, which a host rendering until converged waits for.
     pub fn settled(&self) -> bool {
         self.builder.is_empty() && self.textures.pending() == 0
     }
@@ -304,10 +326,8 @@ impl Shade {
 
     /// Installs a build that landed: its surface into `surfaces` unless
     /// another material's build put it there, its uniforms, and its
-    /// textures, loaded now into `textures` with their uploads recorded
-    /// into `cb`, unless the ones not loaded yet would take the process
-    /// past the device's memory budget at the cap's levels; counts into
-    /// `update` what the build did.
+    /// textures, loaded now into `textures` at their floors with their
+    /// uploads recorded into `cb`; counts into `update` what the build did.
     fn install(
         device: &gpu::Device,
         surfaces: &mut BTreeMap<u64, Surface>,
@@ -329,26 +349,6 @@ impl Shade {
             }
         };
         update.baked += output.textures.iter().filter(|b| b.fresh).count();
-        // A refused allocation leaves the device usable, but ALab filling
-        // it at the 1024 cap lost the device, so the budget is never crossed.
-        let heaps = device.heaps();
-        let mut needs = vec![0; heaps.len()];
-        // By key: a texture that two of its nodes read loads once.
-        let mut fresh = BTreeMap::new();
-        for b in output.textures.iter().filter(|b| !textures.holds(&b.key)) {
-            fresh.insert(&b.key, (&b.texture, b.texture.first(textures.cap())));
-        }
-        for (texture, first) in fresh.values() {
-            texture.needs(device, *first, &mut needs)?;
-        }
-        if gpu::overflow(&heaps, &needs).is_some() {
-            let fresh: u64 = fresh.values().map(|(t, first)| t.bytes(*first)).sum();
-            return Err(format!(
-                "its textures, {} baked, do not fit the device's memory budget: set or lower \
-                 pika:textureCap",
-                stats::size(fresh)
-            ));
-        }
         let (manifest, layout) = (&surface.manifest, &surface.layout);
         let mut drawn = Material::new(device, surface, hash)?;
         uniforms::pack(

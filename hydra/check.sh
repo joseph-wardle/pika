@@ -163,8 +163,9 @@ fixture() {
     #   bakes: A then B      textures baked, likewise (0 then 0)
     #   warnings: N          material warnings, each once though husk renders a
     #                        frame more than once, and none for a repair (0)
-    #   warned: M            one warning's text after "material ", which must
-    #                        name what to fix and say what is drawn (unchecked)
+    #   warned: M            the start of one warning's text after "pika: warning: ",
+    #                        which must name what to fix and say what is drawn
+    #                        (unchecked)
     #   redundant bytes: R   mesh bytes the edit handed over that the store held;
     #                        0 for an edit touching no primvar the materials read
     #                        (unchecked: Hydra resends what a changed topology covers)
@@ -196,8 +197,8 @@ fixture() {
         fail "$name: $(pending "$OUT/fixtures/$name.stats") materials pending on the first and last frames, not $built 0"
     [ "$(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log")" = "$warnings" ] ||
         fail "$name: $(grep -c '^pika: warning: material ' "$OUT/fixtures/$name.log") material warnings, not $warnings"
-    [ -z "$warned" ] || grep -qF "pika: warning: material $warned" "$OUT/fixtures/$name.log" ||
-        fail "$name: no warning reads \"material $warned\" (see $OUT/fixtures/$name.log)"
+    [ -z "$warned" ] || grep -qF "pika: warning: $warned" "$OUT/fixtures/$name.log" ||
+        fail "$name: no warning reads \"$warned\" (see $OUT/fixtures/$name.log)"
     [ -z "$redundant" ] || [ "$(redundant "$OUT/fixtures/$name.stats" "$edit")" = "$redundant" ] ||
         fail "$name: the edit handed over $(redundant "$OUT/fixtures/$name.stats" "$edit") redundant mesh bytes, not $redundant"
 }

@@ -14,7 +14,7 @@
 # compiles: 1 then 0
 # bakes: 0 then 1
 # warnings: 1
-# warned: /world/mtl/skin: tex's file: its path is empty or did not resolve; drawn with its fallback
+# warned: material /world/mtl/skin: tex's file: its path is empty or did not resolve; drawn with its fallback
 def Xform "world"
 {
     def Camera "camera" {}

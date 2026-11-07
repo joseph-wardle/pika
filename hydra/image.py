@@ -56,7 +56,8 @@ What the reference encodes:
   unlit emission of an image sampled at a primvar. The
   sample (`sample`) is trilinear at the level a Vulkan sampler picks from
   the pixel's st footprint, from the file's stored levels within
-  pika:textureCap, in the working space from the declared colour space
+  pika:textureCap, or within TAIL for a scene rendered under a BUDGET no
+  texture fits, in the working space from the declared colour space
   (`working`), under the node's address modes (`wrap`, `metadata`), a
   <UDIM> set by USD's tile numbering, st (0, 0) at the bottom-left; a
   normal map (`lit`'s normal) perturbs the normal over the tangent frame
@@ -96,6 +97,12 @@ CAP = float("inf")
 # The scenes whose texture the cap shrinks, which husk must warn of in one
 # line.
 CAPPED = {"capped": 1}
+# The scenes rendered under PIKA_BUDGET, bytes standing in for the device's
+# memory budget: at one byte no texture fits, so each is lowered to its
+# floor, its first level within TAIL texels a side (src/texture.rs), which
+# both hosts must warn of in one line.
+BUDGET = {"lowered": 1}
+TAIL = 4
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
@@ -117,7 +124,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sRGB read as raw", "8-bit auto read as raw", "8-bit data read as sRGB", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
-            "the cap ignored", "missing file's fallback ignored", "constant nodes at their default",
+            "the cap ignored", "lowering ignored", "missing file's fallback ignored", "constant nodes at their default",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -902,7 +909,7 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, host, control=None):
+def reference(stage, time, width, height, host, lowered, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
@@ -910,6 +917,8 @@ def reference(stage, time, width, height, host, control=None):
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
     cap = (authored.Get() if host.settings and authored else 0) or CAP
+    if lowered and control != "lowering ignored":
+        cap = min(cap, TAIL)
     eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)
@@ -1141,6 +1150,14 @@ def compare(image, ref, aovs):
     return problems
 
 
+def budget(name):
+    """The environment a scene renders in: its BUDGET, if any."""
+    env = dict(os.environ)
+    if name in BUDGET:
+        env["PIKA_BUDGET"] = str(BUDGET[name])
+    return env
+
+
 def husk(scene, out):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.husk.log")
@@ -1148,7 +1165,7 @@ def husk(scene, out):
         subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur",
                         "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
-                       stdout=f, stderr=subprocess.STDOUT, check=True)
+                       stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
     return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in FRAMES}, log
 
 
@@ -1160,7 +1177,7 @@ def usdrecord(scene, out, width):
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
                         "--frames", f"{FRAMES[0]}:{FRAMES[-1]}",
                         scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
-                       stdout=f, stderr=subprocess.STDOUT, check=True)
+                       stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
     return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
 
 
@@ -1168,8 +1185,9 @@ def references(scene, width, height, host):
     """The reference and each control's, for each frame, of the scene at
     `scene`: a path, which a process pool can be handed."""
     stage = Usd.Stage.Open(scene)
+    lowered = os.path.splitext(os.path.basename(scene))[0] in BUDGET
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, lowered, c) for c in controls} for t in FRAMES}
 
 
 def differs(stage, host):
@@ -1183,11 +1201,18 @@ def differs(stage, host):
     return purposed or (settings and not host.settings) or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
 
 
-def warned(log, name, expected):
-    """A failure unless `log` holds `expected` texture warnings."""
+def warned(log, name, capped, lowered):
+    """Failures unless `log` holds `capped` warnings of textures the cap
+    shrinks and `lowered` of textures lowered to fit."""
     with open(log) as f:
-        count = sum(line.startswith("pika: warning: ") and "by pika:textureCap" in line for line in f)
-    return [] if count == expected else [f"{name}: {count} texture warnings, not {expected}"]
+        lines = [line for line in f if line.startswith("pika: warning: ")]
+    failures = []
+    for kind, mark, expected in (("cap", "by pika:textureCap", capped),
+                                 ("budget", "to fit the device's memory budget", lowered)):
+        count = sum(mark in line for line in lines)
+        if count != expected:
+            failures.append(f"{name}: {count} warnings of textures shrunk by the {kind}, not {expected}")
+    return failures
 
 
 def check(name, renders, references, aovs):
@@ -1241,14 +1266,14 @@ def main():
             renders, log = husks[s].result()
             print(f"{name} in husk ({log}):")
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
-            failures += f + warned(log, name, CAPPED.get(name, 0))
+            failures += f + warned(log, name, CAPPED.get(name, 0), int(name in BUDGET))
             changed |= c
             if s not in records:
                 continue
             renders, log = records[s].result()
             print(f"{name} in usdrecord ({log}):")
             failures += check(f"{name} (usdrecord)", renders, recorded.get(s, refs[s]).result(), ["color"])[0]
-            failures += warned(log, f"{name} (usdrecord)", 0)
+            failures += warned(log, f"{name} (usdrecord)", 0, int(name in BUDGET))
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")

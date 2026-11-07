@@ -390,7 +390,7 @@ pub struct Device<'a> {
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
     /// `PIKA_BUDGET`, bytes standing in for the driver's budget of each
-    /// device-local heap, so a check can see textures refused without
+    /// device-local heap, so a check can see textures lowered without
     /// filling the device.
     ceiling: Option<u64>,
 }
@@ -582,26 +582,6 @@ impl Buffer {
             .map_err(|e| format!("vkMapMemory failed: {e}"))?
             .cast();
         Ok(b)
-    }
-
-    /// What `host` allocates for a buffer of `size` bytes and `usage`,
-    /// asked of the driver without creating it.
-    pub fn host_needs(
-        device: &Device,
-        size: u64,
-        usage: vk::BufferUsageFlags,
-    ) -> vk::MemoryRequirements {
-        let info = Self::info(size, usage);
-        let ask = vk::DeviceBufferMemoryRequirements::default().create_info(&info);
-        let mut needs = vk::MemoryRequirements2::default();
-        // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
-        // outlives the call.
-        unsafe {
-            device
-                .raw
-                .get_device_buffer_memory_requirements(&ask, &mut needs)
-        };
-        needs.memory_requirements
     }
 
     fn info(size: u64, usage: vk::BufferUsageFlags) -> vk::BufferCreateInfo<'static> {
