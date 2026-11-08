@@ -1,4 +1,4 @@
-// What the pixel stage the bake tool generates for a material reads of the
+// What the pixel stage the generate tool writes for a material reads of the
 // frame: the eye and the lights, from the view every pass reads, under the
 // names MaterialX's generator gives the uniforms it would put in the
 // material's own block (bake/generate.cpp leaves them out of it), so they

@@ -1,9 +1,10 @@
-//! The bake tool (`bake/bake.cpp`) as the renderer runs it, and each
-//! material's build, which runs it off the render thread. A material's
-//! document in, the pixel stage Houdini's MaterialX generates, the vertex
-//! stage feeding it and the manifest describing them out (`generate`); a
-//! texture as authored in, the file the renderer uploads out (`texture`);
-//! both kept under the cache so nothing is baked twice. A build generates
+//! The bake tools as the renderer runs them, and each material's build,
+//! which runs them off the render thread. `bake/generate.cpp`: a
+//! material's document in, the pixel stage Houdini's MaterialX generates,
+//! the vertex stage feeding it and the manifest describing them out;
+//! `bake/texture.cpp`: a texture as authored in, the file the renderer
+//! uploads out. Both kept under the cache so nothing is baked twice, each
+//! cache keyed on its own tool. A build generates
 //! a material's stages, compiles its surface (`shader`) and bakes and
 //! reads its textures, on one of `WORKERS` threads (`Builder`), and its
 //! result waits for the frame that installs it. Each job for a material is
@@ -27,7 +28,8 @@ use crate::texture::{self, Texture};
 use crate::uniforms::{self, Manifest};
 
 // Built by `make -C bake` from the checkout, like the shaders.
-const TOOL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/bake");
+const GENERATE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/generate");
+const TEXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/texture");
 // The library files that shadow Houdini's, which the generator inlines.
 const LIBRARIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bake/libraries");
 
@@ -45,7 +47,7 @@ pub struct Baked {
     /// cache, or `fallback` and its texel.
     pub key: String,
     pub texture: Texture,
-    /// Whether the bake tool ran now rather than the cache answering.
+    /// Whether the texture tool ran now rather than the cache answering.
     pub fresh: bool,
 }
 
@@ -56,33 +58,70 @@ pub struct Bake {
     /// The cache's `textures` directory, mirroring each source's path.
     textures: PathBuf,
     /// The host's OCIO config, or empty for OpenImageIO's default, through
-    /// which the tool converts textures to the working space.
+    /// which the texture tool converts textures to the working space.
     config: String,
-    /// A hash of the tool's own bytes, its library files and the listing
-    /// it generates from (`bake libraries`): a rebuilt or edited tool, or a
-    /// Houdini update beneath it, regenerates and re-bakes everything.
-    tool: u64,
+    /// The generate tool, also keyed on the library files it inlines.
+    generate: Tool,
+    texture: Tool,
+}
+
+/// A bake tool and the hash its cache is keyed on: its own bytes and what
+/// it lists of the libraries beneath it (`<tool> libraries`), so a rebuilt
+/// tool, or a Houdini update beneath it, misses that cache alone.
+#[derive(Clone)]
+struct Tool {
+    path: &'static str,
+    hash: u64,
+}
+
+impl Tool {
+    /// The tool at `path`, its hash taking in `more` too.
+    fn new(path: &'static str, more: &[u8]) -> Result<Self, String> {
+        let bytes = std::fs::read(path).map_err(|e| {
+            format!("cannot read the bake tool {path}: {e}. Build it with `make -C bake`.")
+        })?;
+        let mut tool = Self { path, hash: 0 };
+        let output = (tool.command().arg("libraries").output())
+            .map_err(|e| format!("could not run the bake tool {path}: {e}"))?;
+        if !output.status.success() {
+            return Err(failed(&output));
+        }
+        tool.hash = cache::fnv1a(&[&bytes, more, &output.stdout]);
+        Ok(tool)
+    }
+
+    fn command(&self) -> Command {
+        let mut command = Command::new(self.path);
+        // The tool's rpath beats a host's library path for its own libraries
+        // (bake/Makefile), but the libraries those load carry a runpath,
+        // which the path beats: a Houdini 21 host's would supply the codecs
+        // beneath OpenImageIO from Houdini 21, beside Houdini 22's MaterialX.
+        command.env_remove("LD_LIBRARY_PATH");
+        command
+    }
+
+    /// Runs the tool on `args`, failing with its complaint.
+    fn run(&self, command: &mut Command) -> Result<(), String> {
+        let output = (command.output())
+            .map_err(|e| format!("could not run the bake tool {}: {e}", self.path))?;
+        match output.status.success() {
+            true => Ok(()),
+            false => Err(failed(&output)),
+        }
+    }
 }
 
 impl Bake {
     pub fn new() -> Result<Self, String> {
-        let mut bytes = std::fs::read(TOOL).map_err(|e| {
-            format!("cannot read the bake tool {TOOL}: {e}. Build it with `make -C bake`.")
-        })?;
+        let mut libraries = Vec::new();
         for file in files(Path::new(LIBRARIES))? {
-            bytes.extend_from_slice(file.as_os_str().as_encoded_bytes());
-            bytes.extend(
+            libraries.extend_from_slice(file.as_os_str().as_encoded_bytes());
+            libraries.extend(
                 std::fs::read(&file).map_err(|e| format!("cannot read {}: {e}", file.display()))?,
             );
         }
-        let output = tool()
-            .arg("libraries")
-            .output()
-            .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
-        if !output.status.success() {
-            return Err(failed(&output));
-        }
-        bytes.extend_from_slice(&output.stdout);
+        let generate = Tool::new(GENERATE, &libraries)?;
+        let texture = Tool::new(TEXTURE, &[])?;
         let root = cache::root()?;
         let (materials, textures) = (root.join("materials"), root.join("textures"));
         for dir in [&materials, &textures] {
@@ -104,13 +143,14 @@ impl Bake {
             materials,
             textures,
             config: std::env::var("OCIO").unwrap_or_default(),
-            tool: cache::fnv1a(&[&bytes]),
+            generate,
+            texture,
         })
     }
 
     /// Generates `document`'s pixel stage, unless the cache holds it.
     pub fn generate(&self, document: &Document) -> Result<Generated, String> {
-        let key = cache::fnv1a(&[document.text.as_bytes(), &self.tool.to_le_bytes()]);
+        let key = cache::fnv1a(&[document.text.as_bytes(), &self.generate.hash.to_le_bytes()]);
         let dir = self.materials.join(format!("{key:016x}"));
         match generated(&dir) {
             Ok(manifest) => return Ok(Generated { manifest, dir }),
@@ -129,11 +169,8 @@ impl Bake {
                 .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
             std::fs::write(&path, &document.text)
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            let output = (tool().arg("generate").arg(&path).arg(&tmp).output())
-                .map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
-            if !output.status.success() {
-                return Err(failed(&output));
-            }
+            let tool = &self.generate;
+            tool.run(tool.command().arg(&path).arg(&tmp))?;
             match std::fs::rename(&tmp, &dir) {
                 Ok(()) => Ok(()),
                 Err(_) if dir.join("manifest").is_file() => Ok(()),
@@ -173,20 +210,17 @@ impl Bake {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         let tmp = path.with_extension(cache::unique());
-        let mut command = tool();
+        let mut command = self.texture.command();
         command
-            .arg("texture")
             .args([&source.space, source.encoding])
             .arg(&self.config)
             .arg(&tmp);
         for (number, tile) in &set {
             command.arg(number.to_string()).arg(tile);
         }
-        let output =
-            (command.output()).map_err(|e| format!("could not run the bake tool {TOOL}: {e}"))?;
-        if !output.status.success() {
+        if let Err(why) = self.texture.run(&mut command) {
             let _ = std::fs::remove_file(&tmp);
-            return Err(failed(&output));
+            return Err(why);
         }
         std::fs::rename(&tmp, &path)
             .map_err(|e| format!("cannot move {} into place: {e}", tmp.display()))?;
@@ -200,7 +234,8 @@ impl Bake {
     /// Where `source`'s bake lives, its files being `set` (`tiles`): under
     /// `textures`, mirroring the source's own path so one asset's bakes can
     /// be found and deleted, named by a hash of each file's name, size and
-    /// modification time, the space and encoding, the config and the tool,
+    /// modification time, the space and encoding, the config and the
+    /// texture tool,
     /// so an edited source, a tile added or a changed setting misses. Not
     /// the cap: the bake holds every level, and a cap loads fewer.
     pub fn texture_path(&self, source: &Source, set: &[(u32, PathBuf)]) -> Result<PathBuf, String> {
@@ -226,7 +261,7 @@ impl Bake {
             b"\0",
             self.config.as_bytes(),
             b"\0",
-            &self.tool.to_le_bytes(),
+            &self.texture.hash.to_le_bytes(),
         ]);
         let source = Path::new(&source.file);
         let dir = source.parent().unwrap_or(Path::new("."));
@@ -302,16 +337,6 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
     uniforms::manifest(&text)
 }
 
-fn tool() -> Command {
-    let mut command = Command::new(TOOL);
-    // The tool's rpath beats a host's library path for its own libraries
-    // (bake/Makefile), but the libraries those load carry a runpath, which
-    // the path beats: a Houdini 21 host's would supply the codecs beneath
-    // OpenImageIO from Houdini 21, beside Houdini 22's MaterialX.
-    command.env_remove("LD_LIBRARY_PATH");
-    command
-}
-
 /// The tool's complaint, on one line so a warning quoting it stays one.
 fn failed(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -321,7 +346,7 @@ fn failed(output: &std::process::Output) -> String {
     )
 }
 
-// slangc takes one core for a third of a second, and the bake tool spreads
+// slangc takes one core for a third of a second, and the texture tool spreads
 // a texture over every core, so a few jobs at a time keep the cores busy
 // without piling up decoded 4K images.
 const WORKERS: usize = 4;
@@ -666,13 +691,20 @@ mod tests {
         std::fs::create_dir_all(dir.join("assets")).unwrap();
         let source = dir.join("assets/rock.png");
         std::fs::write(&source, b"png").unwrap();
-        let bake = |config: &str, tool| Bake {
+        let bake = |config: &str, texture, generate| Bake {
             materials: dir.join("materials"),
             textures: dir.join("textures"),
             config: config.into(),
-            tool,
+            generate: Tool {
+                path: GENERATE,
+                hash: generate,
+            },
+            texture: Tool {
+                path: TEXTURE,
+                hash: texture,
+            },
         };
-        let path = key(&bake("", 1), &source, "srgb_texture", "color").unwrap();
+        let path = key(&bake("", 1, 1), &source, "srgb_texture", "color").unwrap();
         // temp_dir may be a symlink; the mirror follows the real path.
         let real = std::fs::canonicalize(&source).unwrap();
         assert_eq!(
@@ -682,7 +714,12 @@ mod tests {
         assert_eq!(path.file_name().unwrap().len(), 16);
         assert_eq!(
             path,
-            key(&bake("", 1), &source, "srgb_texture", "color").unwrap()
+            key(&bake("", 1, 1), &source, "srgb_texture", "color").unwrap()
+        );
+        // A rebuilt generate tool leaves the textures baked.
+        assert_eq!(
+            path,
+            key(&bake("", 1, 2), &source, "srgb_texture", "color").unwrap()
         );
         for (space, encoding, config, tool) in [
             ("raw", "color", "", 1),
@@ -692,7 +729,7 @@ mod tests {
         ] {
             assert_ne!(
                 path,
-                key(&bake(config, tool), &source, space, encoding).unwrap()
+                key(&bake(config, tool, 1), &source, space, encoding).unwrap()
             );
         }
 
@@ -702,9 +739,17 @@ mod tests {
             .unwrap();
         assert_ne!(
             path,
-            key(&bake("", 1), &source, "srgb_texture", "color").unwrap()
+            key(&bake("", 1, 1), &source, "srgb_texture", "color").unwrap()
         );
-        assert!(key(&bake("", 1), Path::new("/nowhere/rock.png"), "raw", "data").is_err());
+        assert!(
+            key(
+                &bake("", 1, 1),
+                Path::new("/nowhere/rock.png"),
+                "raw",
+                "data"
+            )
+            .is_err()
+        );
 
         // A set is keyed on its tiles: one added or saved again misses.
         let pattern = dir.join("assets/wall.<UDIM>.png");
@@ -723,7 +768,7 @@ mod tests {
         assert_eq!(tiles(&source).unwrap(), [(0, source.clone())]);
         let error = tiles(Path::new("")).unwrap_err();
         assert!(error.contains("did not resolve"), "{error}");
-        let set = key(&bake("", 1), &pattern, "raw", "data").unwrap();
+        let set = key(&bake("", 1, 1), &pattern, "raw", "data").unwrap();
         assert_eq!(
             set.parent().unwrap(),
             dir.join("textures")
@@ -731,7 +776,7 @@ mod tests {
                 .join("wall.<UDIM>.png")
         );
         std::fs::write(dir.join("assets/wall.1002.png"), b"png").unwrap();
-        let added = key(&bake("", 1), &pattern, "raw", "data").unwrap();
+        let added = key(&bake("", 1, 1), &pattern, "raw", "data").unwrap();
         assert_ne!(set, added);
         let file = std::fs::File::options()
             .write(true)
@@ -739,7 +784,10 @@ mod tests {
             .unwrap();
         file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(2_000_000))
             .unwrap();
-        assert_ne!(added, key(&bake("", 1), &pattern, "raw", "data").unwrap());
+        assert_ne!(
+            added,
+            key(&bake("", 1, 1), &pattern, "raw", "data").unwrap()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -778,7 +826,14 @@ mod tests {
             materials: "materials".into(),
             textures: "textures".into(),
             config: String::new(),
-            tool: 1,
+            generate: Tool {
+                path: GENERATE,
+                hash: 1,
+            },
+            texture: Tool {
+                path: TEXTURE,
+                hash: 1,
+            },
         });
         let mut finished = |id: u64, stale: bool| {
             let generation = builder.latest.submit(id);

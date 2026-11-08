@@ -156,7 +156,7 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
     }
     if level_size(format, 1, 1).is_none() {
         return Err(format!(
-            "has the format {format:?}, which the bake tool does not write"
+            "has the format {format:?}, which the texture tool does not write"
         ));
     }
     if width == 0 || height == 0 || layers == 0 {
@@ -1344,7 +1344,7 @@ pub mod tests {
         bytes
     }
 
-    /// The bake tool wrote this for bake/fixtures/ramp.exr, whose texels
+    /// The texture tool wrote this for bake/fixtures/ramp.exr, whose texels
     /// hold their own centres.
     pub const RAMP: &[u8] = include_bytes!("../bake/fixtures/ramp.texture");
 
@@ -1489,7 +1489,7 @@ pub mod tests {
         }
 
         // A 5×3 image: its levels are 5×3, 2×1 and 1×1, so a cap of 4 or
-        // 3 starts at 2×1, as the bake tool's halving once did.
+        // 3 starts at 2×1, as the texture tool's halving once did.
         let mut file = b"pika".to_vec();
         for word in [5u32, 3, 1, 3, 100, 0, 0, 1, 0] {
             file.extend_from_slice(&word.to_le_bytes());

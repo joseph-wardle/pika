@@ -12,8 +12,8 @@
 # and hython draw on a private Xvnc display started here. The validation
 # layer must be on and report nothing from Pika.
 #
-# Materials need the bake tool, built against Houdini 22 whichever Houdini
-# hosts the delegate (BAKE_HFS); the shaders it generates go to a cache of
+# Materials need the bake tools, built against Houdini 22 whichever Houdini
+# hosts the delegate (BAKE_HFS); the shaders they generate go to a cache of
 # this run's own.
 #
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
@@ -28,7 +28,7 @@ OUT=$ROOT/target/hydra/check/$(basename "$HFS")
 RENDERS=8
 
 make -C "$ROOT/hydra" --no-print-directory HFS="$HFS" OUT="$OUT/plugin"
-# Both Houdinis' checks share the bake tool.
+# Both Houdinis' checks share the bake tools.
 flock "$ROOT/target/bake.lock" make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
 rm -rf "$OUT/cache" "$OUT/fixtures"
 mkdir -p "$OUT/images" "$OUT/fixtures"

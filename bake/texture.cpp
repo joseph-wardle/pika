@@ -1,5 +1,11 @@
-// The texture job: an image as authored in, or a UDIM set as the renderer
-// lists its tiles, the one file the renderer uploads out. OpenImageIO
+// The texture tool, the one Pika program that links OpenImageIO; the
+// renderer runs it (src/bake.rs), so OpenImageIO never loads into the host
+// beside the host's own.
+//
+//   texture <space> <encoding> <config> <out> (<tile> <file>)...
+//
+// An image as authored in, or a UDIM set as the renderer lists its tiles,
+// the one file the renderer uploads out. OpenImageIO
 // decodes the source; its stored mip levels are kept and the missing ones
 // are built by box filtering, every level down to 1×1, so one bake serves
 // every cap the renderer loads under (src/texture.rs); OpenColorIO
@@ -24,8 +30,12 @@
 // entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
 // or 0xFFFFFFFF where the set lacks it. Then each level in order, every
 // layer within it. src/texture.rs reads it.
+//
+//   texture libraries
+//
+// Lists the libraries beneath the tool, OpenImageIO, OpenColorIO and the
+// codecs, for the renderer's cache key.
 
-#include "bake.h"
 #include "bc7enc/bc7enc.h"
 
 #include <OpenImageIO/color.h>
@@ -36,7 +46,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -45,6 +58,13 @@
 #include <vector>
 
 namespace {
+
+// One file of a texture: an image on its own, numbered 0, or a UDIM tile
+// numbered 1001 to 1100, as the renderer lists them (src/bake.rs).
+struct Tile {
+    unsigned number;
+    std::string path;
+};
 
 // MaterialX's document colour space, under the name every ACES config
 // carries. Its full name is "Linear Rec.709 (sRGB)"; under an ACES config
@@ -346,8 +366,6 @@ std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string
     return bytes;
 }
 
-} // namespace
-
 void texture(std::vector<Tile> const &set, std::string const &space, std::string const &encoding,
              std::string const &config, std::string const &out) {
     if (encoding != "float" && encoding != "color" && encoding != "data" && encoding != "single")
@@ -426,4 +444,45 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
             file.write(reinterpret_cast<char const *>(layer[level].data()), layer[level].size());
     if (!file)
         throw std::runtime_error("cannot write " + out);
+}
+
+void libraries() {
+    std::string text = "openimageio " + std::string(OIIO_VERSION_STRING) + "\nopencolorio " +
+                       std::string(OIIO::get_string_attribute("opencolorio_version")) + "\n";
+    std::string list(OIIO::get_string_attribute("library_list"));
+    for (size_t start = 0; start < list.size();) {
+        size_t end = std::min(list.find(';', start), list.size());
+        text += list.substr(start, end - start) + "\n";
+        start = end + 1;
+    }
+    fputs(text.c_str(), stdout);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    std::string job = argc > 1 ? argv[1] : "";
+    try {
+        if (job == "libraries" && argc == 2) {
+            libraries();
+        } else if (argc >= 7 && argc % 2 == 1) {
+            char *end = nullptr;
+            std::vector<Tile> set;
+            for (int i = 5; i < argc; i += 2) {
+                unsigned long number = strtoul(argv[i], &end, 10);
+                if (*argv[i] == 0 || *end != 0)
+                    throw std::runtime_error(std::string("the tile ") + argv[i] + " is not a number");
+                set.push_back({unsigned(number), argv[i + 1]});
+            }
+            texture(set, argv[1], argv[2], argv[3], argv[4]);
+        } else {
+            fprintf(stderr, "usage: texture <space> <encoding> <config> <out> (<tile> <file>)...\n"
+                            "       texture libraries\n");
+            return 2;
+        }
+    } catch (std::exception const &e) {
+        fprintf(stderr, "texture: error: %s\n", e.what());
+        return 1;
+    }
+    return 0;
 }

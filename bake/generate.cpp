@@ -1,14 +1,22 @@
-// The generate job: a material's document (src/material.rs) in, the pixel
-// stage from Houdini's MaterialX Slang generator out, as <out>/pixel.slang,
-// with <out>/surface.slang, the vertex stage that fills what it reads from
-// the renderer's vertices, and <out>/manifest saying what the stage expects
-// of the renderer: its public uniforms with their types and initial values
-// and its textures. The libraries job lists what generate reads beyond the
-// document, for the renderer's cache key. The eye and the lights the pixel
+// The generate tool, the one Pika program that links MaterialX; the
+// renderer runs it (src/bake.rs), so MaterialX never loads into the host
+// beside the host's own.
+//
+//   generate <document.mtlx> <out>
+//
+// A material's document (src/material.rs) in, the pixel stage from
+// Houdini's MaterialX Slang generator out, as <out>/pixel.slang, with
+// <out>/surface.slang, the vertex stage that fills what it reads from the
+// renderer's vertices, and <out>/manifest saying what the stage expects of
+// the renderer: its public uniforms with their types and initial values
+// and its textures.
+//
+//   generate libraries
+//
+// Lists what generate reads beyond the document, for the renderer's cache
+// key. The eye and the lights the pixel
 // stage reads come from the renderer's view (shaders/frame.slang), not from
 // the material's block, which holds the public uniforms alone.
-
-#include "bake.h"
 
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/Util.h>
@@ -20,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <exception>
 #include <filesystem>
 #include <set>
 #include <fstream>
@@ -68,7 +77,7 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
 // (src/material.rs); only the nodedefs say which inputs read UV0, so a
 // surface reading two is refused here.
 std::string vertex(mx::ShaderStage const &stage) {
-    std::string text = "// Written by the bake tool: the vertex stage for the pixel stage beside it.\n\n"
+    std::string text = "// Written by bake/generate.cpp: the vertex stage for the pixel stage beside it.\n\n"
                        "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"
                        "[shader(\"vertex\")]\n"
                        "VertexData vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)\n"
@@ -171,8 +180,6 @@ class Generator : public mx::SlangShaderGenerator {
     }
 };
 
-} // namespace
-
 void generate(std::string const &path, std::string const &out) {
     mx::DocumentPtr libraries = mx::createDocument();
     mx::loadLibraries({"libraries"}, mx::FileSearchPath(materialx), libraries);
@@ -239,4 +246,25 @@ void libraries() {
     for (std::string const &line : lines)
         text += line + "\n";
     fputs(text.c_str(), stdout);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    std::string job = argc > 1 ? argv[1] : "";
+    try {
+        if (job == "libraries" && argc == 2) {
+            libraries();
+        } else if (argc == 3 && job != "libraries") {
+            generate(argv[1], argv[2]);
+        } else {
+            fprintf(stderr, "usage: generate <document.mtlx> <out>\n"
+                            "       generate libraries\n");
+            return 2;
+        }
+    } catch (std::exception const &e) {
+        fprintf(stderr, "generate: error: %s\n", e.what());
+        return 1;
+    }
+    return 0;
 }
