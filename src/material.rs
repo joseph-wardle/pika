@@ -74,7 +74,7 @@ impl Network {
     }
 }
 
-/// A texture as a material asks the bake tool for it: the file, the colour
+/// A texture as a material asks the texture tool for it: the file, the colour
 /// space the file is in, the encoding it is stored with, and, when
 /// the file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
@@ -451,7 +451,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
          name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
          </surfacematerial>\n</materialx>\n",
     );
-    // A surface reading two is the bake tool's to refuse, naming both.
+    // A surface reading two is the generate tool's to refuse, naming both.
     let texcoord = primvars
         .into_iter()
         .next()
@@ -656,7 +656,7 @@ pub mod tests {
         assert_eq!(texcoord(&Network::default()).unwrap(), None);
 
         // A second reader of the same name is one texcoord; of another,
-        // the first by name, which the bake tool then refuses.
+        // the first by name, which the generate tool then refuses.
         let mut network = fixture();
         let mut reader = network.nodes["st"].clone();
         network.nodes.insert("uv".into(), reader.clone());

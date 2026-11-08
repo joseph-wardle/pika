@@ -1,9 +1,10 @@
 Pika ships this third-party code, each with its notice and licence beside it:
 
-- bake/bc7enc: the BC7 encoder from Richard Geldreich's bc7enc_rdo, under
-  the MIT licence (bake/bc7enc/NOTICE), compiled into the bake tool.
+- bake/bc7e: the BC7 encoder bc7e from Richard Geldreich's bc7enc_rdo,
+  Copyright Binomial LLC, under the Apache License 2.0 (bake/bc7e/NOTICE),
+  compiled into the texture tool.
 - bake/libraries: the texture sampling file of the MaterialX project's Slang
   generator, modified for Pika's UDIM arrays, under the Apache License 2.0
   (bake/libraries/NOTICE), compiled into every material shader.
 
-A binary distribution of the bake tool carries these notices with it.
+A binary distribution of the bake tools carries these notices with it.

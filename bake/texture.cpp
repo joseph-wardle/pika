@@ -1,5 +1,11 @@
-// The texture job: an image as authored in, or a UDIM set as the renderer
-// lists its tiles, the one file the renderer uploads out. OpenImageIO
+// The texture tool, the one Pika program that links OpenImageIO; the
+// renderer runs it (src/bake.rs), so OpenImageIO never loads into the host
+// beside the host's own.
+//
+//   texture <space> <encoding> <config> <out> (<tile> <file>)...
+//
+// An image as authored in, or a UDIM set as the renderer lists its tiles,
+// the one file the renderer uploads out. OpenImageIO
 // decodes the source; its stored mip levels are kept and the missing ones
 // are built by box filtering, every level down to 1×1, so one bake serves
 // every cap the renderer loads under (src/texture.rs); OpenColorIO
@@ -24,9 +30,14 @@
 // entry, 0, for a plain image; for a set 100, the layer of tile 1001 + i
 // or 0xFFFFFFFF where the set lacks it. Then each level in order, every
 // layer within it. src/texture.rs reads it.
+//
+//   texture libraries
+//
+// Lists the libraries beneath the tool, OpenImageIO, OpenColorIO and the
+// codecs, for the renderer's cache key.
 
-#include "bake.h"
-#include "bc7enc/bc7enc.h"
+// Written by ispc from bc7e/bc7e.ispc (bake/Makefile).
+#include "bc7e_ispc.h"
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imageio.h>
@@ -36,7 +47,10 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -45,6 +59,13 @@
 #include <vector>
 
 namespace {
+
+// One file of a texture: an image on its own, numbered 0, or a UDIM tile
+// numbered 1001 to 1100, as the renderer lists them (src/bake.rs).
+struct Tile {
+    unsigned number;
+    std::string path;
+};
 
 // MaterialX's document colour space, under the name every ACES config
 // carries. Its full name is "Linear Rec.709 (sRGB)"; under an ACES config
@@ -240,9 +261,9 @@ void block(Level const &level, unsigned bx, unsigned by, uint8_t out[64]) {
     }
 }
 
-// Encodes the level's 4×4 blocks, `size` bytes each, a row of blocks per
-// thread at a time: a 4K level is a million blocks, seven seconds on one
-// core.
+// Encodes the level's 4×4 blocks, `size` bytes each, a row of `bw` blocks
+// per thread at a time: a 4K level is a million blocks, about three seconds
+// of BC7 on one core.
 template <typename Encode>
 std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     unsigned bw = (level.width + 3) / 4, bh = (level.height + 3) / 4;
@@ -250,8 +271,7 @@ std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     std::atomic<unsigned> next(0);
     auto rows = [&] {
         for (unsigned by = next++; by < bh; by = next++)
-            for (unsigned bx = 0; bx < bw; ++bx)
-                encode(bx, by, &out[(size_t(by) * bw + bx) * size]);
+            encode(by, bw, &out[size_t(by) * bw * size]);
     };
     std::vector<std::thread> threads;
     for (unsigned i = 1; i < std::min(bh, std::thread::hardware_concurrency()); ++i)
@@ -262,43 +282,51 @@ std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     return out;
 }
 
-std::vector<uint8_t> bc7(Level const &level, bc7enc_compress_block_params const &params) {
-    return blocks(level, 16, [&](unsigned bx, unsigned by, uint8_t *out) {
-        uint8_t texels[64];
-        block(level, bx, by, texels);
-        bc7enc_compress_block(out, texels, &params);
+// bc7e encodes a row's blocks together, a block per SIMD lane.
+std::vector<uint8_t> bc7(Level const &level, ispc::bc7e_compress_block_params const &params) {
+    return blocks(level, 16, [&](unsigned by, unsigned bw, uint8_t *out) {
+        std::vector<uint32_t> texels(size_t(bw) * 16);
+        for (unsigned bx = 0; bx < bw; ++bx)
+            block(level, bx, by, reinterpret_cast<uint8_t *>(&texels[bx * 16]));
+        ispc::bc7e_compress_blocks(bw, reinterpret_cast<uint64_t *>(out), texels.data(), &params);
     });
 }
 
 // The plain BC4 encoder: the block's extremes as the endpoints, each texel
 // the nearest of the eight values between them.
+void bc4_block(uint8_t const texels[64], uint8_t out[8]) {
+    uint8_t lo = 255, hi = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        lo = std::min(lo, texels[i * 4]);
+        hi = std::max(hi, texels[i * 4]);
+    }
+    // With the first endpoint the larger, index 0 is hi, 1 is lo and 2 to 7
+    // step from hi to lo in sevenths.
+    int palette[8] = {hi, lo};
+    for (int k = 2; k < 8; ++k)
+        palette[k] = ((8 - k) * hi + (k - 1) * lo) / 7;
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        int best = 0;
+        for (int k = 1; k < 8 && hi != lo; ++k) {
+            if (std::abs(palette[k] - texels[i * 4]) < std::abs(palette[best] - texels[i * 4]))
+                best = k;
+        }
+        bits |= uint64_t(best) << (3 * i);
+    }
+    out[0] = hi;
+    out[1] = lo;
+    for (int i = 0; i < 6; ++i)
+        out[2 + i] = uint8_t(bits >> (8 * i));
+}
+
 std::vector<uint8_t> bc4(Level const &level) {
-    return blocks(level, 8, [&](unsigned bx, unsigned by, uint8_t *out) {
-        uint8_t texels[64];
-        block(level, bx, by, texels);
-        uint8_t lo = 255, hi = 0;
-        for (unsigned i = 0; i < 16; ++i) {
-            lo = std::min(lo, texels[i * 4]);
-            hi = std::max(hi, texels[i * 4]);
+    return blocks(level, 8, [&](unsigned by, unsigned bw, uint8_t *out) {
+        for (unsigned bx = 0; bx < bw; ++bx) {
+            uint8_t texels[64];
+            block(level, bx, by, texels);
+            bc4_block(texels, out + bx * 8);
         }
-        // With the first endpoint the larger, index 0 is hi, 1 is lo and 2
-        // to 7 step from hi to lo in sevenths.
-        int palette[8] = {hi, lo};
-        for (int k = 2; k < 8; ++k)
-            palette[k] = ((8 - k) * hi + (k - 1) * lo) / 7;
-        uint64_t bits = 0;
-        for (unsigned i = 0; i < 16; ++i) {
-            int best = 0;
-            for (int k = 1; k < 8 && hi != lo; ++k) {
-                if (std::abs(palette[k] - texels[i * 4]) < std::abs(palette[best] - texels[i * 4]))
-                    best = k;
-            }
-            bits |= uint64_t(best) << (3 * i);
-        }
-        out[0] = hi;
-        out[1] = lo;
-        for (int i = 0; i < 6; ++i)
-            out[2 + i] = uint8_t(bits >> (8 * i));
     });
 }
 
@@ -328,25 +356,27 @@ std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string
         for (Level const &level : levels)
             bytes.push_back(bc4(level));
     } else {
-        bc7enc_compress_block_init();
-        bc7enc_compress_block_params params;
-        bc7enc_compress_block_params_init(&params);
-        if (encoding == "color") {
-            format = BC7_SRGB_BLOCK;
-            bc7enc_compress_block_params_init_perceptual_weights(&params);
+        // veryfast, with the three-subset modes it drops: without them a
+        // block of three or more flat colours (text, decals, stripes)
+        // blends them, off by up to 225 of 255. So set, on ALab's colour and
+        // normal maps it is at least as close as the bc7enc encoder it
+        // replaced, in a half to three quarters of the time.
+        bool color = encoding == "color";
+        ispc::bc7e_compress_block_init();
+        ispc::bc7e_compress_block_params params;
+        ispc::bc7e_compress_block_params_init_veryfast(&params, color);
+        params.m_opaque_settings.m_use_mode[0] = true;
+        params.m_opaque_settings.m_use_mode[2] = true;
+        format = color ? BC7_SRGB_BLOCK : BC7_UNORM_BLOCK;
+        if (color) {
             for (Level &level : levels)
                 encode_srgb(level);
-        } else {
-            format = BC7_UNORM_BLOCK;
-            bc7enc_compress_block_params_init_linear_weights(&params);
         }
         for (Level const &level : levels)
             bytes.push_back(bc7(level, params));
     }
     return bytes;
 }
-
-} // namespace
 
 void texture(std::vector<Tile> const &set, std::string const &space, std::string const &encoding,
              std::string const &config, std::string const &out) {
@@ -426,4 +456,45 @@ void texture(std::vector<Tile> const &set, std::string const &space, std::string
             file.write(reinterpret_cast<char const *>(layer[level].data()), layer[level].size());
     if (!file)
         throw std::runtime_error("cannot write " + out);
+}
+
+void libraries() {
+    std::string text = "openimageio " + std::string(OIIO_VERSION_STRING) + "\nopencolorio " +
+                       std::string(OIIO::get_string_attribute("opencolorio_version")) + "\n";
+    std::string list(OIIO::get_string_attribute("library_list"));
+    for (size_t start = 0; start < list.size();) {
+        size_t end = std::min(list.find(';', start), list.size());
+        text += list.substr(start, end - start) + "\n";
+        start = end + 1;
+    }
+    fputs(text.c_str(), stdout);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    std::string job = argc > 1 ? argv[1] : "";
+    try {
+        if (job == "libraries" && argc == 2) {
+            libraries();
+        } else if (argc >= 7 && argc % 2 == 1) {
+            char *end = nullptr;
+            std::vector<Tile> set;
+            for (int i = 5; i < argc; i += 2) {
+                unsigned long number = strtoul(argv[i], &end, 10);
+                if (*argv[i] == 0 || *end != 0)
+                    throw std::runtime_error(std::string("the tile ") + argv[i] + " is not a number");
+                set.push_back({unsigned(number), argv[i + 1]});
+            }
+            texture(set, argv[1], argv[2], argv[3], argv[4]);
+        } else {
+            fprintf(stderr, "usage: texture <space> <encoding> <config> <out> (<tile> <file>)...\n"
+                            "       texture libraries\n");
+            return 2;
+        }
+    } catch (std::exception const &e) {
+        fprintf(stderr, "texture: error: %s\n", e.what());
+        return 1;
+    }
+    return 0;
 }

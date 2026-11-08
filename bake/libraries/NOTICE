@@ -2,6 +2,6 @@ stdlib/genslang/lib/mx_texture.slang is modified from the file of that path
 in MaterialX 1.39.5 (https://github.com/AcademySoftwareFoundation/MaterialX,
 Copyright Contributors to the MaterialX Project), under the Apache License
 2.0 (LICENSE here, the project's). The upstream file carries no notice of
-its own. The file's header says how it differs; the bake tool registers
+its own. The file's header says how it differs; the generate tool registers
 this directory's parent as a source search path, so it shadows Houdini's
 copy of the same path.

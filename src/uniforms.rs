@@ -297,7 +297,7 @@ pub mod tests {
     use super::*;
     use crate::material::{self, tests::fixture};
 
-    /// The bake tool wrote this for bake/fixtures/network.mtlx.
+    /// The generate tool wrote this for bake/fixtures/network.mtlx.
     pub const MANIFEST: &str = include_str!("../bake/fixtures/network.manifest");
 
     // slangc's reflection of the tool's output for bake/fixtures/network.mtlx,

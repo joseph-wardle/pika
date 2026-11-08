@@ -1,4 +1,4 @@
-//! The material pass: each surface's pipelines, built from the bake tool's
+//! The material pass: each surface's pipelines, built from the generate tool's
 //! pixel stage and the vertex stage written for it, each material's
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by the view's
@@ -108,7 +108,7 @@ struct Material {
 pub struct Update {
     /// Surfaces slangc compiled; the cache answered for the rest.
     pub compiled: usize,
-    /// Textures the bake tool baked, likewise.
+    /// Textures the texture tool baked, likewise.
     pub baked: usize,
     /// The baked bytes the textures loaded and swapped uploaded.
     pub loaded: u64,

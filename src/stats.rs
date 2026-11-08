@@ -65,7 +65,7 @@ pub struct Frame {
     pub latent: bool,
     /// Surfaces slangc compiled for this frame.
     pub compiled: usize,
-    /// Textures the bake tool baked for this frame.
+    /// Textures the texture tool baked for this frame.
     pub baked: usize,
     /// The baked bytes the textures loaded this frame uploaded.
     pub loaded: u64,

@@ -408,7 +408,7 @@ def upstream(shader, name):
 
 
 def nodedefs():
-    """The host's MaterialX libraries, as the bake tool loads them."""
+    """The host's MaterialX libraries, as the generate tool loads them."""
     libraries = mx.createDocument()
     search = mx.FileSearchPath(os.path.join(os.environ["HFS"], "houdini", "materialx"))
     mx.loadLibraries(["libraries"], search, libraries)
@@ -492,7 +492,7 @@ def metadata(path, control=None):
     """The wrap modes (u, v) the file's wrapmodes attribute states, as
     maketx writes it ("black,clamp", or one word for both), black for an
     axis it states none or another for, as Storm reads it; a set's are its
-    first tile's, as the bake tool reads them."""
+    first tile's, as the texture tool reads them."""
     if "<UDIM>" in path:
         path = next(p for p in (path.replace("<UDIM>", str(n)) for n in range(1001, 1101)) if os.path.isfile(p))
     file = oiio.ImageInput.open(path)
@@ -656,7 +656,7 @@ def working(texels, path, space, control=None):
 
 def halve(texels):
     """A 2×2 box of the texels (rows, columns, channels), the last row or
-    column repeated where a side is odd, as the bake tool builds a level."""
+    column repeated where a side is odd, as the texture tool builds a level."""
     h, w = texels.shape[:2]
     padded = texels[np.minimum(np.arange(h + h % 2), h - 1)][:, np.minimum(np.arange(w + w % 2), w - 1)]
     return padded.reshape((h + 1) // 2, 2, (w + 1) // 2, 2, -1).mean((1, 3))

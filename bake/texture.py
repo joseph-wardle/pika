@@ -119,7 +119,9 @@ def check(out):
     levels = baked("swatch", (8, 8, 1, 4, 146))
     expect("swatch level 0", levels[0][..., :3], swatch, 2)
     expect("swatch level 0 alpha", levels[0][..., 3], np.full((8, 8), 255), 2)
-    expect("swatch level 1", levels[1][..., :3], swatch[::2, ::2], 2)
+    # Level 1 is one block of four flat colours, more than BC7's three
+    # subsets hold exactly.
+    expect("swatch level 1", levels[1][..., :3], swatch[::2, ::2], 4)
     mean = linear(swatch / 255).reshape(-1, 3).mean(0)
     expect("swatch level 3", levels[3][0, 0, :3], srgb(mean) * 255, 2)
 
