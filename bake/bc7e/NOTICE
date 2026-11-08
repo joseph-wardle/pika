@@ -1,0 +1,5 @@
+bc7e.ispc is the BC7 encoder from Richard Geldreich's bc7enc_rdo,
+https://github.com/richgel999/bc7enc_rdo at commit b9438627eef73a1157e84201b6fa6eb2ffd6d9f0,
+copied unchanged. It is Copyright (C) 2018-2021 Binomial LLC, under the
+Apache License 2.0 (LICENSE). The repository's other files are not used.
+ispc (https://ispc.github.io) compiles it into the texture tool.

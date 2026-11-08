@@ -5,6 +5,7 @@
 # built for Houdini 21 still runs these tools.
 
 HFS ?= /opt/hfs22.0
+ISPC ?= ispc
 ROOT := $(abspath ..)
 OUT := $(ROOT)/target/bake
 
@@ -20,16 +21,19 @@ $(OUT)/generate: $(OUT)/generate.o
 	$(CXX) $(LDFLAGS) -o $@ $^ -lMaterialXGenSlang -lMaterialXGenHw -lMaterialXGenShader \
 		-lMaterialXFormat -lMaterialXCore
 
-$(OUT)/texture: $(OUT)/texture.o $(OUT)/bc7enc.o
+$(OUT)/texture: $(OUT)/texture.o $(OUT)/bc7e.o
 	$(CXX) $(LDFLAGS) -o $@ $^ -lOpenImageIO_sidefx -lOpenImageIO_Util_sidefx
+
+$(OUT)/texture.o: $(OUT)/bc7e.o
 
 $(OUT)/%.o: %.cpp
 	mkdir -p $(OUT)
-	$(CXX) $(CXXFLAGS) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) -I$(OUT) -c -o $@ $<
 
-# Third-party code (bc7enc/NOTICE), built without Pika's warnings.
-$(OUT)/bc7enc.o: bc7enc/bc7enc.cpp bc7enc/bc7enc.h
+# Third-party code (bc7e/NOTICE). One target, AVX2, rather than ispc's
+# dispatch between several, so every machine bakes the same bytes.
+$(OUT)/bc7e.o: bc7e/bc7e.ispc
 	mkdir -p $(OUT)
-	$(CXX) -std=c++17 -O2 -c -o $@ $<
+	$(ISPC) -O2 --pic --target=avx2-i32x8 --opt=disable-assertions --woff -o $@ -h $(OUT)/bc7e_ispc.h $<
 
 .PHONY: all

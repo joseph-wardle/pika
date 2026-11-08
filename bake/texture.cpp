@@ -36,7 +36,8 @@
 // Lists the libraries beneath the tool, OpenImageIO, OpenColorIO and the
 // codecs, for the renderer's cache key.
 
-#include "bc7enc/bc7enc.h"
+// Written by ispc from bc7e/bc7e.ispc (bake/Makefile).
+#include "bc7e_ispc.h"
 
 #include <OpenImageIO/color.h>
 #include <OpenImageIO/imageio.h>
@@ -260,9 +261,9 @@ void block(Level const &level, unsigned bx, unsigned by, uint8_t out[64]) {
     }
 }
 
-// Encodes the level's 4×4 blocks, `size` bytes each, a row of blocks per
-// thread at a time: a 4K level is a million blocks, seven seconds on one
-// core.
+// Encodes the level's 4×4 blocks, `size` bytes each, a row of `bw` blocks
+// per thread at a time: a 4K level is a million blocks, about three seconds
+// of BC7 on one core.
 template <typename Encode>
 std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     unsigned bw = (level.width + 3) / 4, bh = (level.height + 3) / 4;
@@ -270,8 +271,7 @@ std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     std::atomic<unsigned> next(0);
     auto rows = [&] {
         for (unsigned by = next++; by < bh; by = next++)
-            for (unsigned bx = 0; bx < bw; ++bx)
-                encode(bx, by, &out[(size_t(by) * bw + bx) * size]);
+            encode(by, bw, &out[size_t(by) * bw * size]);
     };
     std::vector<std::thread> threads;
     for (unsigned i = 1; i < std::min(bh, std::thread::hardware_concurrency()); ++i)
@@ -282,43 +282,51 @@ std::vector<uint8_t> blocks(Level const &level, size_t size, Encode encode) {
     return out;
 }
 
-std::vector<uint8_t> bc7(Level const &level, bc7enc_compress_block_params const &params) {
-    return blocks(level, 16, [&](unsigned bx, unsigned by, uint8_t *out) {
-        uint8_t texels[64];
-        block(level, bx, by, texels);
-        bc7enc_compress_block(out, texels, &params);
+// bc7e encodes a row's blocks together, a block per SIMD lane.
+std::vector<uint8_t> bc7(Level const &level, ispc::bc7e_compress_block_params const &params) {
+    return blocks(level, 16, [&](unsigned by, unsigned bw, uint8_t *out) {
+        std::vector<uint32_t> texels(size_t(bw) * 16);
+        for (unsigned bx = 0; bx < bw; ++bx)
+            block(level, bx, by, reinterpret_cast<uint8_t *>(&texels[bx * 16]));
+        ispc::bc7e_compress_blocks(bw, reinterpret_cast<uint64_t *>(out), texels.data(), &params);
     });
 }
 
 // The plain BC4 encoder: the block's extremes as the endpoints, each texel
 // the nearest of the eight values between them.
+void bc4_block(uint8_t const texels[64], uint8_t out[8]) {
+    uint8_t lo = 255, hi = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        lo = std::min(lo, texels[i * 4]);
+        hi = std::max(hi, texels[i * 4]);
+    }
+    // With the first endpoint the larger, index 0 is hi, 1 is lo and 2 to 7
+    // step from hi to lo in sevenths.
+    int palette[8] = {hi, lo};
+    for (int k = 2; k < 8; ++k)
+        palette[k] = ((8 - k) * hi + (k - 1) * lo) / 7;
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < 16; ++i) {
+        int best = 0;
+        for (int k = 1; k < 8 && hi != lo; ++k) {
+            if (std::abs(palette[k] - texels[i * 4]) < std::abs(palette[best] - texels[i * 4]))
+                best = k;
+        }
+        bits |= uint64_t(best) << (3 * i);
+    }
+    out[0] = hi;
+    out[1] = lo;
+    for (int i = 0; i < 6; ++i)
+        out[2 + i] = uint8_t(bits >> (8 * i));
+}
+
 std::vector<uint8_t> bc4(Level const &level) {
-    return blocks(level, 8, [&](unsigned bx, unsigned by, uint8_t *out) {
-        uint8_t texels[64];
-        block(level, bx, by, texels);
-        uint8_t lo = 255, hi = 0;
-        for (unsigned i = 0; i < 16; ++i) {
-            lo = std::min(lo, texels[i * 4]);
-            hi = std::max(hi, texels[i * 4]);
+    return blocks(level, 8, [&](unsigned by, unsigned bw, uint8_t *out) {
+        for (unsigned bx = 0; bx < bw; ++bx) {
+            uint8_t texels[64];
+            block(level, bx, by, texels);
+            bc4_block(texels, out + bx * 8);
         }
-        // With the first endpoint the larger, index 0 is hi, 1 is lo and 2
-        // to 7 step from hi to lo in sevenths.
-        int palette[8] = {hi, lo};
-        for (int k = 2; k < 8; ++k)
-            palette[k] = ((8 - k) * hi + (k - 1) * lo) / 7;
-        uint64_t bits = 0;
-        for (unsigned i = 0; i < 16; ++i) {
-            int best = 0;
-            for (int k = 1; k < 8 && hi != lo; ++k) {
-                if (std::abs(palette[k] - texels[i * 4]) < std::abs(palette[best] - texels[i * 4]))
-                    best = k;
-            }
-            bits |= uint64_t(best) << (3 * i);
-        }
-        out[0] = hi;
-        out[1] = lo;
-        for (int i = 0; i < 6; ++i)
-            out[2 + i] = uint8_t(bits >> (8 * i));
     });
 }
 
@@ -348,17 +356,21 @@ std::vector<std::vector<uint8_t>> encode(std::vector<Level> &levels, std::string
         for (Level const &level : levels)
             bytes.push_back(bc4(level));
     } else {
-        bc7enc_compress_block_init();
-        bc7enc_compress_block_params params;
-        bc7enc_compress_block_params_init(&params);
-        if (encoding == "color") {
-            format = BC7_SRGB_BLOCK;
-            bc7enc_compress_block_params_init_perceptual_weights(&params);
+        // veryfast, with the three-subset modes it drops: without them a
+        // block of three or more flat colours (text, decals, stripes)
+        // blends them, off by up to 225 of 255. So set, on ALab's colour and
+        // normal maps it is at least as close as the bc7enc encoder it
+        // replaced, in a half to three quarters of the time.
+        bool color = encoding == "color";
+        ispc::bc7e_compress_block_init();
+        ispc::bc7e_compress_block_params params;
+        ispc::bc7e_compress_block_params_init_veryfast(&params, color);
+        params.m_opaque_settings.m_use_mode[0] = true;
+        params.m_opaque_settings.m_use_mode[2] = true;
+        format = color ? BC7_SRGB_BLOCK : BC7_UNORM_BLOCK;
+        if (color) {
             for (Level &level : levels)
                 encode_srgb(level);
-        } else {
-            format = BC7_UNORM_BLOCK;
-            bc7enc_compress_block_params_init_linear_weights(&params);
         }
         for (Level const &level : levels)
             bytes.push_back(bc7(level, params));
