@@ -1,8 +1,9 @@
 // What the pixel stage the generate tool writes for a material reads of the
-// frame: the eye and the lights, from the view every pass reads, under the
-// names MaterialX's generator gives the uniforms it would put in the
-// material's own block (bake/generate.cpp leaves them out of it), so they
-// are written once a frame rather than once a material.
+// frame, from the view every pass reads, so it is written once a frame
+// rather than once a material: the eye, under the name MaterialX's
+// generator gives the uniform it would put in the material's own block
+// (bake/generate.cpp leaves it out), and the lights, through the functions
+// Pika's light loop calls (bake/generate.cpp Surface).
 
 #pragma once
 
@@ -18,5 +19,33 @@ float3 eye()
 }
 
 #define u_viewPosition eye()
-#define u_numActiveLightSources LIGHTS
-#define u_lightData view->lights
+
+// What a light gives a point: the unit direction toward the light and the
+// illuminance it gives a surface there facing it.
+struct Incident
+{
+    float3 direction;
+    float3 illuminance;
+};
+
+// The lights that may reach P.
+uint light_count(float3 P)
+{
+    return view->light_count;
+}
+
+// What light light_index gives P, on a surface with normal N.
+Incident incident_light(uint light_index, float3 P, float3 N)
+{
+    Light light = view->lights[light_index];
+    Incident incident;
+    incident.direction = light.direction;
+    incident.illuminance = light.illuminance;
+    return incident;
+}
+
+// How much of light light_index reaches P: all of it, until shadows.
+float visibility(uint light_index, float3 P)
+{
+    return 1.0;
+}

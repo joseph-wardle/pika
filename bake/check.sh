@@ -5,7 +5,8 @@
 # src/material.rs writes for hydra/fixtures/network.usda. The manifest must
 # match bake/fixtures/network.manifest, the pixel stage must read the eye
 # and the lights from the view (shaders/frame.slang) rather than declare
-# them, and the surface must compile as Pika compiles it. A document naming
+# them, run Pika's light loop with none of MaterialX's light code, and the
+# surface must compile as Pika compiles it. A document naming
 # a nodedef the libraries lack, or reading a primvar the renderer's vertices
 # lack, or UV0 beside another primvar, or a uniform the view does not
 # provide, must fail, naming it. A surface reading UV0 alone reads the
@@ -43,6 +44,10 @@ grep -qx '#include "frame.slang"' "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not read the frame through shaders/frame.slang"
 ! grep -q "u_viewPosition;" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage declares the eye in the material's block"
+grep -q "incident_light(light_index, P, N)" "$OUT/network/pixel.slang" ||
+    fail "network: the pixel stage does not run Pika's light loop"
+! grep -qE "LightData|sampleLightSource|numActiveLightSources" "$OUT/network/pixel.slang" ||
+    fail "network: the pixel stage holds MaterialX's light code"
 # The flags are the renderer's (src/shader.rs: FLAGS and SURFACE_FLAGS). The
 # reflection must match bake/fixtures/network.reflection.json, the layout
 # test's input, as JSON: copy it over when slangc or the libraries change.

@@ -28,18 +28,12 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
-// The lights a view has: the headlight.
-static const int LIGHTS = 1;
-
-// A light as the generated light loop reads it (shaders/frame.slang):
-// MaterialX's directional light, bound as type 1 by bake/generate.cpp,
-// which declares the same members, in this order.
-struct LightData
+// A light as the light loop reads it (shaders/frame.slang): the unit
+// direction toward it and the illuminance it gives a surface facing it.
+struct Light
 {
-    int type;
     float3 direction;
-    float3 color;
-    float intensity;
+    float3 illuminance;
 };
 
 struct View
@@ -51,8 +45,11 @@ struct View
     float4 eye;
     // The unit direction the camera looks along.
     float4 forward;
-    // The headlight, along forward.
-    LightData lights[LIGHTS];
+    // light_count of them (src/view.rs Light).
+    Light *lights;
+    uint light_count;
+    // Keeps the addresses after it 8-byte aligned, as src/view.rs lays them out.
+    uint pad;
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).

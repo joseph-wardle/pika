@@ -2,7 +2,7 @@
 //! pixel stage and the vertex stage written for it, each material's
 //! uniform block, textures and descriptor set, bound to its surface, and
 //! the draw of each material's meshes after the prepass, lit by the view's
-//! headlight (`shaders/frame.slang`). A material is built off the render
+//! lights (`shaders/frame.slang`). A material is built off the render
 //! thread (`bake`) and drawn clay until its first build lands, and as it
 //! was until an edit's does; a value edit writes its block in place and
 //! rebinds its samplers, and a texture swapped for the levels that fit

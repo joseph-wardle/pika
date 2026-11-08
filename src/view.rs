@@ -1,7 +1,7 @@
-//! One view of the scene: what its passes read, the camera and every buffer
-//! address, written once per frame into a buffer whose address is each
-//! pass's push constant; and the draw records and visible instances the
-//! cull pass fills for it. Every view (the camera now; shadow views and
+//! One view of the scene: what its passes read, the camera, the lights and
+//! every buffer address, written once per frame into a buffer whose address
+//! is each pass's push constant; and the draw records and visible instances
+//! the cull pass fills for it. Every view (the camera now; shadow views and
 //! probe faces later) is culled against its own frustum into its own
 //! `View`, never reusing another's.
 
@@ -11,22 +11,25 @@ use crate::geometry::Bound;
 use crate::gpu::{self, Buffer};
 use crate::transform::Camera;
 
-/// `shaders/view.slang`'s `LightData`, as the generated light loop reads
-/// it: MaterialX's directional light, `kind` 1 as bake/generate.cpp binds
-/// it.
+/// `shaders/view.slang`'s `Light`.
 #[repr(C)]
 struct Light {
-    kind: i32,
+    /// The unit direction toward the light.
     direction: [f32; 3],
-    color: [f32; 3],
-    intensity: f32,
+    /// The illuminance it gives a surface facing it.
+    illuminance: [f32; 3],
 }
+
+/// The lights a view holds: the headlight.
+const LIGHTS: usize = 1;
 
 /// `shaders/view.slang`'s `View`.
 #[repr(C)]
 struct Constants {
     camera: Camera,
-    lights: [Light; 1],
+    lights: vk::DeviceAddress,
+    light_count: u32,
+    pad: u32,
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
     smooth: vk::DeviceAddress,
@@ -46,6 +49,7 @@ pub struct View {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
     constants: Buffer,
+    lights: Buffer,
     records: Buffer,
     visible: Buffer,
     /// The instances and triangles drawn, written by the cull pass.
@@ -62,6 +66,11 @@ impl View {
             constants: Buffer::device_local(
                 device,
                 size_of::<Constants>() as u64,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            )?,
+            lights: Buffer::device_local(
+                device,
+                (LIGHTS * size_of::<Light>()) as u64,
                 vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             )?,
             records: Buffer::device_local(
@@ -92,24 +101,24 @@ impl View {
     }
 
     /// Records into `cb`, outside rendering, the start of the view's frame:
-    /// its constants from `camera` and `geometry`, with the headlight along
-    /// the camera's forward, its records copied from
-    /// `geometry`'s with no instances, and a barrier making both visible to
-    /// its passes. `geometry` must fit, and no GPU work may be pending.
+    /// its constants from `camera` and `geometry`, its lights, which are
+    /// the headlight along the camera's forward, its records copied from
+    /// `geometry`'s with no instances, and a barrier making all three
+    /// visible to its passes. `geometry` must fit, and no GPU work may be pending.
     pub fn begin(&mut self, cb: vk::CommandBuffer, camera: &Camera, geometry: &Bound) {
         self.drawn.bytes().fill(0);
         let [x, y, z, _] = camera.forward;
         // A Lambert surface reflects albedo / π of a light's intensity, so
         // a headlight of π shows a facing surface's albedo.
-        let headlight = Light {
-            kind: 1,
-            direction: [x, y, z],
-            color: [1.0; 3],
-            intensity: std::f32::consts::PI,
-        };
+        let lights: [Light; LIGHTS] = [Light {
+            direction: [-x, -y, -z],
+            illuminance: [std::f32::consts::PI; 3],
+        }];
         let constants = Constants {
             camera: *camera,
-            lights: [headlight],
+            lights: self.lights.address,
+            light_count: lights.len() as u32,
+            pad: 0,
             points: geometry.points,
             normals: geometry.normals,
             smooth: geometry.smooth,
@@ -124,9 +133,16 @@ impl View {
             visible: self.visible.address,
             drawn: self.drawn.address,
         };
-        // SAFETY: `Constants` is plain `repr(C)` data without padding.
-        let bytes = unsafe {
-            std::slice::from_raw_parts((&raw const constants).cast::<u8>(), size_of::<Constants>())
+        // SAFETY: `Constants` and `Light` are plain `repr(C)` data without
+        // padding.
+        let (bytes, light_bytes) = unsafe {
+            (
+                std::slice::from_raw_parts(
+                    (&raw const constants).cast::<u8>(),
+                    size_of::<Constants>(),
+                ),
+                std::slice::from_raw_parts(lights.as_ptr().cast::<u8>(), size_of_val(&lights)),
+            )
         };
         let region = vk::BufferCopy {
             src_offset: 0,
@@ -146,10 +162,12 @@ impl View {
             );
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering, every buffer was
-        // created on `d`, and the region lies inside both record buffers, as
-        // `fits` checked. Vulkan has no empty copies.
+        // created on `d`, the lights fill their buffer, and the region lies
+        // inside both record buffers, as `fits` checked. Vulkan has no empty
+        // copies.
         unsafe {
             d.cmd_update_buffer(cb, self.constants.raw, 0, bytes);
+            d.cmd_update_buffer(cb, self.lights.raw, 0, light_bytes);
             if geometry.count > 0 {
                 d.cmd_copy_buffer(cb, geometry.records, self.records.raw, &[region]);
             }
@@ -171,6 +189,7 @@ impl View {
 
     pub fn memory(&self) -> gpu::Memory {
         let mut memory = self.constants.memory();
+        memory += self.lights.memory();
         memory += self.records.memory();
         memory += self.visible.memory();
         memory += self.drawn.memory();
