@@ -28,13 +28,21 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
-// A light as the light loop reads it (shaders/frame.slang): the unit
-// direction toward it and the illuminance it gives a surface facing it.
+// A light as the light loop reads it (shaders/frame.slang, src/light.rs).
 struct Light
 {
-    float3 direction;
+    // The unit direction toward a distant light (w = 0), or a point light's
+    // position (w = 1).
+    float4 position;
+    // The illuminance it gives a surface facing it: for a point light, at
+    // unit distance.
     float3 illuminance;
+    // How far it reaches: infinite for a distant light.
+    float radius;
 };
+
+// The side of a light tile in pixels (src/light.rs TILE).
+static const uint TILE = 16;
 
 struct View
 {
@@ -45,11 +53,14 @@ struct View
     float4 eye;
     // The unit direction the camera looks along.
     float4 forward;
-    // light_count of them (src/view.rs Light).
     Light *lights;
-    uint light_count;
-    // Keeps the addresses after it 8-byte aligned, as src/view.rs lays them out.
-    uint pad;
+    // Per TILE-pixel tile, row by row: the first of its lights in
+    // tile_lights and how many (src/light.rs Tiles).
+    uint2 *tiles;
+    // Indices into lights.
+    uint *tile_lights;
+    // The target's width and height in pixels.
+    uint2 extent;
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).

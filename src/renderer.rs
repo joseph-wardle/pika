@@ -13,6 +13,7 @@ use crate::commands::Commands;
 use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
+use crate::light::{self, Light, Tiles};
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
@@ -361,17 +362,23 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        let [x, y, z, _] = camera.forward;
+        // A Lambert surface reflects albedo / π of the illuminance, so a
+        // headlight of π shows a facing surface's albedo.
+        let lights = vec![Light::distant([-x, -y, -z], [std::f32::consts::PI; 3])];
+        let tiles = Tiles::new(&lights, &camera, [w, h]);
+        let capacity = light::capacity(lights.len(), [w, h]);
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
-            (Some(g), Some(v)) if v.fits(g) => Some(v),
+            (Some(g), Some(v)) if v.fits(g, capacity) => Some(v),
             (Some(g), slot) => {
                 *slot = None;
-                Some(slot.insert(View::new(&self.device, g)?))
+                Some(slot.insert(View::new(&self.device, g, capacity)?))
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            view.begin(cb, &camera, geometry);
+            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h]);
             self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;

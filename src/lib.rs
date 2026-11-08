@@ -10,6 +10,7 @@ mod cull;
 mod geometry;
 pub mod gpu;
 mod json;
+mod light;
 pub mod material;
 mod need;
 mod raster;

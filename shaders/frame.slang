@@ -28,19 +28,40 @@ struct Incident
     float3 illuminance;
 };
 
+// The tile of the lights that may reach P: the one its pixel is in, found
+// from P rather than the pixel, which the loop is not given.
+uint2 tile(float3 P)
+{
+    float4 clip = project(view, float4(P, 1));
+    float2 pixel = (clip.xy / clip.w * 0.5 + 0.5) * float2(view->extent);
+    uint2 grid = (view->extent + TILE - 1) / TILE;
+    uint2 xy = min(uint2(max(pixel, 0) / TILE), grid - 1);
+    return view->tiles[xy.y * grid.x + xy.x];
+}
+
 // The lights that may reach P.
 uint light_count(float3 P)
 {
-    return view->light_count;
+    return tile(P).y;
 }
 
-// What light light_index gives P, on a surface with normal N.
+// What light light_index of P's tile gives P, on a surface with normal N.
 Incident incident_light(uint light_index, float3 P, float3 N)
 {
-    Light light = view->lights[light_index];
+    Light light = view->lights[view->tile_lights[tile(P).x + light_index]];
     Incident incident;
-    incident.direction = light.direction;
-    incident.illuminance = light.illuminance;
+    if (light.position.w == 0)
+    {
+        incident.direction = light.position.xyz;
+        incident.illuminance = light.illuminance;
+        return incident;
+    }
+    float3 toward = light.position.xyz - P;
+    float d2 = dot(toward, toward);
+    incident.direction = toward * rsqrt(d2);
+    // Less what it gives at its reach, so it fades to 0 there (src/light.rs).
+    float r = light.radius;
+    incident.illuminance = light.illuminance * max(1 / d2 - 1 / (r * r), 0);
     return incident;
 }
 
