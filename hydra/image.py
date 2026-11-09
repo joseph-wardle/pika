@@ -47,15 +47,18 @@ What the reference encodes:
 - Color is the material's albedo under the lights plus its emission,
   alpha 1: albedo / π × the sum over the lights of their illuminance ×
   max(0, n · toward the light), the normal turned toward the eye first as
-  MaterialX's BSDFs turn it. Hosts add no camera light (husk's
-  --headlight none, usdrecord's --disableCameraLight). The lights are the
-  stage's visible DistantLights: UsdLux's intensity is radiance in nits,
-  times 2^exposure and the color, of which a disk of angular radius θ gives
-  π sin²θ (1 at angle 0, a parallel light), divided by that when
-  normalized; each shines down its -z axis. A stage without lights is
-  drawn under Pika's headlight of π along the camera's axis
-  (src/renderer.rs), so a facing surface shows its albedo. Other light
-  types are refused.
+  MaterialX's BSDFs turn it. The lights are the stage's visible
+  DistantLights: UsdLux's intensity is radiance in nits, times 2^exposure
+  and the color, of which a disk of angular radius θ gives π sin²θ (1 at
+  angle 0, a parallel light), divided by that when normalized; each shines
+  down its -z axis. Most scenes sublayer light.usda's π lux, under which a
+  facing surface shows its albedo. Hosts add no camera light (husk's
+  --headlight none, usdrecord's --disableCameraLight), but to the
+  CAMERA_LIT scenes, which have no lights: a distant light of the host's
+  intensity, angle 0.53 and not normalized, along the camera's axis
+  (husk's at the first frame it renders, usdrecord's at each). A
+  stage drawn without lights is black: Pika has no headlight of its own.
+  Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -100,6 +103,8 @@ from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdLux, UsdRende
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
+# The layers the scenes sublayer, which are not scenes themselves.
+LAYERS = ("settings.usda", "light.usda")
 # The delegate's default texture cap (hydra/plugin.cpp): none.
 CAP = float("inf")
 # The scenes whose texture the cap shrinks, which husk must warn of in one
@@ -127,8 +132,10 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
             "cage drawn on subdivided meshes", "boundary rules of the interior",
-            "purposes ignored", "culled by box centre", "headlight from the eye",
-            "intensity read as lux", "lights shining up their z axis",
+            "purposes ignored", "culled by box centre", "camera light from the eye",
+            "usdview's camera light in every host", "camera light held as the other host holds it",
+            "Pika's old headlight", "intensity read as lux",
+            "lights shining up their z axis",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -147,7 +154,7 @@ CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided
 ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
                              [-0.130256, 1.140805, -0.010548],
                              [-0.024003, -0.128969, 1.152972]])
-# A material's closed form: its albedo under the headlight, its emission, the
+# A material's closed form: its albedo under π lux, its emission, the
 # image (file, address modes, primvar, colour space) whose sample it emits, if any, the
 # image whose sample perturbs its normal, if any, and the angle from facing
 # the eye within which the form holds (None: all).
@@ -169,15 +176,24 @@ LIT = {
 }
 # What a host hands Pika: the purposes it draws, whether a material whose
 # surface shader the shader registry does not know arrives with its network,
-# and whether the render settings prim's Pika settings arrive (see the
-# module's doc).
-Host = collections.namedtuple("Host", "purposes delivers_unknown settings")
-HUSK = Host(("default", "render"), True, True)
+# whether the render settings prim's Pika settings arrive, the intensity of
+# its camera light and whether it holds the light still while the camera
+# moves (see the module's doc).
+Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
+# husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and
+# husk holds it where the camera was at the first frame it renders.
+HUSK = Host(("default", "render"), True, True, 57225, True)
+# usdview's and usdrecord's, from HdxTaskController. Houdini's viewport sends
+# 37397.64, in every lighting mode, but cannot run on Xvnc.
+USDRECORD_CAMERA_LIGHT = 15000
+CAMERA_LIGHT_ANGLE = 0.53
+# The scenes rendered under the host's camera light; the rest with it off.
+CAMERA_LIT = {"headlit"}
 
 
 def usdrecord_host():
     scene_index = Tf.GetEnvSetting("USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX")
-    return Host(("default", "proxy"), scene_index, False)
+    return Host(("default", "proxy"), scene_index, False, USDRECORD_CAMERA_LIGHT, False)
 
 
 def meshes(stage, time, purposes, control=None):
@@ -914,41 +930,51 @@ def triangles(stage, time, host, control=None):
     return out
 
 
-def lights(stage, time, f, toward, control=None):
+def illuminance(intensity, exposure, color, angle, normalize, control):
+    """What a distant light gives a surface facing it (see the module's
+    doc)."""
+    theta = min(max(math.radians(angle) / 2, 0), math.pi)
+    sin2 = math.sin(theta) ** 2
+    if theta == 0:
+        received = size = 1.0
+    elif theta <= math.pi / 2:
+        received = size = math.pi * sin2
+    else:
+        received, size = math.pi, (2 - sin2) * math.pi
+    if not normalize:
+        size = 1.0
+    if control == "intensity read as lux":
+        received = size = 1.0
+    return tuple(np.array(color) * intensity * 2 ** exposure * received / size)
+
+
+def lights(stage, time, axis, toward, host, lit, control=None):
     """Each light as the direction toward it, one for every hit or one
     per hit, and the illuminance it gives a surface facing it (see the
-    module's doc)."""
+    module's doc). `axis` is the direction the host's camera light shines."""
     found = [p for p in stage.Traverse() if p.HasAPI(UsdLux.LightAPI)]
     for prim in found:
         if not prim.IsA(UsdLux.DistantLight):
             raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant lights have a closed form")
-    if not found:
-        light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
-        return [(light, (np.pi,) * 3)]
+    if not found and lit:
+        light = toward if control == "camera light from the eye" else -axis
+        intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
+        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control))]
+    if not found and control == "Pika's old headlight":
+        return [(-axis, (np.pi,) * 3)]
     out = []
     for prim in found:
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
-        radiance = api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
-        theta = min(max(math.radians(UsdLux.DistantLight(prim).GetAngleAttr().Get(time)) / 2, 0), math.pi)
-        sin2 = math.sin(theta) ** 2
-        if theta == 0:
-            received = size = 1.0
-        elif theta <= math.pi / 2:
-            received = size = math.pi * sin2
-        else:
-            received, size = math.pi, (2 - sin2) * math.pi
-        if not api.GetNormalizeAttr().Get(time):
-            size = 1.0
-        if control == "intensity read as lux":
-            received = size = 1.0
         m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
         z = np.array([m[2][0], m[2][1], m[2][2]])
         if control == "lights shining up their z axis":
             z = -z
-        color = np.array(api.GetColorAttr().Get(time))
-        out.append((z / np.linalg.norm(z), tuple(color * radiance * received / size)))
+        e = illuminance(api.GetIntensityAttr().Get(time), api.GetExposureAttr().Get(time),
+                        api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
+                        api.GetNormalizeAttr().Get(time), control)
+        out.append((z / np.linalg.norm(z), e))
     return out
 
 
@@ -962,10 +988,12 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, host, lowered, control=None):
+def reference(stage, time, width, height, host, lowered, lit, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
+    held = host.holds_camera_light != (control == "camera light held as the other host holds it")
+    axis = np.array((frustum(stage, FRAMES[0], width, height, focal, policy) if held else f).ComputeViewDirection())
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
@@ -1053,7 +1081,7 @@ def reference(stage, time, width, height, host, lowered, control=None):
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
     shine = sum(np.clip(dot(facing, d), 0.0, 1.0)[:, None] * np.array(e) / np.pi
-                for d, e in lights(stage, time, f, toward, control))
+                for d, e in lights(stage, time, axis, toward, host, lit, control))
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
@@ -1216,8 +1244,9 @@ def husk(scene, out):
     log = os.path.join(out, f"{name}.husk.log")
     env = budget(name)
     env["PIKA_STATS"] = os.path.join(out, f"{name}.husk.stats")
+    headlight = [] if name in CAMERA_LIT else ["--headlight", "none"]
     with open(log, "w") as f:
-        subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur", "--headlight", "none",
+        subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur", *headlight,
                         "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=env)
@@ -1243,8 +1272,9 @@ def blurred(stats, name):
 def usdrecord(scene, out, width):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
+    off = [] if name in CAMERA_LIT else ["--disableCameraLight"]
     with open(log, "w") as f:
-        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", "--disableCameraLight",
+        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off,
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
                         "--frames", f"{FRAMES[0]}:{FRAMES[-1]}",
                         scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
@@ -1256,9 +1286,10 @@ def references(scene, width, height, host):
     """The reference and each control's, for each frame, of the scene at
     `scene`: a path, which a process pool can be handed."""
     stage = Usd.Stage.Open(scene)
-    lowered = os.path.splitext(os.path.basename(scene))[0] in BUDGET
+    name = os.path.splitext(os.path.basename(scene))[0]
+    lowered, lit = name in BUDGET, name in CAMERA_LIT
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, lowered, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in FRAMES}
 
 
 def differs(stage, host):
@@ -1320,7 +1351,7 @@ def main():
     out = sys.argv[1]
     record = sys.argv[2:] == ["usdrecord"]
     os.makedirs(out, exist_ok=True)
-    scenes = sorted(os.path.join(SCENES, s) for s in os.listdir(SCENES) if s != "settings.usda")
+    scenes = sorted(os.path.join(SCENES, s) for s in os.listdir(SCENES) if s not in LAYERS)
     stages = {s: Usd.Stage.Open(s) for s in scenes}
     sizes = {s: tuple(UsdRender.Settings(stages[s].GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get())
              for s in scenes}
@@ -1335,7 +1366,7 @@ def main():
             # usdrecord takes the image's height from the camera's aspect.
             shape = job.result()[0][FRAMES[0]]["color"].shape
             host = usdrecord_host()
-            if shape[:2] != sizes[s][::-1] or differs(stages[s], host):
+            if shape[:2] != sizes[s][::-1] or differs(stages[s], host) or os.path.basename(s)[:-5] in CAMERA_LIT:
                 recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
         failures = []
         changed = set()

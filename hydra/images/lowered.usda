@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a MaterialX surface that emits the vector3 sample of bake/fixtures/mips.exr, rendered under a memory budget of one byte (hydra/image.py's BUDGET), which no texture fits: Pika lowers the 8×8 file to its floor, its 4×4 stored level on, flat greys of 128, 64 and 32 of 255, and warns of it in one line. At an st scaled so that a pixel covers √2 texels of the 4×4 at frame 1 (level 0.5, as the full chain would draw at its level 1.5) and √2/2 at frame 2 (level 0, where the full chain blends its swatch and its flat level 1 instead)."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad, a triangle and a pentagon in one plane tilted away from the camera, with face-varying normals. The tilt changes at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

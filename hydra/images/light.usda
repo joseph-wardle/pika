@@ -1,0 +1,10 @@
+#usda 1.0
+(
+    doc = "The light the scenes in hydra/images/ sublayer, but those testing lights themselves: π lux shining down -z, toward the camera's view, so a Lambert surface facing the camera shows its albedo."
+)
+
+def DistantLight "light"
+{
+    float inputs:angle = 0
+    float inputs:intensity = 3.1415927
+}

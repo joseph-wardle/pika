@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two 2x2 grids facing the camera, each bound to a material and split by GeomSubsets. The flat one's faces are the uv ramp (bake/fixtures/ramp.exr) on a faceVarying st whose indices unscramble its values, a red Standard Surface, and a subset binding nothing, which inherits the mesh's green; its st shifts at frame 2. The subdivided one is blue on its two middle cage faces and yellow on the rest, and its middle point moves at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

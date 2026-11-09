@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a MaterialX surface that emits the vector3 sample of bake/fixtures/mips.exr under the render setting pika:textureCap = 2, so the file's 2×2 and 1×1 stored levels, flat greys of 64 and 32 of 255, are the whole chain: at an st scaled so that a pixel covers √2 texels of it at frame 1 (level 0.5) and √2/2 at frame 2 (level 0, where the file's full chain blends its flat levels 1 and 2 instead). usdrecord passes no render settings, so it draws the full chain, which the reference knows; both frames stay flat under it, as a magnified swatch is off by the GPU's 8-bit filter weights."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

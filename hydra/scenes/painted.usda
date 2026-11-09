@@ -23,6 +23,14 @@ def Xform "world"
         rel material:binding = </world/mtl/paint>
     }
 
+    # π lux toward the camera's view, under which a facing Lambert surface
+    # shows its albedo.
+    def DistantLight "light"
+    {
+        float inputs:angle = 0
+        float inputs:intensity = 3.1415927
+    }
+
     def Camera "camera"
     {
         double3 xformOp:translate = (0, 0, 6)

@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Three quads whose fronts are decided three ways: one seen from behind, one left-handed and one mirrored by its transform. Each has a uniform normal. The left-handed quad, the middle of the three meshes, rises at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

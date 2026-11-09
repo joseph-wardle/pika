@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two quads facing the camera, each bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb sampled at its st, which runs half an image past the image on every side and shifts at frame 2. The left quad's texture, bake/fixtures/acescg.exr, states no wrap mode and its wrapS and wrapT are unauthored, so they are useMetadata, USD's default, and the sample is black past the image, as Storm draws it. The right quad's, bake/fixtures/wrapped.exr, states periodic in u and clamp in v, and its wrapS and wrapT say useMetadata: its greys repeat across and stretch up and down. Both textures are magnified, as the reference reads only the levels a file stores."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

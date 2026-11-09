@@ -51,8 +51,6 @@ struct View
     float4 view_projection[4];
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
-    // The unit direction the camera looks along.
-    float4 forward;
     Light *lights;
     // Per TILE-pixel tile, row by row: the first of its lights in
     // tile_lights and how many (src/light.rs Tiles).

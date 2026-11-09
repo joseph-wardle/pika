@@ -13,7 +13,7 @@ use crate::commands::Commands;
 use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
-use crate::light::{self, Light, Tiles};
+use crate::light::{self, Tiles};
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
@@ -364,17 +364,11 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
-        let mut lights: Vec<_> = (self.store.lights().values())
+        // A headlight is the host's to send (hydra/plugin.cpp), so a store
+        // holding no light draws black.
+        let lights: Vec<_> = (self.store.lights().values())
             .filter_map(light::resolve)
             .collect();
-        // Until the scenes author their own lights, a store holding none is
-        // drawn under Pika's headlight. A Lambert surface reflects albedo /
-        // π of the illuminance, so a headlight of π shows a facing
-        // surface's albedo.
-        if self.store.lights().is_empty() {
-            let [x, y, z, _] = camera.forward;
-            lights.push(Light::distant([-x, -y, -z], [std::f32::consts::PI; 3]));
-        }
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
         let bound = self.geometry.bound();

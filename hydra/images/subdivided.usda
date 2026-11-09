@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two subdivided grids facing the camera, bound to the uv ramp (bake/fixtures/ramp.exr), their interior points pushed off the grid. The left grid's faceVarying st is a sheet with one face cut out as an island, a seam all round, and its sheet shifts at frame 2; the right grid's st is per vertex. Both are spaced unevenly, so st refined any other way than with the points shows."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

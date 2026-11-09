@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera bound to a Standard Surface with its specular weight 0, its base colour a constant node's value and its emission colour another constant's through a dot node. The first constant's value changes at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

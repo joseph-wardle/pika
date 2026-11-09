@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two quads with face-varying normals fanning out, each with its specular weight 0: one facing the camera bound to an OpenPBR surface, one tilted away bound to a Standard Surface, each a base colour under the headlight plus an emission. The OpenPBR base colour and the Standard Surface emission change at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

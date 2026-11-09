@@ -56,8 +56,6 @@ pub struct Camera {
     /// The camera position (w = 1), or for an orthographic camera the
     /// direction toward it (w = 0).
     pub eye: [f32; 4],
-    /// The unit direction the camera looks along (w = 0).
-    pub forward: [f32; 4],
 }
 
 impl Camera {
@@ -93,7 +91,6 @@ impl Camera {
         Ok(Self {
             view_projection,
             eye: eye.map(|v| v as f32),
-            forward: [-backward[0], -backward[1], -backward[2], 0.0].map(|v| v as f32),
         })
     }
 }
@@ -314,7 +311,6 @@ mod tests {
         ];
         let camera = Camera::new(&world_to_view, &perspective()).unwrap();
         assert_eq!(camera.eye, [2.0, 0.0, 0.0, 1.0]);
-        assert_eq!(camera.forward, [-1.0, 0.0, 0.0, 0.0]);
         let mut ortho = [0.0; 16];
         (ortho[0], ortho[5], ortho[10], ortho[15]) = (1.0, 1.0, -0.02, 1.0);
         let camera = Camera::new(&world_to_view, &ortho).unwrap();

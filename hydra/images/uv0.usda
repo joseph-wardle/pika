@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two quads facing the camera, each emitting the uv ramp (bake/fixtures/ramp.exr) sampled at UV0, the texcoord MaterialX's nodes read by default, which is the mesh's st: the left image's texcoord is unconnected, the right one reads a texcoord node of index 0. Both show the ramp as hydra/images/textured.usda shows it."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

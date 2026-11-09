@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "An off-centre quad facing the camera, with vertex normals bent outward. Its points move at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

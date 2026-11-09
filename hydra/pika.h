@@ -287,8 +287,8 @@ int pika_counted_new(const pika_renderer *renderer, const char *type, const char
 int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
 // Draws the store's meshes of the frame's render tags into its data window:
-// color is each mesh's material under the store's lights, or Pika's
-// headlight while it holds none, 18 % grey clay where none is bound; depth
+// color is each mesh's material under the store's lights (black under
+// none), 18 % grey clay where none is bound; depth
 // is OpenGL's window depth, cleared to 1; normals are in world space,
 // turned toward the viewer.
 // Pixels outside the data window are left as they are.
