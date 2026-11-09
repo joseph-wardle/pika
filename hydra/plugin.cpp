@@ -1,8 +1,9 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// Meshes, instancers, distant and sphere lights are synced into Pika's store, basis
-// curves are fetched and measured, and other prims are counted. Pika draws the meshes
+// Meshes, instancers, and distant, sphere, rect, disk and cylinder lights are synced
+// into Pika's store, basis curves are fetched and measured, and other prims are
+// counted. Pika draws the meshes
 // into the color, depth and normal AOVs.
 
 #include "buffer.h"
@@ -246,7 +247,9 @@ public:
             return new HdCamera(id);
         if (typeId == HdPrimTypeTokens->material)
             return new PikaMaterial(id, _pika);
-        if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->sphereLight)
+        if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->sphereLight ||
+            typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
+            typeId == HdPrimTypeTokens->cylinderLight)
             return new PikaLight(typeId, id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }

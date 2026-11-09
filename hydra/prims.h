@@ -97,7 +97,7 @@ private:
     uint64_t _id = 0;
 };
 
-// A distant or sphere light copies its transform and UsdLux inputs into the
+// A distant, sphere, rect, disk or cylinder light copies its transform and UsdLux inputs into the
 // store.
 class PikaLight final : public HdLight {
 public:

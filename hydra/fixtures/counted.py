@@ -1,2 +1,2 @@
 # A removed light must leave the count.
-stage.RemovePrim("/world/fill")
+stage.RemovePrim("/world/key")

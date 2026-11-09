@@ -57,13 +57,25 @@ What the reference encodes:
   subtends an angle α with sin α = r / d and gives π sin²α times its
   radiance, toward its centre. That holds only while the whole sphere is
   above the surface's horizon or below it, so a surface inside it or
-  seeing it cross the horizon is refused. Most scenes sublayer light.usda's π lux, under which a
+  seeing it cross the horizon is refused. A rect, disk or cylinder light
+  gives what Lambert's formula does over its outline as each hit sees it,
+  its radiance times the illuminance vector, which is exact while the
+  outline is wholly above the surface's horizon, so a surface seeing it
+  cross is refused. The outline is a rect's corners, a disk's 64-gon of its
+  area, or the silhouette of a cylinder's side: the tangents from the hit,
+  joined at each end by the arc between them on the hit's side, 64 points
+  each. Normalized, the radiance is divided by its world-space area,
+  including a cylinder's side but not its ends; a rect or disk lights only
+  the side its -z axis points to; a cylinder's y and z axes must scale
+  evenly. Most scenes sublayer light.usda's π lux, under which a
   facing surface shows its albedo. Hosts add no camera light (husk's
   --headlight none, usdrecord's --disableCameraLight), but to the
   CAMERA_LIT scenes, which have no lights: a distant light of the host's
   intensity, angle 0.53 and not normalized, along the camera's axis
   (husk's at the first frame it renders, usdrecord's at each). A
   stage drawn without lights is black: Pika has no headlight of its own.
+  Pika's threshold takes up to 0.01 lux off each light, 5.7e-4 of a clay
+  surface's color, so a scene lights a surface with two at most.
   Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
@@ -142,7 +154,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "usdview's camera light in every host", "camera light held as the other host holds it",
             "Pika's old headlight", "intensity read as lux",
             "sphere light read as a point of its intensity", "sphere light's scale ignored",
-            "lights shining up their z axis",
+            "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
+            "area lights' scale ignored", "area lights lit from both sides",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -977,16 +990,105 @@ def sphere(api, radius, time, p, control):
     return toward / d[:, None], np.pi * sin2[:, None] * radiance, r / d
 
 
-def lights(stage, time, axis, toward, p, host, lit, control=None):
+def lambert(corners, c):
+    """The illuminance vector of an outline of radiance 1, `corners` (hits,
+    corners, 3) relative to each hit, pointing toward `c`, the light's
+    centre relative to each hit (Lambert's formula)."""
+    b = np.roll(corners, -1, axis=1)
+    k = np.cross(corners, b)
+    s = np.linalg.norm(k, axis=2)
+    gamma = np.arctan2(s, np.einsum("nkj,nkj->nk", corners, b))
+    e = 0.5 * np.einsum("nk,nkj->nj", np.where(s > 0, gamma / np.where(s > 0, s, 1), 0), k)
+    e[dot(e, c) < 0] *= -1
+    return e
+
+
+def area(prim, time, p, n, control):
+    """The direction a rect, disk or cylinder light shines on each hit at
+    `p`, facing `n`, and the illuminance it gives a surface there facing
+    that way (see the module's doc)."""
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    x, y, z, o = (np.array([m[r][0], m[r][1], m[r][2]]) for r in range(4))
+    cylinder = prim.IsA(UsdLux.CylinderLight)
+    if control == "area lights turned 90°":
+        # A cylinder about its z axis, keeping its axis as far from a
+        # surface below it as it was; a rect or disk about its y.
+        k = z if cylinder else y
+        k = k / np.linalg.norm(k)
+        x, y, z = (np.cross(k, v) + np.dot(k, v) * k for v in (x, y, z))
+    if control == "area lights' scale ignored":
+        x, y, z = (v / np.linalg.norm(v) for v in (x, y, z))
+    api = UsdLux.LightAPI(prim)
+    radiance = np.array(api.GetColorAttr().Get(time)) * api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
+    c = o - p
+    lit = np.ones(len(p), bool)
+    if cylinder:
+        light = UsdLux.CylinderLight(prim)
+        length, radius = light.GetLengthAttr().Get(time), light.GetRadiusAttr().Get(time)
+        ys, zs = np.linalg.norm(y), np.linalg.norm(z)
+        if abs(ys - zs) > 1e-6 * ys:
+            raise ValueError(f"{prim.GetPath()} scales y and z unevenly: an elliptic cylinder has no outline here")
+        r, half = radius * ys, x * length / 2
+        size = 2 * np.pi * r * length * np.linalg.norm(x)
+        shown = size / np.pi
+        axis = x / np.linalg.norm(x)
+        out = np.outer(dot(c, axis), axis) - c
+        rho = np.linalg.norm(out, axis=1)
+        lit = rho > r
+        out /= rho[:, None]
+        t = np.arccos(np.clip(r / rho, -1, 1))[:, None] * np.linspace(1, -1, 64)
+        arc = r * (np.cos(t)[..., None] * out[:, None] + np.sin(t)[..., None] * np.cross(axis, out)[:, None])
+        corners = np.concatenate([(c + half)[:, None] + arc, ((c - half)[:, None] + arc)[:, ::-1]], axis=1)
+        emitted = np.ones(len(p))
+    else:
+        if prim.IsA(UsdLux.RectLight):
+            light = UsdLux.RectLight(prim)
+            w, h = light.GetWidthAttr().Get(time), light.GetHeightAttr().Get(time)
+            outline = [(a * w / 2, b * h / 2) for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+            size = w * h * np.linalg.norm(np.cross(x, y))
+        else:
+            r = UsdLux.DiskLight(prim).GetRadiusAttr().Get(time)
+            # The regular 64-gon of the disk's area.
+            k = 64
+            s = r * math.sqrt(2 * math.pi / (k * math.sin(2 * math.pi / k)))
+            outline = [(s * math.cos(2 * math.pi * i / k), s * math.sin(2 * math.pi * i / k)) for i in range(k)]
+            size = math.pi * r ** 2 * np.linalg.norm(np.cross(x, y))
+        shown = size
+        corners = c[:, None] + np.array([a * x + b * y for a, b in outline])
+        front = np.cross(x, y)
+        front *= -np.sign(np.dot(front, z)) / np.linalg.norm(front)
+        # The cosine at the light of the direction to each hit.
+        emitted = np.clip(dot(-c, front) / np.linalg.norm(c, axis=1), 0, None)
+        if control != "area lights lit from both sides":
+            lit = emitted > 0
+    if api.GetNormalizeAttr().Get(time):
+        radiance = radiance / size
+    e = lambert(corners, c)
+    if control == "area lights read as points":
+        d = np.linalg.norm(c, axis=1)
+        e = c * (shown * emitted / d ** 3)[:, None]
+    e[~lit] = 0
+    seen = lit & (dot(e, n) > 0)
+    if (np.einsum("nkj,nj->nk", corners, n)[seen] < 0).any():
+        raise ValueError(f"a surface sees {prim.GetPath()} cross its horizon: only a whole outline has a closed form")
+    magnitude = np.linalg.norm(e, axis=1)
+    direction = np.where(magnitude[:, None] > 0, e / np.where(magnitude > 0, magnitude, 1)[:, None], n)
+    return direction, magnitude[:, None] * radiance, 0
+
+
+AREA = (UsdLux.RectLight, UsdLux.DiskLight, UsdLux.CylinderLight)
+
+
+def lights(stage, time, axis, toward, p, n, host, lit, control=None):
     """Each light as the direction toward it, one for every hit or one
     per hit, the illuminance it gives a surface facing it, likewise, and
-    the sine of the angle it subtends, 0 for a distant light (see the
+    the sine of the angle it subtends, 0 but for a sphere (see the
     module's doc). `axis` is the direction the host's camera light shines;
-    `p` holds the hits."""
+    `p` holds the hits and `n` their normals, turned toward the eye."""
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
-        if not (prim.IsA(UsdLux.DistantLight) or prim.IsA(UsdLux.SphereLight)):
-            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant and sphere lights have a closed form")
+        if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
+            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant, sphere, rect, disk and cylinder lights have a closed form")
     if not found and lit:
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
@@ -1000,6 +1102,9 @@ def lights(stage, time, axis, toward, p, host, lit, control=None):
         api = UsdLux.LightAPI(prim)
         if prim.IsA(UsdLux.SphereLight):
             out.append(sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p, control))
+            continue
+        if any(prim.IsA(t) for t in AREA):
+            out.append(area(prim, time, p, n, control))
             continue
         m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
         z = np.array([m[2][0], m[2][1], m[2][2]])
@@ -1115,7 +1220,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
     shine = np.zeros((len(p), 3))
-    for d, e, sin in lights(stage, time, axis, toward, p, host, lit, control):
+    for d, e, sin in lights(stage, time, axis, toward, p, facing, host, lit, control):
         cos = dot(facing, d)
         if (abs(cos) < sin).any():
             raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")

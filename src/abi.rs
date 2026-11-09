@@ -37,6 +37,9 @@ pub struct CLight {
     normalize: bool,
     angle: f32,
     radius: f32,
+    width: f32,
+    height: f32,
+    length: f32,
     visible: bool,
 }
 
@@ -947,6 +950,15 @@ pub unsafe extern "C" fn pika_light_params(
         let shape = match unsafe { string(p.light_type)? }.as_str() {
             "distantLight" => Shape::Distant { angle: p.angle },
             "sphereLight" => Shape::Sphere { radius: p.radius },
+            "rectLight" => Shape::Rect {
+                width: p.width,
+                height: p.height,
+            },
+            "diskLight" => Shape::Disk { radius: p.radius },
+            "cylinderLight" => Shape::Cylinder {
+                length: p.length,
+                radius: p.radius,
+            },
             other => return Err(format!("Pika draws no {other}")),
         };
         let params = LightParams {

@@ -12,7 +12,6 @@ def Xform "world"
     def Camera "camera" {}
 
     def DomeLight "key" {}
-    def RectLight "fill" {}
 
     def Points "dust"
     {

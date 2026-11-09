@@ -16,22 +16,42 @@ pub const TILE: u32 = 16;
 
 /// The illuminance at which a light's reach ends. A facing white Lambert
 /// surface shows illuminance / π, so a pixel loses at most this / π of
-/// each light (`Light::sphere`).
+/// each light (`Light::sphere`, `Light::area`).
 pub const THRESHOLD: f32 = 0.01;
+
+/// A light's shape, `shaders/view.slang`'s constants.
+pub const DISTANT: u32 = 0;
+pub const SPHERE: u32 = 1;
+pub const RECT: u32 = 2;
+pub const DISK: u32 = 3;
+pub const CYLINDER: u32 = 4;
+
+/// The scale of a disk's polygon's axes that gives the regular octagon its
+/// disk's area, so it shows as much from far away.
+const OCTAGON: f32 = 1.053_907_4;
 
 /// `shaders/view.slang`'s `Light`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Light {
-    /// The unit direction toward a distant light, or a sphere's centre.
+    /// The unit direction toward a distant light, or the centre of another.
     pub position: [f32; 3],
-    /// A sphere's radius: 0 for a distant light.
+    /// A sphere's or cylinder's radius.
     pub radius: f32,
-    /// The illuminance it gives a surface facing it: for a sphere, at unit
-    /// distance from its centre.
+    /// The illuminance a distant light gives a surface facing it, or a
+    /// sphere at unit distance from its centre; the radiance of an area
+    /// light.
     pub illuminance: [f32; 3],
     /// How far it reaches: infinite for a distant light, and only for one.
     pub reach: f32,
+    /// A rect's half sides or the axes of a disk's polygon, which light the
+    /// side u × v points to; half a cylinder's axis.
+    pub u: [f32; 3],
+    pub shape: u32,
+    pub v: [f32; 3],
+    /// What a sphere's 1/d² or an area light's illuminance vector loses so
+    /// that it ends at its reach.
+    pub fade: f32,
 }
 
 impl Light {
@@ -41,6 +61,10 @@ impl Light {
             radius: 0.0,
             illuminance,
             reach: f32::INFINITY,
+            u: [0.0; 3],
+            shape: DISTANT,
+            v: [0.0; 3],
+            fade: 0.0,
         }
     }
 
@@ -49,14 +73,53 @@ impl Light {
     /// illuminance × (1/d² - 1/reach²), which loses that much everywhere
     /// and so reaches 0 at the reach without a step.
     pub fn sphere(centre: [f32; 3], radius: f32, illuminance: [f32; 3]) -> Self {
-        let brightest = illuminance.into_iter().fold(0.0, f32::max);
+        let reach = (brightest(illuminance) / THRESHOLD).sqrt();
         Self {
             position: centre,
             radius,
             illuminance,
-            reach: (brightest / THRESHOLD).sqrt(),
+            reach,
+            u: [0.0; 3],
+            shape: SPHERE,
+            v: [0.0; 3],
+            fade: 1.0 / (reach * reach),
         }
     }
+
+    /// A rect, disk or cylinder of `radiance` (`shape` and the axes as in
+    /// `Light`), of `area` and within `bound` of its centre. A light shows
+    /// no more of itself than its area, nearer than `bound` less than its
+    /// centre's distance d, so its illuminance vector is under
+    /// area / (d - bound)². The loop takes `THRESHOLD` / radiance off it,
+    /// which loses that much and ends the light where the bound falls to
+    /// it.
+    #[allow(clippy::too_many_arguments)]
+    fn area(
+        shape: u32,
+        centre: [f32; 3],
+        u: [f32; 3],
+        v: [f32; 3],
+        radius: f32,
+        radiance: [f32; 3],
+        area: f32,
+        bound: f32,
+    ) -> Self {
+        let brightest = brightest(radiance);
+        Self {
+            position: centre,
+            radius,
+            illuminance: radiance,
+            reach: bound + (brightest * area / THRESHOLD).sqrt(),
+            u,
+            shape,
+            v,
+            fade: THRESHOLD / brightest,
+        }
+    }
+}
+
+fn brightest(c: [f32; 3]) -> f32 {
+    c.into_iter().fold(0.0, f32::max)
 }
 
 /// A UsdLux light as the loop draws it: `None` until Hydra has handed over
@@ -69,6 +132,7 @@ pub fn resolve(light: &store::Light) -> Option<Light> {
     // the origin goes.
     let row = |r: usize| [m[4 * r], m[4 * r + 1], m[4 * r + 2]].map(|v| v as f32);
     let length = |v: [f32; 3]| v.iter().map(|c| c * c).sum::<f32>().sqrt();
+    let scaled = |v: [f32; 3], s: f32| v.map(|c| c * s);
     let light = match params.shape {
         // It shines down its -z axis.
         Shape::Distant { angle } => {
@@ -83,8 +147,67 @@ pub fn resolve(light: &store::Light) -> Option<Light> {
             let radius = radius.abs() * scale;
             Some(Light::sphere(row(3), radius, sphere(params, radius)))
         }
+        // Any transform keeps a rect a parallelogram and a disk an ellipse,
+        // whose outlines move with it.
+        Shape::Rect { width, height } => {
+            let [u, v] = lit_side(
+                scaled(row(0), width / 2.0),
+                scaled(row(1), height / 2.0),
+                row(2),
+            );
+            let area = 4.0 * length(cross(u, v));
+            let bound = length(u) + length(v);
+            let radiance = area_radiance(params, area)?;
+            Some(Light::area(RECT, row(3), u, v, 0.0, radiance, area, bound))
+        }
+        Shape::Disk { radius } => {
+            let [u, v] = lit_side(scaled(row(0), radius), scaled(row(1), radius), row(2));
+            let area = PI * length(cross(u, v));
+            let [u, v] = [u, v].map(|a| scaled(a, OCTAGON));
+            let bound = length(u) + length(v);
+            let radiance = area_radiance(params, area)?;
+            Some(Light::area(DISK, row(3), u, v, 0.0, radiance, area, bound))
+        }
+        // Its radius scaled by the geometric mean of y's and z's lengths,
+        // exact while they scale evenly. Its silhouette's points lie within
+        // 1 / cos 30° of its radius (shaders/frame.slang).
+        Shape::Cylinder { length: l, radius } => {
+            let u = scaled(row(0), l / 2.0);
+            let radius = radius.abs() * (length(row(1)) * length(row(2))).sqrt();
+            let area = 4.0 * PI * radius * length(u);
+            let bound = length(u) + radius / (PI / 6.0).cos();
+            let radiance = area_radiance(params, area)?;
+            Some(Light::area(
+                CYLINDER,
+                row(3),
+                u,
+                [0.0; 3],
+                radius,
+                radiance,
+                area,
+                bound,
+            ))
+        }
     }?;
     (params.visible && light.illuminance != [0.0; 3]).then_some(light)
+}
+
+/// `u` and `v` in the order whose cross product points to the side the
+/// light emits toward, the one `z` points away from.
+fn lit_side(u: [f32; 3], v: [f32; 3], z: [f32; 3]) -> [[f32; 3]; 2] {
+    let n = cross(u, v);
+    match n[0] * z[0] + n[1] * z[1] + n[2] * z[2] > 0.0 {
+        true => [v, u],
+        false => [u, v],
+    }
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// UsdLux's radiance in nits: the intensity scaled by 2^exposure and the
@@ -92,6 +215,13 @@ pub fn resolve(light: &store::Light) -> Option<Light> {
 /// (`usdLux/lightAPI.h` on normalize).
 fn radiance(p: &LightParams) -> [f32; 3] {
     p.color.map(|c| c * p.intensity * p.exposure.exp2())
+}
+
+/// An area light's radiance, normalized by its world-space `area`: `None`
+/// for a light of no area, which gives nothing.
+fn area_radiance(p: &LightParams, area: f32) -> Option<[f32; 3]> {
+    let size = if p.normalize { area } else { 1.0 };
+    (area > 0.0).then(|| radiance(p).map(|l| l / size))
 }
 
 /// The illuminance a distant light gives a surface facing it. A disk of
@@ -472,13 +602,82 @@ mod tests {
         assert_eq!(resolve(&light), None);
     }
 
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        (0..3).map(|i| a[i] * b[i]).sum()
+    }
+
+    fn add(a: [f32; 3], b: [f32; 3], s: f32) -> [f32; 3] {
+        std::array::from_fn(|i| a[i] + b[i] * s)
+    }
+
+    /// `shaders/frame.slang`'s illuminance_vector.
+    fn illuminance_vector(light: &Light, p: [f32; 3]) -> [f32; 3] {
+        let c = add(light.position, p, -1.0);
+        let (u, v) = (light.u, light.v);
+        let corners: Vec<[f32; 3]> = match light.shape {
+            CYLINDER => {
+                let axis = light.u.map(|a| a / dot(light.u, light.u).sqrt());
+                let out = add(axis.map(|a| a * dot(c, axis)), c, -1.0);
+                let rho = dot(out, out).sqrt();
+                if rho <= light.radius {
+                    return [0.0; 3];
+                }
+                let out = out.map(|o| o / rho);
+                let side = cross(axis, out);
+                let phi = (light.radius / rho).acos();
+                let arc: Vec<_> = (0..4)
+                    .map(|k| {
+                        let t = phi * (1.0 - 2.0 * k as f32 / 3.0);
+                        let r = match k {
+                            0 | 3 => light.radius,
+                            _ => light.radius / (phi / 3.0).cos(),
+                        };
+                        add(out.map(|o| o * r * t.cos()), side, r * t.sin())
+                    })
+                    .collect();
+                let ends = |e: f32| arc.iter().map(move |a| add(add(c, u, e), *a, 1.0));
+                ends(1.0).chain(ends(-1.0).rev()).collect()
+            }
+            _ if dot(c, cross(u, v)) >= 0.0 => return [0.0; 3],
+            RECT => [[1.0, 1.0], [-1.0, 1.0], [-1.0, -1.0], [1.0, -1.0]]
+                .map(|[a, b]| add(add(c, u, a), v, b))
+                .to_vec(),
+            _ => (0..8)
+                .map(|k| {
+                    let t = k as f32 * PI / 4.0;
+                    add(add(c, u, t.cos()), v, t.sin())
+                })
+                .collect(),
+        };
+        let mut sum = [0.0; 3];
+        for (i, a) in corners.iter().enumerate() {
+            let b = corners[(i + 1) % corners.len()];
+            let k = cross(*a, b);
+            let s = dot(k, k).sqrt();
+            if s > 0.0 {
+                sum = add(sum, k, s.atan2(dot(*a, b)) / s);
+            }
+        }
+        let sign = if dot(sum, c) < 0.0 { -0.5 } else { 0.5 };
+        sum.map(|v| v * sign)
+    }
+
     /// What `shaders/frame.slang`'s loop gives a point `p` with normal `n`
-    /// from a sphere.
+    /// from a sphere or an area light, in its first channel.
     fn incident(light: &Light, p: [f32; 3], n: [f32; 3]) -> f32 {
-        let toward: [f32; 3] = std::array::from_fn(|i| light.position[i] - p[i]);
-        let d2: f32 = toward.iter().map(|v| v * v).sum();
-        let cos = (0..3).map(|i| toward[i] * n[i]).sum::<f32>() / d2.sqrt();
-        let falloff = 1.0 / d2.max(light.radius * light.radius) - 1.0 / light.reach.powi(2);
+        if light.shape != SPHERE {
+            let e = illuminance_vector(light, p);
+            let magnitude = dot(e, e).sqrt();
+            if magnitude == 0.0 {
+                return 0.0;
+            }
+            let cos = dot(e, n) / magnitude;
+            return light.illuminance[0] * (magnitude - light.fade).max(0.0) * cos.max(0.0);
+        }
+        let toward = add(light.position, p, -1.0);
+        let d2 = dot(toward, toward);
+        let cos = dot(toward, n) / d2.sqrt();
+        let falloff = 1.0 / d2.max(light.radius * light.radius) - light.fade;
         light.illuminance[0] * falloff.max(0.0) * cos.max(0.0)
     }
 
@@ -560,6 +759,281 @@ mod tests {
         assert!((facing - PI).abs() < THRESHOLD, "{facing}");
         // Without the bound, a point there gives 4π.
         assert!(light.illuminance[0] / 0.25 > 3.0 * PI);
+    }
+
+    /// A transform: scaled along x, y and z, turned `turn` degrees about y
+    /// and moved to `centre`.
+    fn transform(scale: [f64; 3], turn: f64, centre: [f64; 3]) -> [f64; 16] {
+        let (sin, cos) = turn.to_radians().sin_cos();
+        let [x, y, z] = scale;
+        let [a, b, c] = centre;
+        #[rustfmt::skip]
+        let m = [
+            x * cos, 0.0, -x * sin, 0.0,
+            0.0, y, 0.0, 0.0,
+            z * sin, 0.0, z * cos, 0.0,
+            a, b, c, 1.0,
+        ];
+        m
+    }
+
+    fn area_light(shape: Shape, intensity: f32, normalize: bool, m: [f64; 16]) -> store::Light {
+        store::Light {
+            path: "/panel".into(),
+            params: Some(LightParams {
+                shape,
+                ..params(intensity, 0.0, normalize)
+            }),
+            transform: Some(m),
+        }
+    }
+
+    type V = [f64; 3];
+
+    fn add64(a: V, b: V, s: f64) -> V {
+        std::array::from_fn(|i| a[i] + b[i] * s)
+    }
+
+    fn dot64(a: V, b: V) -> f64 {
+        (0..3).map(|i| a[i] * b[i]).sum()
+    }
+
+    /// The illuminance a light of radiance 1 and transform `m` gives a
+    /// point `p` with unit normal `n`, summed over its surface, where only
+    /// what faces `p` is seen; and its area. `surface` maps s and t in
+    /// [0, 1) and the matrix's rows to a point, its unit normal and the
+    /// area per unit of s and t.
+    fn over_surface(
+        m: &[f64; 16],
+        surface: impl Fn(f64, f64, [V; 4]) -> (V, V, f64),
+        p: V,
+        n: V,
+    ) -> (f64, f64) {
+        let rows = std::array::from_fn(|r| [m[4 * r], m[4 * r + 1], m[4 * r + 2]]);
+        let steps = 500;
+        let (mut sum, mut area) = (0.0, 0.0);
+        for i in 0..steps {
+            for j in 0..steps {
+                let (s, t) = (
+                    (i as f64 + 0.5) / steps as f64,
+                    (j as f64 + 0.5) / steps as f64,
+                );
+                let (x, normal, da) = surface(s, t, rows);
+                let da = da / (steps * steps) as f64;
+                let toward = add64(x, p, -1.0);
+                let d2 = dot64(toward, toward);
+                let lit = (-dot64(toward, normal)).max(0.0) * dot64(toward, n).max(0.0);
+                sum += lit / (d2 * d2) * da;
+                area += da;
+            }
+        }
+        (sum, area)
+    }
+
+    fn length64(v: V) -> f64 {
+        dot64(v, v).sqrt()
+    }
+
+    fn cross64(a: V, b: V) -> V {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    /// A rect's, disk's or cylinder's surface, as `over_surface` takes it.
+    fn surface(shape: Shape) -> impl Fn(f64, f64, [V; 4]) -> (V, V, f64) {
+        move |s, t, [x, y, z, o]| {
+            let lit = cross64(x, y);
+            let lit = lit.map(|v| v / length64(lit) * -dot64(lit, z).signum());
+            match shape {
+                Shape::Rect { width, height } => {
+                    let (w, h) = (width as f64, height as f64);
+                    let p = add64(add64(o, x, w * (s - 0.5)), y, h * (t - 0.5));
+                    (p, lit, w * h * length64(cross64(x, y)))
+                }
+                Shape::Disk { radius } => {
+                    let (r, a) = (radius as f64 * s, 2.0 * std::f64::consts::PI * t);
+                    let p = add64(add64(o, x, r * a.cos()), y, r * a.sin());
+                    let da = 2.0 * std::f64::consts::PI * radius as f64 * r;
+                    (p, lit, da * length64(cross64(x, y)))
+                }
+                Shape::Cylinder { length, radius } => {
+                    let (l, r) = (length as f64, radius as f64);
+                    let a = 2.0 * std::f64::consts::PI * t;
+                    let out = add64(y.map(|v| v * a.cos()), z, a.sin());
+                    let p = add64(add64(o, x, l * (s - 0.5)), out, r);
+                    let da = l * length64(x) * 2.0 * std::f64::consts::PI * r * length64(out);
+                    (p, out.map(|v| v / length64(out)), da)
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    /// A rect a fifth of its size from a point, then further, a disk and a
+    /// cylinder near and far, each wholly above the point's horizon and
+    /// seen square on or obliquely: the shape, its transform, the point
+    /// and its normal, and what Pika may lose of the reference.
+    fn area_cases() -> Vec<(Shape, [f64; 16], V, V, f64)> {
+        let rect = Shape::Rect {
+            width: 2.0,
+            height: 1.0,
+        };
+        let disk = Shape::Disk { radius: 0.5 };
+        let tube = Shape::Cylinder {
+            length: 2.0,
+            radius: 0.25,
+        };
+        let (facing, tilted) = ([0.0, 0.0, 1.0], [0.3, 0.0, -0.954]);
+        // The shape, its scale, turn and centre, the normal and the loss.
+        #[rustfmt::skip]
+        let cases = [
+            (rect, [1.0; 3], 0.0, [0.0, 0.0, 0.4], facing, 2e-3),
+            (rect, [0.6, 0.5, 2.0], 210.0, [0.5, 0.2, -0.6], tilted, 2e-3),
+            (rect, [1.0; 3], 20.0, [1.0, -0.5, 6.0], facing, 2e-3),
+            (disk, [1.0; 3], 0.0, [0.0, 0.0, 0.2], facing, 6e-3),
+            (disk, [2.0, 1.0, 1.0], 150.0, [0.3, 0.4, -0.7], tilted, 6e-3),
+            (disk, [1.0; 3], 10.0, [-1.0, 0.0, 5.0], facing, 6e-3),
+            (tube, [1.0; 3], 0.0, [0.0, 0.0, 0.6], facing, 1.5e-2),
+            (tube, [1.5, 2.0, 2.0], 40.0, [0.8, 0.3, -1.8], tilted, 1.5e-2),
+            (tube, [1.0; 3], 60.0, [1.5, 0.0, 6.0], facing, 1.5e-2),
+        ];
+        (cases.into_iter())
+            .map(|(shape, scale, turn, centre, n, loss)| {
+                (shape, transform(scale, turn, centre), [0.0; 3], n, loss)
+            })
+            .collect()
+    }
+
+    /// Bright enough that the fade is lost in the tolerances.
+    const BRIGHT: f32 = 1000.0;
+
+    fn f32s(v: V) -> [f32; 3] {
+        v.map(|c| c as f32)
+    }
+
+    #[test]
+    fn area_lights_give_what_their_surface_does() {
+        for (shape, m, p, n, tolerance) in area_cases() {
+            let (reference, area) = over_surface(&m, surface(shape), p, n);
+            assert!(reference > 0.01, "{shape:?}: {reference}");
+            for normalize in [false, true] {
+                let light = resolve(&area_light(shape, BRIGHT, normalize, m)).unwrap();
+                let pika = incident(&light, f32s(p), f32s(n)) as f64;
+                let size = if normalize { area } else { 1.0 };
+                let reference = BRIGHT as f64 * reference / size;
+                // What the fade loses, besides.
+                let allowed =
+                    tolerance * reference + light.fade as f64 * light.illuminance[0] as f64;
+                assert!(
+                    (pika - reference).abs() < allowed,
+                    "{shape:?} {normalize}: {pika} {reference}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn area_lights_turned_or_read_as_points_miss_their_surface() {
+        let mut near = 0;
+        for (shape, m, p, n, tolerance) in area_cases() {
+            let o = [m[12], m[13], m[14]];
+            let toward = add64(o, p, -1.0);
+            let d2 = dot64(toward, toward);
+            // From further, either can come close.
+            if d2 >= 1.0 {
+                continue;
+            }
+            near += 1;
+            let (reference, area) = over_surface(&m, surface(shape), p, n);
+            let reference = BRIGHT as f64 * reference;
+            let missed = |pika: f64| (pika - reference).abs() > 3.0 * tolerance * reference;
+            // Turned 90° about y.
+            let [x, _, z] = [0, 4, 8].map(|r| [m[r], m[r + 1], m[r + 2]]);
+            let mut turned = m;
+            turned[..3].copy_from_slice(&z.map(|v| -v));
+            turned[8..11].copy_from_slice(&x);
+            let light = resolve(&area_light(shape, BRIGHT, false, turned)).unwrap();
+            let pika = incident(&light, f32s(p), f32s(n)) as f64;
+            assert!(missed(pika), "{shape:?} turned");
+            // A point at its centre showing the point its area, or a
+            // cylinder its side: the naive inverse square.
+            let shown = match shape {
+                Shape::Cylinder { .. } => area / std::f64::consts::PI,
+                _ => area,
+            };
+            let point = BRIGHT as f64 * shown * dot64(toward, n).max(0.0) / (d2 * d2.sqrt());
+            assert!(missed(point), "{shape:?} point");
+        }
+        // Two rects, two disks and a cylinder.
+        assert_eq!(near, 5);
+    }
+
+    #[test]
+    fn rects_and_disks_light_one_side() {
+        for shape in [
+            Shape::Rect {
+                width: 1.0,
+                height: 1.0,
+            },
+            Shape::Disk { radius: 0.5 },
+        ] {
+            // It shines down -z, so a point below it facing up is lit, and
+            // one above it facing down is not. Mirrored in x, it still
+            // shines down -z; mirrored in z, its -z is up.
+            let mirrors = [
+                ([1.0; 3], -1.0),
+                ([-1.0, 1.0, 1.0], -1.0),
+                ([1.0, 1.0, -1.0], 1.0),
+            ];
+            for (scale, lit) in mirrors {
+                let m = transform(scale, 0.0, [0.0; 3]);
+                let light = resolve(&area_light(shape, 1.0, false, m)).unwrap();
+                assert!(incident(&light, [0.0, 0.0, lit], [0.0, 0.0, -lit]) > 0.1);
+                assert_eq!(incident(&light, [0.0, 0.0, -lit], [0.0, 0.0, lit]), 0.0);
+            }
+            // Turned over, it lights the other side.
+            let over = resolve(&area_light(
+                shape,
+                1.0,
+                false,
+                transform([1.0; 3], 180.0, [0.0; 3]),
+            ))
+            .unwrap();
+            assert!(incident(&over, [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]) > 0.1);
+        }
+    }
+
+    #[test]
+    fn area_lights_end_at_their_reach() {
+        let mut random = Random(0x2545_f491_4f6c_dd1d);
+        for (shape, m, ..) in area_cases() {
+            let light = resolve(&area_light(shape, 30.0, false, m)).unwrap();
+            let unfaded = Light { fade: 0.0, ..light };
+            let mut lit_past = 0;
+            for _ in 0..2000 {
+                let d = [0; 3].map(|_| random.next(-1.0, 1.0));
+                let length = dot(d, d).sqrt();
+                if length > 1.0 || length < 0.1 {
+                    continue;
+                }
+                let d = d.map(|v| v / length);
+                for scale in [0.3, 0.9, 1.0, 1.5] {
+                    let p = add(light.position, d, light.reach * scale);
+                    let n = d.map(|v| -v);
+                    let (faded, full) = (incident(&light, p, n), incident(&unfaded, p, n));
+                    assert!(full - faded <= THRESHOLD * 1.001 && faded <= full);
+                    if scale >= 1.0 {
+                        assert_eq!(faded, 0.0, "{shape:?}");
+                        lit_past += (full > 0.0) as usize;
+                    }
+                }
+            }
+            // Not vacuous: without the fade, it lights past its reach.
+            assert!(lit_past > 0, "{shape:?}");
+        }
     }
 
     #[test]

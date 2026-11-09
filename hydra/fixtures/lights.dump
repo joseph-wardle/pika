@@ -22,6 +22,15 @@ material /world/mtl/paint
   node surface UsdPreviewSurface
     diffuseColor float 0.8 0.2 0.1
     typeName:diffuseColor text "color3f"
+light /world/panel
+  visible true
+  intensity 3 exposure 0 color 1 1 1 normalize false
+  rect width 2 height 0.5
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
 light /world/rig/sun
   visible true
   intensity 50000 exposure -1 color 1 0.9 0.8 normalize false
@@ -30,6 +39,15 @@ light /world/rig/sun
     1 0 0 0
     0 0.7071067811865475 -0.7071067811865476 0
     0 0.7071067811865476 0.7071067811865475 0
+    0 0 0 1
+light /world/spot
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize true
+  disk radius 0.5
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
     0 0 0 1
 mesh /world/tri
   render_tag geometry
@@ -50,6 +68,15 @@ mesh /world/tri
     0 1 0
   normals none
   texcoord none
+light /world/tube
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  cylinder length 1 radius 0.1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
 sync 2
 light /world/bulb
   visible true
@@ -65,6 +92,15 @@ material /world/mtl/paint
   node surface UsdPreviewSurface
     diffuseColor float 0.8 0.2 0.1
     typeName:diffuseColor text "color3f"
+light /world/panel
+  visible true
+  intensity 3 exposure 0 color 1 1 1 normalize false
+  rect width 2 height 0.5
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
 light /world/rig/sun
   visible false
   intensity 2 exposure -1 color 1 0.9 0.8 normalize true
@@ -73,6 +109,15 @@ light /world/rig/sun
     0.0000000000000002220446049250313 0 -1 0
     -0.7071067811865476 0.7071067811865475 -0.00000000000000015700924586837752 0
     0.7071067811865475 0.7071067811865476 0.0000000000000001570092458683775 0
+    0 0 0 1
+light /world/spot
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize true
+  disk radius 0.5
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
     0 0 0 1
 mesh /world/tri
   render_tag geometry
@@ -93,3 +138,12 @@ mesh /world/tri
     0 1 0
   normals none
   texcoord none
+light /world/tube
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  cylinder length 4 radius 0.1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1

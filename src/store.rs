@@ -121,7 +121,7 @@ pub struct Curves {
     pub bytes: usize,
 }
 
-/// A distant or sphere light. Each field is `None` until Hydra first hands
+/// A distant, sphere, rect, disk or cylinder light. Each field is `None` until Hydra first hands
 /// it over.
 #[derive(PartialEq, Debug)]
 pub struct Light {
@@ -146,9 +146,25 @@ pub struct LightParams {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Shape {
     /// The angular diameter in degrees.
-    Distant { angle: f32 },
-    /// The radius before the light's transform.
-    Sphere { radius: f32 },
+    Distant {
+        angle: f32,
+    },
+    /// The sizes are before the light's transform.
+    Sphere {
+        radius: f32,
+    },
+    Rect {
+        width: f32,
+        height: f32,
+    },
+    Disk {
+        radius: f32,
+    },
+    /// Along its x axis.
+    Cylinder {
+        length: f32,
+        radius: f32,
+    },
 }
 
 /// A prim Pika accepts only to count it: Hydra inserts no prim of a type the
@@ -1130,6 +1146,13 @@ impl fmt::Display for Light {
                 match p.shape {
                     Shape::Distant { angle } => writeln!(f, "  distant angle {angle}")?,
                     Shape::Sphere { radius } => writeln!(f, "  sphere radius {radius}")?,
+                    Shape::Rect { width, height } => {
+                        writeln!(f, "  rect width {width} height {height}")?
+                    }
+                    Shape::Disk { radius } => writeln!(f, "  disk radius {radius}")?,
+                    Shape::Cylinder { length, radius } => {
+                        writeln!(f, "  cylinder length {length} radius {radius}")?
+                    }
                 }
             }
             None => writeln!(f, "  params {UNSYNCED}")?,

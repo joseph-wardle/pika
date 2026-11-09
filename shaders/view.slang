@@ -28,18 +28,35 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
+// A light's shape (src/light.rs).
+static const uint DISTANT = 0;
+static const uint SPHERE = 1;
+static const uint RECT = 2;
+static const uint DISK = 3;
+static const uint CYLINDER = 4;
+
 // A light as the light loop reads it (shaders/frame.slang, src/light.rs).
 struct Light
 {
-    // The unit direction toward a distant light, or a sphere's centre.
+    // The unit direction toward a distant light, or the centre of another.
     float3 position;
-    // A sphere's radius: 0 for a distant light.
+    // A sphere's or cylinder's radius.
     float radius;
-    // The illuminance it gives a surface facing it: for a sphere, at unit
-    // distance from its centre.
+    // The illuminance a distant light gives a surface facing it, or a sphere
+    // at unit distance from its centre; the radiance of a rect, disk or
+    // cylinder.
     float3 illuminance;
-    // How far it reaches: infinite for a distant light, and only for one.
+    // How far it reaches: infinite for a distant light. The loop reads fade
+    // instead.
     float reach;
+    // A rect's half sides or the axes of a disk's polygon, which light the
+    // side cross(u, v) points to; half a cylinder's axis.
+    float3 u;
+    uint shape;
+    float3 v;
+    // What a sphere's 1 / d² or an area light's illuminance vector loses so
+    // that it ends at its reach.
+    float fade;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).

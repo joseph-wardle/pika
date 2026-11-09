@@ -710,7 +710,11 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
     // treatAsPoint is a hint Pika need not take: above a surface's horizon a
     // sphere lights it exactly as a point of the same power (src/light.rs).
+    // A cylinder's treatAsLine is a hint too.
     params.radius = light_param(delegate, id, HdLightTokens->radius, 0.5f);
+    params.width = light_param(delegate, id, HdLightTokens->width, 1.0f);
+    params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);
+    params.length = light_param(delegate, id, HdLightTokens->length, 1.0f);
     params.visible = delegate->GetVisible(id);
     _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
 }

@@ -137,9 +137,11 @@ typedef struct pika_network {
 } pika_network;
 
 // A light's UsdLux inputs, as Hydra hands them over: its Hydra type
-// ("distantLight" or "sphereLight"), its intensity in nits, its exposure in
-// stops, its color, whether it is normalized, a distant light's angular
-// diameter in degrees, a sphere light's radius, and Hydra's visibility.
+// ("distantLight", "sphereLight", "rectLight", "diskLight" or
+// "cylinderLight"), its intensity in nits, its exposure in stops, its color,
+// whether it is normalized, a distant light's angular diameter in degrees, a
+// sphere's, disk's or cylinder's radius, a rect's width and height, a
+// cylinder's length, and Hydra's visibility.
 typedef struct pika_light {
     const char *type;
     float intensity;
@@ -148,6 +150,9 @@ typedef struct pika_light {
     bool normalize;
     float angle;
     float radius;
+    float width;
+    float height;
+    float length;
     bool visible;
 } pika_light;
 
