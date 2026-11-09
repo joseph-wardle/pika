@@ -60,7 +60,10 @@ struct Light
     // Its light-link collection's bit, or 0 when it lights every mesh
     // (src/link.rs).
     uint link;
-    uint3 pad;
+    // How far off a rect, disk or cylinder gives what a point does to within
+    // the threshold (src/light.rs Light::area): infinite for another light.
+    float far;
+    uint2 pad;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).
