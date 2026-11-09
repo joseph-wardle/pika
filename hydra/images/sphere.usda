@@ -1,0 +1,74 @@
+#usda 1.0
+(
+    doc = """Clay quads facing the camera at three distances behind a sphere light, and one turned toward it, each wholly above the sphere's horizon: normalized at frame 1 and unnormalized at frame 2, where the controls are checked, its radius scaled by its parent."""
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 35
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "near"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1.9, -0.3, -4), (-0.5, -0.3, -4), (-0.5, 1, -4), (-1.9, 1, -4)]
+}
+
+def Mesh "middle"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-0.3, -1.2, -7), (1.9, -1.2, -7), (1.9, 1.2, -7), (-0.3, 1.2, -7)]
+}
+
+def Mesh "far"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(2.2, -2, -12), (5.2, -2, -12), (5.2, 2, -12), (2.2, 2, -12)]
+}
+
+# Turned 35° toward the light, below the others.
+def Mesh "turned"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0, -0.4, 0), (1.4, -0.4, 0), (1.4, 0.4, 0), (0, 0.4, 0)]
+    double3 xformOp:translate = (-2.6, -1.45, -6)
+    float3 xformOp:rotateXYZ = (0, 35, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+# A sphere of world radius 0.5.
+def Xform "rig"
+{
+    double3 xformOp:translate = (0, 0, -2)
+    float3 xformOp:scale = (2, 2, 2)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+
+    def SphereLight "bulb"
+    {
+        float inputs:radius = 0.25
+        float inputs:intensity.timeSamples = {
+            1: 125,
+            2: 40,
+        }
+        bool inputs:normalize.timeSamples = {
+            1: 1,
+            2: 0,
+        }
+    }
+}

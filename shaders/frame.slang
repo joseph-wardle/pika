@@ -50,18 +50,22 @@ Incident incident_light(uint light_index, float3 P, float3 N)
 {
     Light light = view->lights[view->tile_lights[tile(P).x + light_index]];
     Incident incident;
-    if (light.position.w == 0)
+    if (isinf(light.reach))
     {
-        incident.direction = light.position.xyz;
+        incident.direction = light.position;
         incident.illuminance = light.illuminance;
         return incident;
     }
-    float3 toward = light.position.xyz - P;
+    float3 toward = light.position - P;
     float d2 = dot(toward, toward);
     incident.direction = toward * rsqrt(d2);
-    // Less what it gives at its reach, so it fades to 0 there (src/light.rs).
+    // A sphere gives what a point at its centre does, exactly while it is
+    // above the surface's horizon (src/light.rs sphere). Inside, it gives
+    // no more than at its surface, less what it gives at its reach, so it
+    // fades to 0 there.
     float r = light.radius;
-    incident.illuminance = light.illuminance * max(1 / d2 - 1 / (r * r), 0);
+    float reach = light.reach;
+    incident.illuminance = light.illuminance * max(1 / max(d2, r * r) - 1 / (reach * reach), 0);
     return incident;
 }
 

@@ -1,7 +1,8 @@
 sync 1
 light /world/sun
   visible true
-  intensity 10 exposure 0 color 1 1 1 normalize false angle 0.53
+  intensity 10 exposure 0 color 1 1 1 normalize false
+  distant angle 0.53
   transform
     1 0 0 0
     0 1 0 0
@@ -10,7 +11,8 @@ light /world/sun
 sync 2
 light /world/sun
   visible true
-  intensity 20 exposure 0 color 1 1 1 normalize false angle 2
+  intensity 20 exposure 0 color 1 1 1 normalize false
+  distant angle 2
   transform
     0.0000000000000002220446049250313 0 -1 0
     0 1 0 0

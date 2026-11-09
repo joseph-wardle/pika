@@ -121,8 +121,8 @@ pub struct Curves {
     pub bytes: usize,
 }
 
-/// A distant light, the one light type Pika draws so far. Each field is
-/// `None` until Hydra first hands it over.
+/// A distant or sphere light. Each field is `None` until Hydra first hands
+/// it over.
 #[derive(PartialEq, Debug)]
 pub struct Light {
     pub path: String,
@@ -137,10 +137,18 @@ pub struct LightParams {
     pub exposure: f32,
     pub color: [f32; 3],
     pub normalize: bool,
-    /// The angular diameter in degrees.
-    pub angle: f32,
+    pub shape: Shape,
     /// Hydra's visibility, which a light's params dirty bit covers too.
     pub visible: bool,
+}
+
+/// A light's type and the inputs only it has.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Shape {
+    /// The angular diameter in degrees.
+    Distant { angle: f32 },
+    /// The radius before the light's transform.
+    Sphere { radius: f32 },
 }
 
 /// A prim Pika accepts only to count it: Hydra inserts no prim of a type the
@@ -803,7 +811,7 @@ impl Store {
         Ok(())
     }
 
-    /// Adds a distant light with nothing synced yet.
+    /// Adds a light with nothing synced yet.
     pub fn insert_light(&mut self, path: String) -> u64 {
         let id = self.new_id();
         let light = Light {
@@ -1113,13 +1121,16 @@ impl fmt::Display for Light {
                 writeln!(f, "  visible {}", p.visible)?;
                 writeln!(
                     f,
-                    "  intensity {} exposure {} color{} normalize {} angle {}",
+                    "  intensity {} exposure {} color{} normalize {}",
                     p.intensity,
                     p.exposure,
                     List(&p.color),
                     p.normalize,
-                    p.angle
                 )?;
+                match p.shape {
+                    Shape::Distant { angle } => writeln!(f, "  distant angle {angle}")?,
+                    Shape::Sphere { radius } => writeln!(f, "  sphere radius {radius}")?,
+                }
             }
             None => writeln!(f, "  params {UNSYNCED}")?,
         }
@@ -1221,7 +1232,7 @@ mod tests {
             exposure: 0.0,
             color: [1.0; 3],
             normalize: false,
-            angle: 0.53,
+            shape: Shape::Distant { angle: 0.53 },
             visible: true,
         };
         let mut transform = [0.0; 16];

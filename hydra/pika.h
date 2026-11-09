@@ -136,15 +136,18 @@ typedef struct pika_network {
     const char *surface;
 } pika_network;
 
-// A distant light's UsdLux inputs, as Hydra hands them over: its intensity
-// in nits, its exposure in stops, its color, whether it is normalized, its
-// angular diameter in degrees, and Hydra's visibility.
+// A light's UsdLux inputs, as Hydra hands them over: its Hydra type
+// ("distantLight" or "sphereLight"), its intensity in nits, its exposure in
+// stops, its color, whether it is normalized, a distant light's angular
+// diameter in degrees, a sphere light's radius, and Hydra's visibility.
 typedef struct pika_light {
+    const char *type;
     float intensity;
     float exposure;
     float color[3];
     bool normalize;
     float angle;
+    float radius;
     bool visible;
 } pika_light;
 
@@ -271,13 +274,13 @@ int pika_curves_new(const pika_renderer *renderer, const char *path, uint64_t *o
 int pika_curves_free(const pika_renderer *renderer, uint64_t id);
 int pika_curves_pulled(const pika_renderer *renderer, uint64_t id, size_t bytes);
 
-// Adds a distant light and writes its id, never reused, to `*out`.
+// Adds a light and writes its id, never reused, to `*out`.
 int pika_light_new(const pika_renderer *renderer, const char *path, uint64_t *out);
 int pika_light_free(const pika_renderer *renderer, uint64_t id);
 int pika_light_params(const pika_renderer *renderer, uint64_t id,
                       const pika_light *params);
-// The world transform: Hydra's row-major GfMatrix4d. The light shines down
-// its -z axis.
+// The world transform: Hydra's row-major GfMatrix4d. A distant light
+// shines down its -z axis.
 int pika_light_transform(const pika_renderer *renderer, uint64_t id,
                          const double matrix[16]);
 

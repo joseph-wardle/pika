@@ -8,7 +8,7 @@
 use std::f32::consts::PI;
 use std::ops::Range;
 
-use crate::store::{self, LightParams};
+use crate::store::{self, LightParams, Shape};
 use crate::transform::Camera;
 
 /// The side of a tile in pixels.
@@ -16,88 +16,89 @@ pub const TILE: u32 = 16;
 
 /// The illuminance at which a light's reach ends. A facing white Lambert
 /// surface shows illuminance / π, so a pixel loses at most this / π of
-/// each light (`Light::point`).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "Pika makes no point light until it syncs Hydra's lights"
-    )
-)]
+/// each light (`Light::sphere`).
 pub const THRESHOLD: f32 = 0.01;
 
 /// `shaders/view.slang`'s `Light`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Light {
-    /// The unit direction toward a distant light (w = 0), or a point
-    /// light's position (w = 1).
-    pub position: [f32; 4],
-    /// The illuminance it gives a surface facing it: for a point light, at
-    /// unit distance.
-    pub illuminance: [f32; 3],
-    /// How far it reaches: infinite for a distant light.
+    /// The unit direction toward a distant light, or a sphere's centre.
+    pub position: [f32; 3],
+    /// A sphere's radius: 0 for a distant light.
     pub radius: f32,
+    /// The illuminance it gives a surface facing it: for a sphere, at unit
+    /// distance from its centre.
+    pub illuminance: [f32; 3],
+    /// How far it reaches: infinite for a distant light, and only for one.
+    pub reach: f32,
 }
 
 impl Light {
     pub fn distant(direction: [f32; 3], illuminance: [f32; 3]) -> Self {
-        let [x, y, z] = direction;
         Self {
-            position: [x, y, z, 0.0],
+            position: direction,
+            radius: 0.0,
             illuminance,
-            radius: f32::INFINITY,
+            reach: f32::INFINITY,
         }
     }
 
-    /// A point light at `position`. Its reach is where its brightest
-    /// channel falls to `THRESHOLD`: the light loop gives illuminance ×
-    /// (1/d² - 1/radius²), which loses that much everywhere and so reaches
-    /// 0 at the radius without a step.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Pika makes no point light until it syncs Hydra's lights"
-        )
-    )]
-    pub fn point(position: [f32; 3], illuminance: [f32; 3]) -> Self {
-        let [x, y, z] = position;
+    /// A sphere at `centre`; of radius 0, a point. Its reach is where its
+    /// brightest channel falls to `THRESHOLD`: the light loop gives
+    /// illuminance × (1/d² - 1/reach²), which loses that much everywhere
+    /// and so reaches 0 at the reach without a step.
+    pub fn sphere(centre: [f32; 3], radius: f32, illuminance: [f32; 3]) -> Self {
         let brightest = illuminance.into_iter().fold(0.0, f32::max);
         Self {
-            position: [x, y, z, 1.0],
+            position: centre,
+            radius,
             illuminance,
-            radius: (brightest / THRESHOLD).sqrt(),
+            reach: (brightest / THRESHOLD).sqrt(),
         }
     }
 }
 
-/// A UsdLux distant light as the loop draws it: `None` until Hydra has
-/// handed over its params and transform, while it is hidden and when it
-/// gives nothing.
+/// A UsdLux light as the loop draws it: `None` until Hydra has handed over
+/// its params and transform, while it is hidden and when it gives nothing.
 pub fn resolve(light: &store::Light) -> Option<Light> {
     let (Some(params), Some(m)) = (&light.params, &light.transform) else {
         return None;
     };
-    // It shines down its -z axis: the row-vector matrix's third row is
-    // where +z goes.
-    let z = [m[8], m[9], m[10]].map(|v| v as f32);
-    let length = z.iter().map(|v| v * v).sum::<f32>().sqrt();
-    let illuminance = illuminance(params);
-    if !params.visible || length == 0.0 || illuminance == [0.0; 3] {
-        return None;
-    }
-    Some(Light::distant(z.map(|v| v / length), illuminance))
+    // The row-vector matrix's rows are where +x, +y and +z go, then where
+    // the origin goes.
+    let row = |r: usize| [m[4 * r], m[4 * r + 1], m[4 * r + 2]].map(|v| v as f32);
+    let length = |v: [f32; 3]| v.iter().map(|c| c * c).sum::<f32>().sqrt();
+    let light = match params.shape {
+        // It shines down its -z axis.
+        Shape::Distant { angle } => {
+            let z = row(2);
+            let length = length(z);
+            (length > 0.0).then(|| Light::distant(z.map(|v| v / length), distant(params, angle)))
+        }
+        // Scaled by the geometric mean of its axes' lengths, which is exact
+        // under a uniform scale.
+        Shape::Sphere { radius } => {
+            let scale = (length(row(0)) * length(row(1)) * length(row(2))).cbrt();
+            let radius = radius.abs() * scale;
+            Some(Light::sphere(row(3), radius, sphere(params, radius)))
+        }
+    }?;
+    (params.visible && light.illuminance != [0.0; 3]).then_some(light)
 }
 
-/// The illuminance a distant light gives a surface facing it. UsdLux's
-/// intensity is radiance in nits, scaled by 2^exposure and the color and,
-/// when normalized, divided by the light's size factor (`usdLux/lightAPI.h`
-/// on normalize). A disk of angular radius θ gives π sin²θ times its
-/// radiance; a perfectly parallel light (angle 0) gives its radiance, as
-/// lux, whose size factor is 1.
-fn illuminance(p: &LightParams) -> [f32; 3] {
-    let theta = (p.angle.to_radians() / 2.0).clamp(0.0, PI);
+/// UsdLux's radiance in nits: the intensity scaled by 2^exposure and the
+/// color, before normalizing divides it by the light's size factor
+/// (`usdLux/lightAPI.h` on normalize).
+fn radiance(p: &LightParams) -> [f32; 3] {
+    p.color.map(|c| c * p.intensity * p.exposure.exp2())
+}
+
+/// The illuminance a distant light gives a surface facing it. A disk of
+/// angular radius θ gives π sin²θ times its radiance; a perfectly parallel
+/// light (angle 0) gives its radiance, as lux, whose size factor is 1.
+fn distant(p: &LightParams, angle: f32) -> [f32; 3] {
+    let theta = (angle.to_radians() / 2.0).clamp(0.0, PI);
     let sin2 = theta.sin().powi(2);
     // The light past a surface's horizon does not reach it.
     let (received, size) = if theta == 0.0 {
@@ -108,8 +109,24 @@ fn illuminance(p: &LightParams) -> [f32; 3] {
         (PI, (2.0 - sin2) * PI)
     };
     let size = if p.normalize { size } else { 1.0 };
-    let scale = p.intensity * p.exposure.exp2() * received / size;
-    p.color.map(|c| c * scale)
+    radiance(p).map(|l| l * received / size)
+}
+
+/// The illuminance a sphere of `radius`, world-space, gives a surface facing
+/// it at unit distance from its centre. Seen from d away, it subtends an
+/// angle α with sin α = radius / d and gives π sin²α times its radiance:
+/// π radius² / d², a point's falloff. While the whole sphere is above the
+/// surface's horizon, the surface receives that times the cosine toward
+/// its centre, as from a point there, so the loop's point is exact. Its
+/// size factor is its area, 4π radius², so normalized it gives a quarter of
+/// its intensity at any radius, a point's too.
+fn sphere(p: &LightParams, radius: f32) -> [f32; 3] {
+    let received = if p.normalize {
+        0.25
+    } else {
+        PI * radius * radius
+    };
+    radiance(p).map(|l| l * received)
 }
 
 /// Each tile's lights, in light order, so a tile sums them as a loop over
@@ -178,7 +195,7 @@ pub fn capacity(lights: usize, extent: [u32; 2]) -> u64 {
 }
 
 /// The columns and rows of the tiles `light` may reach, from the screen
-/// box of its box's corners. A point inside the light's sphere is inside
+/// box of its box's corners. A point inside the light's reach is inside
 /// its box, and while every corner is in front of the eye, its pixel is
 /// inside the corners' screen box; a pixel of margin covers the shader's
 /// rounding, which differs from this.
@@ -189,10 +206,10 @@ fn reach(
 ) -> Option<[Range<u32>; 2]> {
     let [columns, rows] = grid(extent);
     let every = Some([0..columns, 0..rows]);
-    if light.radius == f32::INFINITY {
+    if light.reach == f32::INFINITY {
         return every;
     }
-    if light.radius <= 0.0 {
+    if light.reach <= 0.0 {
         return None;
     }
     let mut low = [f32::INFINITY; 2];
@@ -201,7 +218,7 @@ fn reach(
     for corner in 0..8 {
         let p: [f32; 3] = std::array::from_fn(|i| {
             let side = if corner >> i & 1 == 1 { 1.0 } else { -1.0 };
-            light.position[i] + side * light.radius
+            light.position[i] + side * light.reach
         });
         let clip = project(view_projection, p);
         if clip[3] <= 0.0 {
@@ -293,12 +310,12 @@ mod tests {
         Some((y * columns + x) as usize)
     }
 
-    /// Point lights across the view, with a distant light among them.
+    /// Points across the view, with a distant light among them.
     fn lights(random: &mut Random) -> Vec<Light> {
         let mut lights: Vec<_> = (0..40)
             .map(|_| {
                 let p = [-4.0, -4.0, -6.0].map(|v| random.next(v, -v));
-                Light::point(p, [random.next(0.0, 0.02), 0.005, 0.001])
+                Light::sphere(p, 0.0, [random.next(0.0, 0.02), 0.005, 0.001])
             })
             .collect();
         lights.insert(7, Light::distant([0.0, 0.0, 1.0], [1.0; 3]));
@@ -307,7 +324,7 @@ mod tests {
 
     /// Over random visible points, the lights reaching a point that its
     /// tile does not list, and those reaching one, with the tiles built
-    /// from the lights' radii times `shrink`; and the share of the tiles'
+    /// from the lights' reach times `shrink`; and the share of the tiles'
     /// slots, every light in every tile, that they fill.
     fn missed(perspective: bool, shrink: f32) -> (usize, usize, f32) {
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
@@ -316,7 +333,7 @@ mod tests {
         let lights = lights(&mut random);
         let binned: Vec<_> = (lights.iter())
             .map(|l| Light {
-                radius: l.radius * shrink,
+                reach: l.reach * shrink,
                 ..*l
             })
             .collect();
@@ -334,8 +351,8 @@ mod tests {
             let listed = &tiles.lights[first as usize..(first + count) as usize];
             for (i, l) in lights.iter().enumerate() {
                 let d: f32 = (0..3).map(|k| (p[k] - l.position[k]).powi(2)).sum();
-                let reaches = l.position[3] == 0.0 || d < l.radius * l.radius;
-                reached += (reaches && l.position[3] == 1.0) as usize;
+                let reaches = l.reach == f32::INFINITY || d < l.reach * l.reach;
+                reached += (reaches && l.reach.is_finite()) as usize;
                 missed += (reaches && !listed.contains(&(i as u32))) as usize;
             }
         }
@@ -355,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn tiles_of_undersized_radii_miss_lights() {
+    fn tiles_of_undersized_reach_miss_lights() {
         assert!(missed(true, 0.5).0 > 0);
         assert!(missed(false, 0.5).0 > 0);
     }
@@ -374,10 +391,10 @@ mod tests {
 
     #[test]
     fn a_point_light_reaches_where_it_gives_the_threshold() {
-        let light = Light::point([0.0; 3], [0.5, 2.0, 1.0]);
-        assert!((2.0 / (light.radius * light.radius) - THRESHOLD).abs() < 1e-7);
+        let light = Light::sphere([0.0; 3], 0.0, [0.5, 2.0, 1.0]);
+        assert!((2.0 / (light.reach * light.reach) - THRESHOLD).abs() < 1e-7);
         // Reach from the dimmest channel would leave the brightest unfaded.
-        assert!(0.5 / (light.radius * light.radius) < THRESHOLD);
+        assert!(0.5 / (light.reach * light.reach) < THRESHOLD);
     }
 
     fn params(intensity: f32, angle: f32, normalize: bool) -> LightParams {
@@ -386,7 +403,7 @@ mod tests {
             exposure: 0.0,
             color: [1.0; 3],
             normalize,
-            angle,
+            shape: Shape::Distant { angle },
             visible: true,
         }
     }
@@ -399,14 +416,17 @@ mod tests {
     fn distant_lights_give_usdlux_illuminance() {
         // Hydra's camera light (HdxTaskController): 15000 nits from a disk
         // the sun's size, unnormalized, by ∫cos dω = π sin²(0.265°).
-        let camera = illuminance(&params(15000.0, 0.53, false))[0];
+        let camera = distant(&params(15000.0, 0.53, false), 0.53)[0];
         assert!((camera - 1.008).abs() < 5e-4, "{camera}");
         // Reading the intensity as lux is four orders of magnitude off.
         assert!(15000.0 / camera > 1e4);
         // Normalized, the intensity is lux at any angle; at angle 0 the
         // size factor is 1 either way.
         for (angle, normalize) in [(0.53, true), (0.0, false), (0.0, true), (90.0, true)] {
-            assert!(close(illuminance(&params(2.5, angle, normalize)), [2.5; 3]));
+            assert!(close(
+                distant(&params(2.5, angle, normalize), angle),
+                [2.5; 3]
+            ));
         }
         // Exposure doubles per stop, and the color scales each channel.
         let p = LightParams {
@@ -415,13 +435,13 @@ mod tests {
             ..params(2.0, 0.0, false)
         };
         let lux = 2.0 * 1.5f32.exp2();
-        assert!(close(illuminance(&p), [lux, lux / 2.0, lux / 4.0]));
+        assert!(close(distant(&p, 0.0), [lux, lux / 2.0, lux / 4.0]));
         // Past the horizon, a wider light lights no more of a facing
         // surface, but normalizes by its whole size.
-        let wide = illuminance(&params(1.0, 270.0, false))[0];
+        let wide = distant(&params(1.0, 270.0, false), 270.0)[0];
         assert!((wide - PI).abs() < 1e-5);
         let sin2 = (135f32.to_radians()).sin().powi(2);
-        let normalized = illuminance(&params(1.0, 270.0, true))[0];
+        let normalized = distant(&params(1.0, 270.0, true), 270.0)[0];
         assert!((normalized - 1.0 / (2.0 - sin2)).abs() < 1e-6);
     }
 
@@ -441,7 +461,7 @@ mod tests {
             transform: Some(transform),
         };
         let resolved = resolve(&light).unwrap();
-        assert_eq!(resolved.position, [0.0, -1.0, 0.0, 0.0]);
+        assert_eq!(resolved.position, [0.0, -1.0, 0.0]);
         assert_eq!(resolved.illuminance, [1.0; 3]);
         // Hidden, black or not yet synced, it gives nothing.
         light.params.as_mut().unwrap().visible = false;
@@ -452,10 +472,100 @@ mod tests {
         assert_eq!(resolve(&light), None);
     }
 
+    /// What `shaders/frame.slang`'s loop gives a point `p` with normal `n`
+    /// from a sphere.
+    fn incident(light: &Light, p: [f32; 3], n: [f32; 3]) -> f32 {
+        let toward: [f32; 3] = std::array::from_fn(|i| light.position[i] - p[i]);
+        let d2: f32 = toward.iter().map(|v| v * v).sum();
+        let cos = (0..3).map(|i| toward[i] * n[i]).sum::<f32>() / d2.sqrt();
+        let falloff = 1.0 / d2.max(light.radius * light.radius) - 1.0 / light.reach.powi(2);
+        light.illuminance[0] * falloff.max(0.0) * cos.max(0.0)
+    }
+
+    /// The illuminance a sphere of radiance 1 and `radius`, `distance` away
+    /// along +z, gives a surface with unit normal `n`: the cosine to `n`
+    /// summed over the cone of directions the sphere fills.
+    fn integrated(radius: f32, distance: f32, n: [f32; 3]) -> f32 {
+        let alpha = (radius / distance).asin();
+        let steps = 600;
+        let (dt, dp) = (alpha / steps as f32, 2.0 * PI / steps as f32);
+        let mut sum = 0.0;
+        for i in 0..steps {
+            let t = (i as f32 + 0.5) * dt;
+            for j in 0..steps {
+                let p = (j as f32 + 0.5) * dp;
+                let d = [t.sin() * p.cos(), t.sin() * p.sin(), t.cos()];
+                let cos = d[0] * n[0] + d[1] * n[1] + d[2] * n[2];
+                sum += cos.max(0.0) * t.sin() * dt * dp;
+            }
+        }
+        sum
+    }
+
+    /// A sphere light of radius 0.5, turned 90° about z, scaled by `scale`
+    /// and moved to `centre`.
+    fn sphere_light(intensity: f32, normalize: bool, scale: f64, centre: [f64; 3]) -> store::Light {
+        let [x, y, z] = centre;
+        #[rustfmt::skip]
+        let transform = [
+            0.0, scale, 0.0, 0.0,
+            -scale, 0.0, 0.0, 0.0,
+            0.0, 0.0, scale, 0.0,
+            x, y, z, 1.0,
+        ];
+        store::Light {
+            path: "/bulb".into(),
+            params: Some(LightParams {
+                shape: Shape::Sphere { radius: 0.5 },
+                ..params(intensity, 0.0, normalize)
+            }),
+            transform: Some(transform),
+        }
+    }
+
+    #[test]
+    fn spheres_give_what_their_cone_does_above_the_horizon() {
+        // A surface at the origin, tilted 30° from facing the sphere, which
+        // is wholly above its horizon at each distance.
+        let n = [30f32.to_radians().sin(), 0.0, 30f32.to_radians().cos()];
+        for distance in [1.5, 4.0, 12.0] {
+            let reference = 100.0 * integrated(1.0, distance as f32, n);
+            let light = resolve(&sphere_light(100.0, false, 2.0, [0.0, 0.0, distance])).unwrap();
+            let pika = incident(&light, [0.0; 3], n);
+            assert!(
+                (pika - reference).abs() < 2e-3 * reference + THRESHOLD,
+                "{pika} {reference}"
+            );
+            // Ignoring the transform's scale reads a radius of 0.5, a
+            // quarter of the light.
+            let unscaled = resolve(&sphere_light(100.0, false, 1.0, [0.0, 0.0, distance])).unwrap();
+            assert!(incident(&unscaled, [0.0; 3], n) < 0.3 * reference);
+            // Normalized, it is divided by its area, 4π.
+            let normalized =
+                resolve(&sphere_light(100.0, true, 2.0, [0.0, 0.0, distance])).unwrap();
+            let pika = incident(&normalized, [0.0; 3], n);
+            let reference = reference / (4.0 * PI);
+            assert!(
+                (pika - reference).abs() < 2e-3 * reference + THRESHOLD,
+                "{pika} {reference}"
+            );
+        }
+    }
+
+    #[test]
+    fn spheres_give_no_more_than_their_radiance_inside() {
+        // Inside, the sphere fills every direction: π times its radiance.
+        let light = resolve(&sphere_light(1.0, false, 2.0, [0.0, 0.0, 0.5])).unwrap();
+        let facing = incident(&light, [0.0; 3], [0.0, 0.0, 1.0]);
+        assert!((facing - PI).abs() < THRESHOLD, "{facing}");
+        // Without the bound, a point there gives 4π.
+        assert!(light.illuminance[0] / 0.25 > 3.0 * PI);
+    }
+
     #[test]
     fn lights_behind_the_eye_reach_no_tile() {
-        let behind = Light::point([0.0, 0.0, 8.0], [0.01; 3]);
-        assert!(behind.radius < 3.0);
+        let behind = Light::sphere([0.0, 0.0, 8.0], 0.0, [0.01; 3]);
+        assert!(behind.reach < 3.0);
         let tiles = Tiles::new(&[behind], &camera(true), [64, 48]);
         assert!(tiles.lights.is_empty());
     }

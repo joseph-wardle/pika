@@ -660,7 +660,8 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     }
 }
 
-PikaLight::PikaLight(SdfPath const &id, Pika &pika) : HdLight(id), _pika(pika) {
+PikaLight::PikaLight(TfToken const &type, SdfPath const &id, Pika &pika)
+    : HdLight(id), _type(type), _pika(pika) {
     if (id.IsEmpty())
         return;
     if (pika_renderer *renderer = _pika.renderer())
@@ -697,14 +698,19 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     if (!(bits & DirtyParams))
         return;
     pika_light params = {};
+    params.type = _type.GetText();
     // DistantLight's schema overrides LightAPI's fallback intensity of 1,
     // approximating sunlight.
-    params.intensity = light_param(delegate, id, HdLightTokens->intensity, 50000.0f);
+    bool distant = _type == HdPrimTypeTokens->distantLight;
+    params.intensity = light_param(delegate, id, HdLightTokens->intensity, distant ? 50000.0f : 1.0f);
     params.exposure = light_param(delegate, id, HdLightTokens->exposure, 0.0f);
     GfVec3f color = light_param(delegate, id, HdLightTokens->color, GfVec3f(1.0f));
     std::copy_n(color.data(), 3, params.color);
     params.normalize = light_param(delegate, id, HdLightTokens->normalize, false);
     params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
+    // treatAsPoint is a hint Pika need not take: above a surface's horizon a
+    // sphere lights it exactly as a point of the same power (src/light.rs).
+    params.radius = light_param(delegate, id, HdLightTokens->radius, 0.5f);
     params.visible = delegate->GetVisible(id);
     _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
 }

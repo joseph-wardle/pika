@@ -31,14 +31,15 @@ float4 unpack_tangent(uint packed)
 // A light as the light loop reads it (shaders/frame.slang, src/light.rs).
 struct Light
 {
-    // The unit direction toward a distant light (w = 0), or a point light's
-    // position (w = 1).
-    float4 position;
-    // The illuminance it gives a surface facing it: for a point light, at
-    // unit distance.
-    float3 illuminance;
-    // How far it reaches: infinite for a distant light.
+    // The unit direction toward a distant light, or a sphere's centre.
+    float3 position;
+    // A sphere's radius: 0 for a distant light.
     float radius;
+    // The illuminance it gives a surface facing it: for a sphere, at unit
+    // distance from its centre.
+    float3 illuminance;
+    // How far it reaches: infinite for a distant light, and only for one.
+    float reach;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).

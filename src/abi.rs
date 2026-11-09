@@ -16,7 +16,7 @@ use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
     InstancePrimvars, Instancing, Interpolation, LightParams, Normals, Refined, RefinedTexcoord,
-    Scheme, Stencils, Subset, Texcoord, Topology,
+    Scheme, Shape, Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -30,11 +30,13 @@ pub type Handle = Mutex<Renderer>;
 /// `pika_light`.
 #[repr(C)]
 pub struct CLight {
+    light_type: *const c_char,
     intensity: f32,
     exposure: f32,
     color: [f32; 3],
     normalize: bool,
     angle: f32,
+    radius: f32,
     visible: bool,
 }
 
@@ -899,7 +901,7 @@ pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, by
     call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
 }
 
-/// Adds a distant light to the store and writes its id, never reused, to
+/// Adds a light to the store and writes its id, never reused, to
 /// `*out`.
 ///
 /// # Safety
@@ -930,7 +932,8 @@ pub unsafe extern "C" fn pika_light_free(renderer: *const Handle, id: u64) -> i3
 }
 
 /// # Safety
-/// `renderer` must be live, and `params` valid for one read.
+/// `renderer` must be live, and `params` valid for one read, its type a
+/// NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_params(
     renderer: *const Handle,
@@ -940,12 +943,18 @@ pub unsafe extern "C" fn pika_light_params(
     call(|| {
         // SAFETY: the caller guarantees the renderer and the params.
         let (handle, p) = unsafe { (&*renderer, &*params) };
+        // SAFETY: the caller guarantees the type string.
+        let shape = match unsafe { string(p.light_type)? }.as_str() {
+            "distantLight" => Shape::Distant { angle: p.angle },
+            "sphereLight" => Shape::Sphere { radius: p.radius },
+            other => return Err(format!("Pika draws no {other}")),
+        };
         let params = LightParams {
             intensity: p.intensity,
             exposure: p.exposure,
             color: p.color,
             normalize: p.normalize,
-            angle: p.angle,
+            shape,
             visible: p.visible,
         };
         lock(handle)?.store.set_light_params(id, params)

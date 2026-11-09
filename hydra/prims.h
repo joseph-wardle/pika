@@ -97,12 +97,13 @@ private:
     uint64_t _id = 0;
 };
 
-// A distant light copies its transform and UsdLux inputs into the store.
+// A distant or sphere light copies its transform and UsdLux inputs into the
+// store.
 class PikaLight final : public HdLight {
 public:
     // Hydra's fallback light has no path and stands for nothing in the
     // scene: it is accepted and never synced.
-    PikaLight(SdfPath const &id, Pika &pika);
+    PikaLight(TfToken const &type, SdfPath const &id, Pika &pika);
     ~PikaLight() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override {
@@ -111,6 +112,7 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
 
 private:
+    TfToken _type;
     Pika &_pika;
     uint64_t _id = 0;
 };

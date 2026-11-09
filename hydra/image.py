@@ -48,10 +48,16 @@ What the reference encodes:
   alpha 1: albedo / π × the sum over the lights of their illuminance ×
   max(0, n · toward the light), the normal turned toward the eye first as
   MaterialX's BSDFs turn it. The lights are the stage's visible
-  DistantLights: UsdLux's intensity is radiance in nits, times 2^exposure
-  and the color, of which a disk of angular radius θ gives π sin²θ (1 at
-  angle 0, a parallel light), divided by that when normalized; each shines
-  down its -z axis. Most scenes sublayer light.usda's π lux, under which a
+  DistantLights and SphereLights: UsdLux's intensity is radiance in nits,
+  times 2^exposure and the color, of which a disk of angular radius θ
+  gives π sin²θ (1 at angle 0, a parallel light), divided by that when
+  normalized; a distant light shines down its -z axis. A sphere's radius
+  is scaled by its transform, which must scale evenly, and normalized its
+  radiance is divided by its area, 4π r²; at distance d from its centre it
+  subtends an angle α with sin α = r / d and gives π sin²α times its
+  radiance, toward its centre. That holds only while the whole sphere is
+  above the surface's horizon or below it, so a surface inside it or
+  seeing it cross the horizon is refused. Most scenes sublayer light.usda's π lux, under which a
   facing surface shows its albedo. Hosts add no camera light (husk's
   --headlight none, usdrecord's --disableCameraLight), but to the
   CAMERA_LIT scenes, which have no lights: a distant light of the host's
@@ -135,6 +141,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "purposes ignored", "culled by box centre", "camera light from the eye",
             "usdview's camera light in every host", "camera light held as the other host holds it",
             "Pika's old headlight", "intensity read as lux",
+            "sphere light read as a point of its intensity", "sphere light's scale ignored",
             "lights shining up their z axis",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
@@ -948,25 +955,52 @@ def illuminance(intensity, exposure, color, angle, normalize, control):
     return tuple(np.array(color) * intensity * 2 ** exposure * received / size)
 
 
-def lights(stage, time, axis, toward, host, lit, control=None):
+def sphere(api, radius, time, p, control):
+    """The direction toward a sphere light from each hit at `p`, the
+    illuminance it gives a surface there facing it and the sine of the
+    angle it subtends (see the module's doc)."""
+    m = UsdGeom.Xformable(api.GetPrim()).ComputeLocalToWorldTransform(time)
+    scales = [np.linalg.norm([m[r][0], m[r][1], m[r][2]]) for r in range(3)]
+    if max(scales) - min(scales) > 1e-6 * max(scales):
+        raise ValueError(f"{api.GetPath()} is scaled unevenly: an ellipsoid has no closed form")
+    r = radius * (1 if control == "sphere light's scale ignored" else scales[0])
+    toward = np.array(m.ExtractTranslation()) - p
+    d = np.linalg.norm(toward, axis=1)
+    if (d <= r).any():
+        raise ValueError(f"a surface is inside {api.GetPath()}")
+    radiance = np.array(api.GetColorAttr().Get(time)) * api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
+    if api.GetNormalizeAttr().Get(time):
+        radiance = radiance / (4 * np.pi * r ** 2)
+    sin2 = (r / d) ** 2
+    if control == "sphere light read as a point of its intensity":
+        sin2 = 1 / (np.pi * d ** 2)
+    return toward / d[:, None], np.pi * sin2[:, None] * radiance, r / d
+
+
+def lights(stage, time, axis, toward, p, host, lit, control=None):
     """Each light as the direction toward it, one for every hit or one
-    per hit, and the illuminance it gives a surface facing it (see the
-    module's doc). `axis` is the direction the host's camera light shines."""
-    found = [p for p in stage.Traverse() if p.HasAPI(UsdLux.LightAPI)]
+    per hit, the illuminance it gives a surface facing it, likewise, and
+    the sine of the angle it subtends, 0 for a distant light (see the
+    module's doc). `axis` is the direction the host's camera light shines;
+    `p` holds the hits."""
+    found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
-        if not prim.IsA(UsdLux.DistantLight):
-            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant lights have a closed form")
+        if not (prim.IsA(UsdLux.DistantLight) or prim.IsA(UsdLux.SphereLight)):
+            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant and sphere lights have a closed form")
     if not found and lit:
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
-        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control))]
+        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control), 0)]
     if not found and control == "Pika's old headlight":
-        return [(-axis, (np.pi,) * 3)]
+        return [(-axis, (np.pi,) * 3, 0)]
     out = []
     for prim in found:
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
+        if prim.IsA(UsdLux.SphereLight):
+            out.append(sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p, control))
+            continue
         m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
         z = np.array([m[2][0], m[2][1], m[2][2]])
         if control == "lights shining up their z axis":
@@ -974,7 +1008,7 @@ def lights(stage, time, axis, toward, host, lit, control=None):
         e = illuminance(api.GetIntensityAttr().Get(time), api.GetExposureAttr().Get(time),
                         api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
                         api.GetNormalizeAttr().Get(time), control)
-        out.append((z / np.linalg.norm(z), e))
+        out.append((z / np.linalg.norm(z), e, 0))
     return out
 
 
@@ -1080,8 +1114,12 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     # before lighting.
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
-    shine = sum(np.clip(dot(facing, d), 0.0, 1.0)[:, None] * np.array(e) / np.pi
-                for d, e in lights(stage, time, axis, toward, host, lit, control))
+    shine = np.zeros((len(p), 3))
+    for d, e, sin in lights(stage, time, axis, toward, p, host, lit, control):
+        cos = dot(facing, d)
+        if (abs(cos) < sin).any():
+            raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")
+        shine += np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
