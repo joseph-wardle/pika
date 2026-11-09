@@ -5,6 +5,7 @@ mesh /world/draft
   instancer not synced
   transform not synced
   material not synced
+  categories not synced
   topology not synced
   points not synced
   normals not synced
@@ -19,6 +20,7 @@ mesh /world/final
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -39,6 +41,7 @@ mesh /world/draft
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -58,6 +61,7 @@ mesh /world/final
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2

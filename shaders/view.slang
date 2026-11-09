@@ -57,6 +57,10 @@ struct Light
     // What a sphere's 1 / d² or an area light's illuminance vector loses so
     // that it ends at its reach.
     float fade;
+    // Its light-link collection's bit, or 0 when it lights every mesh
+    // (src/link.rs).
+    uint link;
+    uint3 pad;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).

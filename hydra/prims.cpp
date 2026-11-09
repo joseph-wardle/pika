@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -209,7 +210,8 @@ HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
            HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
            HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
            HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyInstancer |
-           HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtySubdivTags;
+           HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtySubdivTags |
+           HdChangeTracker::DirtyCategories;
 }
 
 void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
@@ -254,6 +256,14 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
         SyncTexcoord(delegate, renderer);
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
         _SyncInstancing(delegate, renderer);
+    if (bits & HdChangeTracker::DirtyCategories) {
+        VtArray<TfToken> const categories = delegate->GetCategories(GetId());
+        std::vector<const char *> names;
+        for (TfToken const &c : categories)
+            names.push_back(c.GetText());
+        _pika.report(pika_mesh_categories(renderer, _id, names.data(), names.size()),
+                     path + " categories");
+    }
 }
 
 // Hydra calls this for every rprim with a dirty render tag, before it decides
@@ -461,7 +471,8 @@ PikaInstancer::~PikaInstancer() {
 
 HdDirtyBits PikaInstancer::GetInitialDirtyBitsMask() const {
     return HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyPrimvar |
-           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex;
+           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex |
+           HdChangeTracker::DirtyCategories;
 }
 
 void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
@@ -486,6 +497,16 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
         _SyncPrimvars(delegate, renderer);
+    // Pika links lights per mesh (src/link.rs), so it ignores categories
+    // that differ between instances.
+    static std::atomic<bool> warned{false};
+    if (bits & HdChangeTracker::DirtyCategories) {
+        for (VtArray<TfToken> const &c : delegate->GetInstanceCategories(GetId())) {
+            if (!c.empty() && !warned.exchange(true))
+                warn(path + ": its instances have light links of their own, which Pika ignores; "
+                            "each instance is lit as its prototype is (warned once)");
+        }
+    }
 }
 
 void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer) {
@@ -694,6 +715,12 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
         GfMatrix4d matrix = delegate->GetTransform(id);
         _pika.report(pika_light_transform(renderer, _id, matrix.data()),
                      id.GetString() + " transform");
+    }
+    // A changed link is a collection change, which hosts may send as a
+    // params change too.
+    if (bits & (DirtyParams | DirtyCollection)) {
+        TfToken link = light_param(delegate, id, HdTokens->lightLink, TfToken());
+        _pika.report(pika_light_link(renderer, _id, link.GetText()), id.GetString() + " link");
     }
     if (!(bits & DirtyParams))
         return;

@@ -58,6 +58,9 @@ pub struct Mesh {
     /// but never synced, and a mesh retagged as proxy keeps its old fields.
     /// Drawing must filter by the pass's tags.
     pub render_tag: Option<String>,
+    /// The light-link collections the mesh is in, by Hydra's tokens: the
+    /// lights linked to one of them, or to everything, light it.
+    pub categories: Option<Vec<String>>,
 }
 
 /// A prototype's place in an instancer: it is drawn once per index, at that
@@ -128,6 +131,9 @@ pub struct Light {
     pub path: String,
     pub params: Option<LightParams>,
     pub transform: Option<[f64; 16]>,
+    /// The token of its lightLink collection, the category of the meshes it
+    /// lights; empty when it lights every mesh.
+    pub link: Option<String>,
 }
 
 /// The UsdLux inputs Pika reads, as Hydra hands them over.
@@ -357,8 +363,9 @@ pub struct Moved {
     pub texcoord: BTreeSet<u64>,
     /// Meshes whose transform changed: only their instances are rewritten.
     pub transforms: BTreeSet<u64>,
-    /// A visibility, render tag or instancing changed: the instances and
-    /// draw records are rewritten.
+    /// A visibility, render tag, instancing or light link changed: the
+    /// instances, which carry their meshes' links, and draw records are
+    /// rewritten.
     pub draws: bool,
     /// Materials whose network changed.
     pub materials: BTreeSet<u64>,
@@ -480,6 +487,7 @@ impl Store {
                 instancing: None,
                 material: None,
                 render_tag: None,
+                categories: None,
             },
         );
         self.moved.layout = true;
@@ -654,6 +662,18 @@ impl Store {
         let bytes = tag.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
         self.moved.draws |= write(&mut self.stats.mesh, &mut mesh.render_tag, tag, bytes);
+        Ok(())
+    }
+
+    pub fn set_categories(&mut self, id: u64, categories: Vec<String>) -> Result<(), String> {
+        let bytes = categories.iter().map(String::len).sum();
+        let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
+        self.moved.draws |= write(
+            &mut self.stats.mesh,
+            &mut mesh.categories,
+            categories,
+            bytes,
+        );
         Ok(())
     }
 
@@ -834,6 +854,7 @@ impl Store {
             path,
             params: None,
             transform: None,
+            link: None,
         };
         self.lights.insert(id, light);
         self.moved.lights = true;
@@ -841,9 +862,10 @@ impl Store {
     }
 
     pub fn remove_light(&mut self, id: u64) -> Result<(), String> {
-        self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
+        let light = self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
         self.stats.removed += 1;
         self.moved.lights = true;
+        self.moved.draws |= light.link.is_some_and(|l| !l.is_empty());
         Ok(())
     }
 
@@ -857,6 +879,17 @@ impl Store {
     pub fn set_light_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
         self.moved.lights |= write(&mut self.stats.light, &mut light.transform, transform, 128);
+        Ok(())
+    }
+
+    /// A link moves the meshes too: each collection's bit is assigned over
+    /// every light's link (`link::Links`).
+    pub fn set_light_link(&mut self, id: u64, link: String) -> Result<(), String> {
+        let bytes = link.len();
+        let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
+        let moved = write(&mut self.stats.light, &mut light.link, link, bytes);
+        self.moved.lights |= moved;
+        self.moved.draws |= moved;
         Ok(())
     }
 
@@ -1001,6 +1034,10 @@ impl fmt::Display for Mesh {
         match &self.material {
             Some(material) => writeln!(f, "  material {material:?}")?,
             None => writeln!(f, "  material {UNSYNCED}")?,
+        }
+        match &self.categories {
+            Some(categories) => writeln!(f, "  categories {categories:?}")?,
+            None => writeln!(f, "  categories {UNSYNCED}")?,
         }
         match &self.topology {
             Some(t) => {
@@ -1156,6 +1193,10 @@ impl fmt::Display for Light {
                 }
             }
             None => writeln!(f, "  params {UNSYNCED}")?,
+        }
+        match &self.link {
+            Some(link) => writeln!(f, "  link {link:?}")?,
+            None => writeln!(f, "  link {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())
     }
@@ -1785,6 +1826,9 @@ mod tests {
         moved[12] = 2.0;
         store.set_transform(b, moved).unwrap();
         store.set_material(b, "/mtl/blue".into()).unwrap();
+        store
+            .set_categories(b, vec!["group_0".into(), "group_2".into()])
+            .unwrap();
         store.set_visible(a, false).unwrap();
         store.set_render_tag(a, "proxy".into()).unwrap();
         let instancing = Instancing {
@@ -1816,6 +1860,7 @@ mesh /world/a
   instancer /world/i indices 1 0
   transform not synced
   material not synced
+  categories not synced
   topology not synced
   points not synced
   normals not synced
@@ -1831,6 +1876,7 @@ mesh /world/b
     0 0 1 0
     2 0 0 1
   material \"/mtl/blue\"
+  categories [\"group_0\", \"group_2\"]
   topology loop leftHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2

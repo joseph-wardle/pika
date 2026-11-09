@@ -3,6 +3,7 @@ light /world/sun
   visible true
   intensity 10 exposure 0 color 1 1 1 normalize false
   distant angle 0.53
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -13,6 +14,7 @@ light /world/sun
   visible true
   intensity 20 exposure 0 color 1 1 1 normalize false
   distant angle 2
+  link ""
   transform
     0.0000000000000002220446049250313 0 -1 0
     0 1 0 0

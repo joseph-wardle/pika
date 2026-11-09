@@ -1,8 +1,8 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// Meshes, instancers, and distant, sphere, rect, disk and cylinder lights are synced
-// into Pika's store, basis curves are fetched and measured, and other prims are
+// Meshes, instancers, and distant, sphere, rect, disk and cylinder lights,
+// with their light links, are synced into Pika's store, basis curves are fetched and measured, and other prims are
 // counted. Pika draws the meshes
 // into the color, depth and normal AOVs.
 
@@ -22,7 +22,10 @@
 #include <pxr/imaging/hd/rendererPlugin.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
+#include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
 
 #include <algorithm>
 #include <string>
@@ -313,6 +316,30 @@ public:
 
 TF_REGISTRY_FUNCTION(TfType) {
     HdRendererPluginRegistry::Define<PikaRendererPlugin>();
+}
+
+// Hosts on scene indices (Houdini 22's, and husk on 21) hand a renderer
+// light links only through this scene index, which each renderer adds for
+// itself: without it, a light's lightLink and a mesh's categories arrive
+// empty. Houdini 21's usdview and usdrecord hand them over either way.
+TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
+    VtArray<TfToken> lights;
+    for (TfToken const &t : HdLightPrimTypeTokens())
+        lights.push_back(t);
+    using Tokens = HdRetainedTypedSampledDataSource<VtArray<TfToken>>;
+    HdContainerDataSourceHandle const args = HdRetainedContainerDataSource::New(
+        HdsiLightLinkingSceneIndexTokens->lightPrimTypes, Tokens::New(lights),
+        HdsiLightLinkingSceneIndexTokens->lightFilterPrimTypes,
+        Tokens::New({HdPrimTypeTokens->lightFilter}),
+        HdsiLightLinkingSceneIndexTokens->geometryPrimTypes,
+        Tokens::New({HdPrimTypeTokens->mesh}));
+    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+        "Pika",
+        [](std::string const &, HdSceneIndexBaseRefPtr const &input,
+           HdContainerDataSourceHandle const &args) {
+            return HdsiLightLinkingSceneIndex::New(input, args);
+        },
+        args, 0, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

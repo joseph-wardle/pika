@@ -75,7 +75,9 @@ What the reference encodes:
   (husk's at the first frame it renders, usdrecord's at each). A
   stage drawn without lights is black: Pika has no headlight of its own.
   Pika's threshold takes up to 0.01 lux off each light, 5.7e-4 of a clay
-  surface's color, so a scene lights a surface with two at most.
+  surface's color, so a scene lights a surface with two at most. A light
+  lights only the meshes its lightLink collection includes; Pika links
+  per mesh, so a scene's instances must share their prototype's links.
   Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
@@ -116,7 +118,7 @@ import sys
 import MaterialX as mx
 import numpy as np
 import OpenImageIO as oiio
-from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdLux, UsdRender, UsdShade
+from pxr import CameraUtil, Gf, Sdf, Tf, Usd, UsdGeom, UsdImagingGL, UsdLux, UsdRender, UsdShade
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
@@ -155,7 +157,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "Pika's old headlight", "intensity read as lux",
             "sphere light read as a point of its intensity", "sphere light's scale ignored",
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
-            "area lights' scale ignored", "area lights lit from both sides",
+            "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1079,12 +1081,24 @@ def area(prim, time, p, n, control):
 AREA = (UsdLux.RectLight, UsdLux.DiskLight, UsdLux.CylinderLight)
 
 
-def lights(stage, time, axis, toward, p, n, host, lit, control=None):
+def links(prim, paths, control):
+    """Which hits' meshes, by the hits' prim `paths`, the light's lightLink
+    collection includes."""
+    if control == "light links ignored":
+        return np.ones(len(paths), bool)
+    query = UsdLux.LightAPI(prim).GetLightLinkCollectionAPI().ComputeMembershipQuery()
+    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(paths)}
+    return np.array([included[path] for path in paths], bool)
+
+
+def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
     """Each light as the direction toward it, one for every hit or one
     per hit, the illuminance it gives a surface facing it, likewise, and
     the sine of the angle it subtends, 0 but for a sphere (see the
     module's doc). `axis` is the direction the host's camera light shines;
-    `p` holds the hits and `n` their normals, turned toward the eye."""
+    `p` holds the hits, `n` their normals, turned toward the eye, and
+    `paths` their prims' paths. A light gives the hits it is not linked to
+    nothing, and is refused only over those it is."""
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
         if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
@@ -1100,20 +1114,23 @@ def lights(stage, time, axis, toward, p, n, host, lit, control=None):
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
+        on = links(prim, paths, control)
         if prim.IsA(UsdLux.SphereLight):
-            out.append(sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p, control))
-            continue
-        if any(prim.IsA(t) for t in AREA):
-            out.append(area(prim, time, p, n, control))
-            continue
-        m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
-        z = np.array([m[2][0], m[2][1], m[2][2]])
-        if control == "lights shining up their z axis":
-            z = -z
-        e = illuminance(api.GetIntensityAttr().Get(time), api.GetExposureAttr().Get(time),
-                        api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
-                        api.GetNormalizeAttr().Get(time), control)
-        out.append((z / np.linalg.norm(z), e, 0))
+            given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
+        elif any(prim.IsA(t) for t in AREA):
+            given = area(prim, time, p[on], n[on], control)
+        else:
+            m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+            z = np.array([m[2][0], m[2][1], m[2][2]])
+            if control == "lights shining up their z axis":
+                z = -z
+            e = illuminance(api.GetIntensityAttr().Get(time), api.GetExposureAttr().Get(time),
+                            api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
+                            api.GetNormalizeAttr().Get(time), control)
+            given = (z / np.linalg.norm(z), e, 0)
+        d, e, sin = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.zeros(len(p))
+        d[on], e[on], sin[on] = given
+        out.append((d, e, sin))
     return out
 
 
@@ -1220,7 +1237,8 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
     shine = np.zeros((len(p), 3))
-    for d, e, sin in lights(stage, time, axis, toward, p, facing, host, lit, control):
+    paths = [tris[k]["face"][0] for k in i]
+    for d, e, sin in lights(stage, time, axis, toward, p, facing, paths, host, lit, control):
         cos = dot(facing, d)
         if (abs(cos) < sin).any():
             raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")

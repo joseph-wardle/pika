@@ -113,6 +113,15 @@ float3 illuminance_vector(Light light, float3 P)
     return 0.5 * (dot(sum, c) < 0 ? -sum : sum);
 }
 
+// Whether light light_index of P's tile lights a mesh in the light-link
+// collections of mask `link`: one linked to everything, or to one of them
+// (src/link.rs).
+bool linked(uint light_index, float3 P, int link)
+{
+    uint bit = view->lights[view->tile_lights[tile(P).x + light_index]].link;
+    return (bit & uint(link)) == bit;
+}
+
 // What light light_index of P's tile gives P, on a surface with normal N.
 Incident incident_light(uint light_index, float3 P, float3 N)
 {

@@ -720,6 +720,29 @@ pub unsafe extern "C" fn pika_mesh_instancer(
     })
 }
 
+/// Sets the light-link collections the mesh is in, by Hydra's tokens.
+///
+/// # Safety
+/// `renderer` must be live, and `categories` valid for `count` reads of
+/// NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_categories(
+    renderer: *const Handle,
+    id: u64,
+    categories: *const *const c_char,
+    count: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the array.
+        let (handle, categories) = unsafe { (&*renderer, slice(categories, count)) };
+        let categories = (categories.iter())
+            // SAFETY: as above.
+            .map(|&c| unsafe { string(c) })
+            .collect::<Result<_, _>>()?;
+        lock(handle)?.store.set_categories(id, categories)
+    })
+}
+
 /// Adds an instancer to the store and writes its id, never reused, to `*out`.
 ///
 /// # Safety
@@ -985,6 +1008,24 @@ pub unsafe extern "C" fn pika_light_transform(
         // SAFETY: the caller guarantees the renderer and the matrix.
         let (handle, matrix) = unsafe { (&*renderer, *matrix) };
         lock(handle)?.store.set_light_transform(id, matrix)
+    })
+}
+
+/// Sets the token of the light's lightLink collection, "" when it includes
+/// everything.
+///
+/// # Safety
+/// `renderer` must be live, and `link` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_link(
+    renderer: *const Handle,
+    id: u64,
+    link: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, link) = unsafe { (&*renderer, string(link)?) };
+        lock(handle)?.store.set_light_link(id, link)
     })
 }
 

@@ -107,7 +107,7 @@ public:
     ~PikaLight() override;
 
     HdDirtyBits GetInitialDirtyBitsMask() const override {
-        return DirtyTransform | DirtyParams;
+        return DirtyTransform | DirtyParams | DirtyCollection;
     }
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
 

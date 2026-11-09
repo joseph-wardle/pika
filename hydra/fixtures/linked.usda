@@ -1,0 +1,81 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# A light's lightLink collection reaches the store as one token per
+# distinct collection, empty for a light that lights everything, and each
+# mesh as the tokens of the collections it is in, its categories: the key
+# links the left triangle, the rim the right one, the fill everything.
+# Pika links per mesh, so the instances the spot links one of are lit as
+# their prototype is, which is warned of. Frame 2 links the key to both
+# triangles and the rim to everything.
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "left"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "right"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(2, 0, 0), (3, 0, 0), (2, 1, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Xform "first" (
+        instanceable = true
+        references = </prototype>
+    )
+    {
+    }
+
+    def Xform "second" (
+        instanceable = true
+        references = </prototype>
+    )
+    {
+        double3 xformOp:translate = (0, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def SphereLight "key"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+        rel collection:lightLink:includes = </world/left>
+    }
+
+    def RectLight "rim"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+        rel collection:lightLink:includes = </world/right>
+    }
+
+    def DistantLight "fill" {}
+
+    def SphereLight "spot"
+    {
+        uniform bool collection:lightLink:includeRoot = 0
+        rel collection:lightLink:includes = </world/first>
+    }
+}
+
+class Xform "prototype"
+{
+    def Mesh "tri"
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+    }
+}

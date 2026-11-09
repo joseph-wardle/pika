@@ -100,6 +100,8 @@ std::string vertex(mx::ShaderStage const &stage) {
             value = "p.tangent";
         else if (name == "bitangentWorld")
             value = "p.bitangent";
+        else if (name == "link")
+            value = "asint(p.link)";
         else if (name == "texcoord_0" && port->getType() == mx::Type::VECTOR2) {
             value = "p.texcoord";
             primvars.insert("st");
@@ -128,8 +130,10 @@ std::string vertex(mx::ShaderStage const &stage) {
 // MaterialX's surface with Pika's light loop in place of its own. The
 // generator is told of no lights (hwMaxActiveLightSources 0), so the pixel
 // stage holds no LightData, light shaders or sampleLightSource; the loop
-// asks shaders/frame.slang for the lights instead, and a skipped light
-// costs no BSDF. The loop calls functions rather than reading the view so
+// asks shaders/frame.slang for the lights instead, and a skipped light, one
+// not linked to the mesh's light-link collections, costs no BSDF. The
+// vertex stage hands those collections over as an int, which MaterialX
+// lacks a uint for, and which Slang does not interpolate. The loop calls functions rather than reading the view so
 // that the lights' kinds and lists change frame.slang alone: a change to
 // the text emitted here changes the tool, which re-bakes every texture
 // (src/bake.rs keys both on the tool's bytes).
@@ -137,10 +141,19 @@ class Surface : public mx::HwSurfaceNode {
   public:
     static mx::ShaderNodeImplPtr create() { return std::make_shared<Surface>(); }
 
+    void createVariables(mx::ShaderNode const &node, mx::GenContext &context,
+                         mx::Shader &shader) const override {
+        mx::HwSurfaceNode::createVariables(node, context, shader);
+        // Only the loop reads it, and Slang drops an input nothing reads,
+        // which leaves the vertex stage's output unmatched.
+        if (bsdf(node))
+            mx::addStageInput(mx::HW::VERTEX_DATA, mx::Type::INTEGER, "link",
+                              shader.getStage(mx::Stage::PIXEL));
+    }
+
     void emitLightLoop(mx::ShaderNode const &node, mx::GenContext &context, mx::ShaderStage &stage,
                        std::string const &color) const override {
-        mx::ShaderInput const *input = node.getInput(getBsdfInputName());
-        mx::ShaderNode const *bsdf = input ? input->getConnectedSibling() : nullptr;
+        mx::ShaderNode const *bsdf = this->bsdf(node);
         if (!bsdf)
             return;
         auto const &g = static_cast<mx::HwShaderGenerator const &>(context.getShaderGenerator());
@@ -149,6 +162,9 @@ class Surface : public mx::HwSurfaceNode {
         g.emitLine("for (uint light_index = 0; light_index < light_count(P); ++light_index)", stage,
                    false);
         g.emitScopeBegin(stage);
+        std::string const &vd = stage.getInputBlock(mx::HW::VERTEX_DATA).getInstance();
+        g.emitLine("if (!linked(light_index, P, " + vd + ".link))", stage, false);
+        g.emitLine("    continue", stage);
         g.emitLine("Incident incident = incident_light(light_index, P, N)", stage);
         g.emitLine("L = incident.direction", stage);
         g.emitLine("occlusion = visibility(light_index, P)", stage);
@@ -169,6 +185,12 @@ class Surface : public mx::HwSurfaceNode {
         // The environment and emission after the loop read it unshadowed.
         g.emitLine("occlusion = 1.0", stage);
         g.emitLineBreak(stage);
+    }
+
+  private:
+    mx::ShaderNode const *bsdf(mx::ShaderNode const &node) const {
+        mx::ShaderInput const *input = node.getInput(getBsdfInputName());
+        return input ? input->getConnectedSibling() : nullptr;
     }
 };
 

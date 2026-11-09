@@ -9,6 +9,7 @@ mesh /world/strip
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology catmullClark rightHanded
     face_vertex_counts 4 4
     face_vertex_indices 0 1 4 3 1 2 5 4
@@ -35,6 +36,7 @@ mesh /world/strip
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology bilinear rightHanded
     face_vertex_counts 4 4
     face_vertex_indices 0 1 4 3 1 2 5 4

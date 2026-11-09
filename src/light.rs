@@ -52,6 +52,9 @@ pub struct Light {
     /// What a sphere's 1/d² or an area light's illuminance vector loses so
     /// that it ends at its reach.
     pub fade: f32,
+    /// Its collection's bit, or 0 when it lights every mesh (`link`).
+    pub link: u32,
+    pub pad: [u32; 3],
 }
 
 impl Light {
@@ -65,6 +68,8 @@ impl Light {
             shape: DISTANT,
             v: [0.0; 3],
             fade: 0.0,
+            link: 0,
+            pad: [0; 3],
         }
     }
 
@@ -83,6 +88,8 @@ impl Light {
             shape: SPHERE,
             v: [0.0; 3],
             fade: 1.0 / (reach * reach),
+            link: 0,
+            pad: [0; 3],
         }
     }
 
@@ -114,6 +121,8 @@ impl Light {
             shape,
             v,
             fade: THRESHOLD / brightest,
+            link: 0,
+            pad: [0; 3],
         }
     }
 }
@@ -589,6 +598,7 @@ mod tests {
             path: "/sun".into(),
             params: Some(params(1.0, 0.0, false)),
             transform: Some(transform),
+            link: None,
         };
         let resolved = resolve(&light).unwrap();
         assert_eq!(resolved.position, [0.0, -1.0, 0.0]);
@@ -719,6 +729,7 @@ mod tests {
                 ..params(intensity, 0.0, normalize)
             }),
             transform: Some(transform),
+            link: None,
         }
     }
 
@@ -785,6 +796,7 @@ mod tests {
                 ..params(intensity, 0.0, normalize)
             }),
             transform: Some(m),
+            link: None,
         }
     }
 

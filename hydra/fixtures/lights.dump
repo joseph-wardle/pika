@@ -3,6 +3,7 @@ light /world/bulb
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 0.5
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -12,6 +13,7 @@ light /world/moon
   visible true
   intensity 50000 exposure 0 color 1 1 1 normalize true
   distant angle 0
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -26,6 +28,7 @@ light /world/panel
   visible true
   intensity 3 exposure 0 color 1 1 1 normalize false
   rect width 2 height 0.5
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -35,6 +38,7 @@ light /world/rig/sun
   visible true
   intensity 50000 exposure -1 color 1 0.9 0.8 normalize false
   distant angle 0.53
+  link ""
   transform
     1 0 0 0
     0 0.7071067811865475 -0.7071067811865476 0
@@ -44,6 +48,7 @@ light /world/spot
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize true
   disk radius 0.5
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -59,6 +64,7 @@ mesh /world/tri
     0 0 1 0
     0 0 0 1
   material "/world/mtl/paint"
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -72,6 +78,7 @@ light /world/tube
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize false
   cylinder length 1 radius 0.1
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -82,6 +89,7 @@ light /world/bulb
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 2
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -96,6 +104,7 @@ light /world/panel
   visible true
   intensity 3 exposure 0 color 1 1 1 normalize false
   rect width 2 height 0.5
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -105,6 +114,7 @@ light /world/rig/sun
   visible false
   intensity 2 exposure -1 color 1 0.9 0.8 normalize true
   distant angle 0.53
+  link ""
   transform
     0.0000000000000002220446049250313 0 -1 0
     -0.7071067811865476 0.7071067811865475 -0.00000000000000015700924586837752 0
@@ -114,6 +124,7 @@ light /world/spot
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize true
   disk radius 0.5
+  link ""
   transform
     1 0 0 0
     0 1 0 0
@@ -129,6 +140,7 @@ mesh /world/tri
     0 0 1 0
     0 0 0 1
   material "/world/mtl/paint"
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -142,6 +154,7 @@ light /world/tube
   visible true
   intensity 1 exposure 0 color 1 1 1 normalize false
   cylinder length 4 radius 0.1
+  link ""
   transform
     1 0 0 0
     0 1 0 0

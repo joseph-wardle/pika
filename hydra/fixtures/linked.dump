@@ -1,0 +1,222 @@
+sync 1
+instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 2
+    1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1
+mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories []
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none
+light /world/fill
+  visible true
+  intensity 50000 exposure 0 color 1 1 1 normalize false
+  distant angle 0.53
+  link ""
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+light /world/key
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  sphere radius 0.5
+  link "group_0"
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+mesh /world/left
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories ["group_0"]
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none
+mesh /world/right
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories ["group_1"]
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    2 0 0
+    3 0 0
+    2 1 0
+  normals none
+  texcoord none
+light /world/rim
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  rect width 1 height 1
+  link "group_1"
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+light /world/spot
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  sphere radius 0.5
+  link "group_2"
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+sync 2
+instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
+  parent none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  instance_transforms 2
+    1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
+    1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1
+mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
+  render_tag geometry
+  visible true
+  instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer indices 0 1
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories []
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none
+light /world/fill
+  visible true
+  intensity 50000 exposure 0 color 1 1 1 normalize false
+  distant angle 0.53
+  link ""
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+light /world/key
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  sphere radius 0.5
+  link "group_3"
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+mesh /world/left
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories ["group_3"]
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    0 0 0
+    1 0 0
+    0 1 0
+  normals none
+  texcoord none
+mesh /world/right
+  render_tag geometry
+  visible true
+  instancer none
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+  material ""
+  categories ["group_3"]
+  topology none rightHanded
+    face_vertex_counts 3
+    face_vertex_indices 0 1 2
+  points 3
+    2 0 0
+    3 0 0
+    2 1 0
+  normals none
+  texcoord none
+light /world/rim
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  rect width 1 height 1
+  link ""
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1
+light /world/spot
+  visible true
+  intensity 1 exposure 0 color 1 1 1 normalize false
+  sphere radius 0.5
+  link "group_2"
+  transform
+    1 0 0 0
+    0 1 0 0
+    0 0 1 0
+    0 0 0 1

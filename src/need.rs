@@ -272,6 +272,7 @@ mod tests {
             instancing: Some(None),
             material: None,
             render_tag: None,
+            categories: None,
         }
     }
 

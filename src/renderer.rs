@@ -14,6 +14,7 @@ use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::light::{self, Tiles};
+use crate::link::Links;
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
@@ -366,8 +367,12 @@ impl Renderer {
         self.commands.mark("texture")?;
         // A headlight is the host's to send (hydra/plugin.cpp), so a store
         // holding no light draws black.
+        let links = Links::new(&self.store);
         let lights: Vec<_> = (self.store.lights().values())
-            .filter_map(light::resolve)
+            .filter_map(|l| {
+                let link = links.light(l);
+                light::resolve(l).map(|r| light::Light { link, ..r })
+            })
             .collect();
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
