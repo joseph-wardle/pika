@@ -660,6 +660,55 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     }
 }
 
+PikaLight::PikaLight(SdfPath const &id, Pika &pika) : HdLight(id), _pika(pika) {
+    if (id.IsEmpty())
+        return;
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_light_new(renderer, id.GetText(), &_id), "adding light " + id.GetString());
+}
+
+PikaLight::~PikaLight() {
+    pika_renderer *renderer = _id ? _pika.renderer() : nullptr;
+    if (renderer)
+        _pika.report(pika_light_free(renderer, _id), "removing light " + GetId().GetString());
+}
+
+// A light's input as `T`, or UsdLux's fallback when the host hands over
+// none.
+template <typename T>
+static T light_param(HdSceneDelegate *delegate, SdfPath const &id, TfToken const &name,
+                     T fallback) {
+    VtValue value = delegate->GetLightParamValue(id, name);
+    return value.CanCast<T>() ? value.Cast<T>().template UncheckedGet<T>() : fallback;
+}
+
+void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
+    HdDirtyBits bits = *dirtyBits;
+    *dirtyBits = Clean;
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer || !_id)
+        return;
+    SdfPath const &id = GetId();
+    if (bits & DirtyTransform) {
+        GfMatrix4d matrix = delegate->GetTransform(id);
+        _pika.report(pika_light_transform(renderer, _id, matrix.data()),
+                     id.GetString() + " transform");
+    }
+    if (!(bits & DirtyParams))
+        return;
+    pika_light params = {};
+    // DistantLight's schema overrides LightAPI's fallback intensity of 1,
+    // approximating sunlight.
+    params.intensity = light_param(delegate, id, HdLightTokens->intensity, 50000.0f);
+    params.exposure = light_param(delegate, id, HdLightTokens->exposure, 0.0f);
+    GfVec3f color = light_param(delegate, id, HdLightTokens->color, GfVec3f(1.0f));
+    std::copy_n(color.data(), 3, params.color);
+    params.normalize = light_param(delegate, id, HdLightTokens->normalize, false);
+    params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
+    params.visible = delegate->GetVisible(id);
+    _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
+}
+
 PikaCurves::PikaCurves(SdfPath const &id, Pika &pika) : HdBasisCurves(id), _pika(pika) {
     if (pika_renderer *renderer = _pika.renderer())
         _pika.report(pika_curves_new(renderer, id.GetText(), &_id),

@@ -119,7 +119,8 @@ def main(path, warm=None):
             p95 = percentiles(values)[1]
             print(f"  {name:<10s} p95 {p95:8.2f} of {budget:g} ms: {'met' if p95 <= budget else 'OVER'}")
     print(f"  last frame: {last['width']:.0f}x{last['height']:.0f}, "
-          f"{last['drawn_instances']:.0f} instances, {last['drawn_triangles'] / 1e6:.2f} M triangles")
+          f"{last['drawn_instances']:.0f} instances, {last['drawn_triangles'] / 1e6:.2f} M triangles, "
+          f"{last['drawn_lights']:.0f} lights")
     print(f"  memory: geometry {size(last['geometry_bytes'])}, views {size(last['view_bytes'])}, "
           f"targets {size(last['target_bytes'])}, host {size(last['host_bytes'])}; "
           f"vram {size(last['vram_used_bytes'])} used of {size(last['vram_budget_bytes'])}")

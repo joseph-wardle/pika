@@ -56,6 +56,8 @@ pub struct Frame {
     pub read_bytes: u64,
     /// The instances and triangles the camera's view drew.
     pub drawn: [u32; 2],
+    /// The lights it drew them under.
+    pub lights: usize,
     pub memory: Memory,
     /// Meshes whose points moved.
     pub moved: usize,
@@ -252,6 +254,8 @@ impl Sync {
             ("instancer_redundant_bytes", p.instancer.redundant),
             ("material_bytes", p.material.pulled),
             ("material_redundant_bytes", p.material.redundant),
+            ("light_bytes", p.light.pulled),
+            ("light_redundant_bytes", p.light.redundant),
             ("curve_bytes", p.curve_bytes),
             ("meshes", c.meshes),
             ("mesh_instances", c.mesh_instances),
@@ -264,6 +268,7 @@ impl Sync {
             ("materials", c.materials),
             ("instancers", c.instancers),
             ("curves", c.curves),
+            ("lights", c.lights),
         ];
         pairs.extend(counts.map(|(k, v)| (k.to_string(), v as f64)));
         pairs.extend((c.counted.iter()).map(|(t, n)| (format!("counted_{t}"), *n as f64)));
@@ -298,6 +303,7 @@ impl Frame {
             ("read_bytes", self.read_bytes),
             ("drawn_instances", u64::from(self.drawn[0])),
             ("drawn_triangles", u64::from(self.drawn[1])),
+            ("drawn_lights", self.lights as u64),
             ("geometry_bytes", m.geometry.device),
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
@@ -399,6 +405,7 @@ mod tests {
             },
             read_bytes: 20_995_200,
             drawn: [1274, 11_550_000],
+            lights: 47,
             memory: Memory {
                 geometry: gpu::Memory {
                     device: 1 << 30,
@@ -440,7 +447,7 @@ mod tests {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
              wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
-             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 \
+             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \

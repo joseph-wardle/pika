@@ -1,8 +1,8 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// Meshes and instancers are synced into Pika's store, basis curves are
-// fetched and measured, and other prims are counted. Pika draws the meshes
+// Meshes, instancers and distant lights are synced into Pika's store, basis
+// curves are fetched and measured, and other prims are counted. Pika draws the meshes
 // into the color, depth and normal AOVs.
 
 #include "buffer.h"
@@ -170,6 +170,10 @@ public:
     TfTokenVector const &GetSupportedSprimTypes() const override {
         static const TfTokenVector types = [] {
             TfTokenVector t = HdLightPrimTypeTokens();
+            // Without it, usdview's and usdrecord's task controller sends
+            // its camera light as a distantLight, in UsdLux's terms, rather
+            // than as a GlfSimpleLight in Glf's.
+            t.erase(std::remove(t.begin(), t.end(), HdPrimTypeTokens->simpleLight), t.end());
             t.push_back(HdPrimTypeTokens->lightFilter);
             t.push_back(HdPrimTypeTokens->material);
             t.push_back(HdPrimTypeTokens->camera);
@@ -242,6 +246,8 @@ public:
             return new HdCamera(id);
         if (typeId == HdPrimTypeTokens->material)
             return new PikaMaterial(id, _pika);
+        if (typeId == HdPrimTypeTokens->distantLight)
+            return new PikaLight(id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {

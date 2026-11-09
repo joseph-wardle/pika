@@ -24,6 +24,7 @@ pub struct Store {
     /// again at its path before the frame keeps its id (`insert_material`).
     freed: BTreeMap<String, u64>,
     curves: BTreeMap<u64, Curves>,
+    lights: BTreeMap<u64, Light>,
     counted: BTreeMap<u64, Counted>,
     /// Each mesh's triangles, its cage's then as drawn, counted when its
     /// topology is set: the census runs every sync, and counting ALab's
@@ -118,6 +119,28 @@ pub struct Curves {
     pub path: String,
     /// Every byte pulled since the curves were inserted.
     pub bytes: usize,
+}
+
+/// A distant light, the one light type Pika draws so far. Each field is
+/// `None` until Hydra first hands it over.
+#[derive(PartialEq, Debug)]
+pub struct Light {
+    pub path: String,
+    pub params: Option<LightParams>,
+    pub transform: Option<[f64; 16]>,
+}
+
+/// The UsdLux inputs Pika reads, as Hydra hands them over.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct LightParams {
+    pub intensity: f32,
+    pub exposure: f32,
+    pub color: [f32; 3],
+    pub normalize: bool,
+    /// The angular diameter in degrees.
+    pub angle: f32,
+    /// Hydra's visibility, which a light's params dirty bit covers too.
+    pub visible: bool,
 }
 
 /// A prim Pika accepts only to count it: Hydra inserts no prim of a type the
@@ -315,6 +338,8 @@ pub struct Moved {
     pub draws: bool,
     /// Materials whose network changed.
     pub materials: BTreeSet<u64>,
+    /// A light was added, removed or changed.
+    pub lights: bool,
 }
 
 /// What one Hydra sync did to the store.
@@ -325,6 +350,7 @@ pub struct Stats {
     pub mesh: Bytes,
     pub instancer: Bytes,
     pub material: Bytes,
+    pub light: Bytes,
     /// Bytes of basis curves, which are not stored, so are never known to be
     /// redundant.
     pub curve_bytes: usize,
@@ -362,6 +388,7 @@ pub struct Census {
     pub materials: usize,
     pub instancers: usize,
     pub curves: usize,
+    pub lights: usize,
     /// Counted prims by Hydra type.
     pub counted: BTreeMap<String, usize>,
 }
@@ -376,6 +403,7 @@ impl Store {
             material_ids: BTreeMap::new(),
             freed: BTreeMap::new(),
             curves: BTreeMap::new(),
+            lights: BTreeMap::new(),
             counted: BTreeMap::new(),
             triangles: HashMap::new(),
             stats: Stats::default(),
@@ -393,6 +421,10 @@ impl Store {
 
     pub fn materials(&self) -> &BTreeMap<u64, Material> {
         &self.materials
+    }
+
+    pub fn lights(&self) -> &BTreeMap<u64, Light> {
+        &self.lights
     }
 
     /// What changed since the last call.
@@ -771,6 +803,39 @@ impl Store {
         Ok(())
     }
 
+    /// Adds a distant light with nothing synced yet.
+    pub fn insert_light(&mut self, path: String) -> u64 {
+        let id = self.new_id();
+        let light = Light {
+            path,
+            params: None,
+            transform: None,
+        };
+        self.lights.insert(id, light);
+        self.moved.lights = true;
+        id
+    }
+
+    pub fn remove_light(&mut self, id: u64) -> Result<(), String> {
+        self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
+        self.stats.removed += 1;
+        self.moved.lights = true;
+        Ok(())
+    }
+
+    pub fn set_light_params(&mut self, id: u64, params: LightParams) -> Result<(), String> {
+        let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
+        let bytes = size_of::<LightParams>();
+        self.moved.lights |= write(&mut self.stats.light, &mut light.params, params, bytes);
+        Ok(())
+    }
+
+    pub fn set_light_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
+        let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
+        self.moved.lights |= write(&mut self.stats.light, &mut light.transform, transform, 128);
+        Ok(())
+    }
+
     /// Adds a prim that is only counted, of Hydra's `prim_type`.
     pub fn insert_counted(&mut self, prim_type: String, path: String) -> u64 {
         let id = self.new_id();
@@ -800,6 +865,7 @@ impl Store {
         let mut census = Census {
             instancers: self.instancers.len(),
             curves: self.curves.len(),
+            lights: self.lights.len(),
             ..Default::default()
         };
         let mut materials = BTreeSet::new();
@@ -870,6 +936,11 @@ impl Store {
                 self.curves
                     .values()
                     .map(|c| (c.path.as_str(), c.to_string())),
+            )
+            .chain(
+                self.lights
+                    .values()
+                    .map(|l| (l.path.as_str(), l.to_string())),
             )
             .chain(
                 self.counted
@@ -1034,6 +1105,28 @@ impl fmt::Display for Curves {
     }
 }
 
+impl fmt::Display for Light {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "light {}", self.path)?;
+        match &self.params {
+            Some(p) => {
+                writeln!(f, "  visible {}", p.visible)?;
+                writeln!(
+                    f,
+                    "  intensity {} exposure {} color{} normalize {} angle {}",
+                    p.intensity,
+                    p.exposure,
+                    List(&p.color),
+                    p.normalize,
+                    p.angle
+                )?;
+            }
+            None => writeln!(f, "  params {UNSYNCED}")?,
+        }
+        transform(f, self.transform.as_ref())
+    }
+}
+
 impl fmt::Display for Counted {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         writeln!(f, "counted {} {}", self.prim_type, self.path)
@@ -1117,6 +1210,44 @@ fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes:
 mod tests {
     use super::*;
     use crate::material::Connection;
+
+    #[test]
+    fn lights_move_only_when_they_change() {
+        let mut store = Store::new();
+        let id = store.insert_light("/sun".into());
+        assert!(store.take_moved().lights);
+        let params = LightParams {
+            intensity: 1.0,
+            exposure: 0.0,
+            color: [1.0; 3],
+            normalize: false,
+            angle: 0.53,
+            visible: true,
+        };
+        let mut transform = [0.0; 16];
+        transform[0] = 1.0;
+        store.set_light_params(id, params).unwrap();
+        store.set_light_transform(id, transform).unwrap();
+        assert!(store.take_moved().lights);
+        // Hydra resends a light's fields unchanged, as usdview does its
+        // camera light each frame: they move nothing.
+        store.end_sync();
+        store.set_light_params(id, params).unwrap();
+        store.set_light_transform(id, transform).unwrap();
+        assert_eq!(store.take_moved(), Moved::default());
+        let stats = store.end_sync();
+        assert!(stats.light.pulled > 0 && stats.light.redundant == stats.light.pulled);
+        let brighter = LightParams {
+            intensity: 2.0,
+            ..params
+        };
+        store.set_light_params(id, brighter).unwrap();
+        assert!(store.take_moved().lights);
+        store.remove_light(id).unwrap();
+        assert!(store.take_moved().lights);
+        assert!(store.set_light_params(id, params).is_err());
+        assert_eq!(store.census().unwrap().lights, 0);
+    }
 
     #[test]
     fn ids_are_never_reused() {

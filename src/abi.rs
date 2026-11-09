@@ -15,8 +15,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, Normals, Refined, RefinedTexcoord, Scheme,
-    Stencils, Subset, Texcoord, Topology,
+    InstancePrimvars, Instancing, Interpolation, LightParams, Normals, Refined, RefinedTexcoord,
+    Scheme, Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -26,6 +26,17 @@ pub const PANIC: i32 = 2;
 /// The opaque `pika_renderer` C++ holds. The mutex serializes calls from
 /// Hydra's parallel sync and is what a panic poisons.
 pub type Handle = Mutex<Renderer>;
+
+/// `pika_light`.
+#[repr(C)]
+pub struct CLight {
+    intensity: f32,
+    exposure: f32,
+    color: [f32; 3],
+    normalize: bool,
+    angle: f32,
+    visible: bool,
+}
 
 /// `pika_subset`.
 #[repr(C)]
@@ -886,6 +897,74 @@ pub unsafe extern "C" fn pika_curves_free(renderer: *const Handle, id: u64) -> i
 pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, bytes: usize) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
+}
+
+/// Adds a distant light to the store and writes its id, never reused, to
+/// `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_light(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_light(id))
+}
+
+/// # Safety
+/// `renderer` must be live, and `params` valid for one read.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_params(
+    renderer: *const Handle,
+    id: u64,
+    params: *const CLight,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the params.
+        let (handle, p) = unsafe { (&*renderer, &*params) };
+        let params = LightParams {
+            intensity: p.intensity,
+            exposure: p.exposure,
+            color: p.color,
+            normalize: p.normalize,
+            angle: p.angle,
+            visible: p.visible,
+        };
+        lock(handle)?.store.set_light_params(id, params)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, and `matrix` valid for 16 reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_transform(
+    renderer: *const Handle,
+    id: u64,
+    matrix: *const [f64; 16],
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the matrix.
+        let (handle, matrix) = unsafe { (&*renderer, *matrix) };
+        lock(handle)?.store.set_light_transform(id, matrix)
+    })
 }
 
 /// Adds a prim that is only counted and writes its id, never reused, to

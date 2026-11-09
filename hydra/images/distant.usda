@@ -1,0 +1,73 @@
+#usda 1.0
+(
+    doc = """Clay quads, one facing the camera and one turned away, under distant lights: the sun's size normalized at frame 1 and unnormalized at frame 2, a coloured parallel light with exposure that turns at frame 2, and a hidden one."""
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 35
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 100)
+}
+
+def Mesh "facing"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-2.4, -1, -5), (-0.4, -1, -5), (-0.4, 1, -5), (-2.4, 1, -5)]
+}
+
+def Mesh "turned"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(0, -1, 0), (2, -1, 0), (2, 1, 0), (0, 1, 0)]
+    double3 xformOp:translate = (0.4, 0, -5)
+    float3 xformOp:rotateXYZ = (0, -40, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+# 2.5 lux, 5 at frame 2.
+def DistantLight "key"
+{
+    float inputs:angle = 0.53
+    float inputs:intensity.timeSamples = {
+        1: 2.5,
+        2: 74800,
+    }
+    bool inputs:normalize.timeSamples = {
+        1: 1,
+        2: 0,
+    }
+    float3 xformOp:rotateXYZ = (-25, -30, 0)
+    uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+}
+
+# 1.2 lux, coloured.
+def DistantLight "fill"
+{
+    float inputs:angle = 0
+    float inputs:intensity = 0.6
+    float inputs:exposure = 1
+    color3f inputs:color = (0.4, 0.7, 1)
+    float3 xformOp:rotateXYZ.timeSamples = {
+        1: (10, 50, 0),
+        2: (10, 20, 0),
+    }
+    uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+}
+
+def DistantLight "hidden"
+{
+    token visibility = "invisible"
+    float inputs:intensity = 5
+    float inputs:angle = 0
+}

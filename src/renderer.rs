@@ -172,6 +172,8 @@ struct Pending {
     update: geometry::Update,
     /// Whether the camera's view was culled, so its counts are this frame's.
     culled: bool,
+    /// The lights the view drew.
+    lights: usize,
     moved: usize,
     transforms: usize,
     latent: bool,
@@ -362,10 +364,17 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
-        let [x, y, z, _] = camera.forward;
-        // A Lambert surface reflects albedo / π of the illuminance, so a
-        // headlight of π shows a facing surface's albedo.
-        let lights = vec![Light::distant([-x, -y, -z], [std::f32::consts::PI; 3])];
+        let mut lights: Vec<_> = (self.store.lights().values())
+            .filter_map(light::resolve)
+            .collect();
+        // Until the scenes author their own lights, a store holding none is
+        // drawn under Pika's headlight. A Lambert surface reflects albedo /
+        // π of the illuminance, so a headlight of π shows a facing
+        // surface's albedo.
+        if self.store.lights().is_empty() {
+            let [x, y, z, _] = camera.forward;
+            lights.push(Light::distant([-x, -y, -z], [std::f32::consts::PI; 3]));
+        }
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
         let bound = self.geometry.bound();
@@ -417,6 +426,7 @@ impl Renderer {
             record: start.elapsed(),
             update,
             culled: view.is_some(),
+            lights: lights.len(),
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
             latent,
@@ -499,6 +509,7 @@ impl Renderer {
             update: pending.update,
             read_bytes,
             drawn,
+            lights: pending.lights,
             memory,
             moved: pending.moved,
             transforms: pending.transforms,

@@ -5,8 +5,10 @@
 //! alone. The lists are built on the CPU each frame from the lights' boxes,
 //! which costs little at tens of lights.
 
+use std::f32::consts::PI;
 use std::ops::Range;
 
+use crate::store::{self, LightParams};
 use crate::transform::Camera;
 
 /// The side of a tile in pixels.
@@ -68,6 +70,46 @@ impl Light {
             radius: (brightest / THRESHOLD).sqrt(),
         }
     }
+}
+
+/// A UsdLux distant light as the loop draws it: `None` until Hydra has
+/// handed over its params and transform, while it is hidden and when it
+/// gives nothing.
+pub fn resolve(light: &store::Light) -> Option<Light> {
+    let (Some(params), Some(m)) = (&light.params, &light.transform) else {
+        return None;
+    };
+    // It shines down its -z axis: the row-vector matrix's third row is
+    // where +z goes.
+    let z = [m[8], m[9], m[10]].map(|v| v as f32);
+    let length = z.iter().map(|v| v * v).sum::<f32>().sqrt();
+    let illuminance = illuminance(params);
+    if !params.visible || length == 0.0 || illuminance == [0.0; 3] {
+        return None;
+    }
+    Some(Light::distant(z.map(|v| v / length), illuminance))
+}
+
+/// The illuminance a distant light gives a surface facing it. UsdLux's
+/// intensity is radiance in nits, scaled by 2^exposure and the color and,
+/// when normalized, divided by the light's size factor (`usdLux/lightAPI.h`
+/// on normalize). A disk of angular radius θ gives π sin²θ times its
+/// radiance; a perfectly parallel light (angle 0) gives its radiance, as
+/// lux, whose size factor is 1.
+fn illuminance(p: &LightParams) -> [f32; 3] {
+    let theta = (p.angle.to_radians() / 2.0).clamp(0.0, PI);
+    let sin2 = theta.sin().powi(2);
+    // The light past a surface's horizon does not reach it.
+    let (received, size) = if theta == 0.0 {
+        (1.0, 1.0)
+    } else if theta <= PI / 2.0 {
+        (PI * sin2, PI * sin2)
+    } else {
+        (PI, (2.0 - sin2) * PI)
+    };
+    let size = if p.normalize { size } else { 1.0 };
+    let scale = p.intensity * p.exposure.exp2() * received / size;
+    p.color.map(|c| c * scale)
 }
 
 /// Each tile's lights, in light order, so a tile sums them as a loop over
@@ -336,6 +378,78 @@ mod tests {
         assert!((2.0 / (light.radius * light.radius) - THRESHOLD).abs() < 1e-7);
         // Reach from the dimmest channel would leave the brightest unfaded.
         assert!(0.5 / (light.radius * light.radius) < THRESHOLD);
+    }
+
+    fn params(intensity: f32, angle: f32, normalize: bool) -> LightParams {
+        LightParams {
+            intensity,
+            exposure: 0.0,
+            color: [1.0; 3],
+            normalize,
+            angle,
+            visible: true,
+        }
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        (0..3).all(|i| (a[i] - b[i]).abs() <= 1e-5 * b[i].abs().max(1e-6))
+    }
+
+    #[test]
+    fn distant_lights_give_usdlux_illuminance() {
+        // Hydra's camera light (HdxTaskController): 15000 nits from a disk
+        // the sun's size, unnormalized, by ∫cos dω = π sin²(0.265°).
+        let camera = illuminance(&params(15000.0, 0.53, false))[0];
+        assert!((camera - 1.008).abs() < 5e-4, "{camera}");
+        // Reading the intensity as lux is four orders of magnitude off.
+        assert!(15000.0 / camera > 1e4);
+        // Normalized, the intensity is lux at any angle; at angle 0 the
+        // size factor is 1 either way.
+        for (angle, normalize) in [(0.53, true), (0.0, false), (0.0, true), (90.0, true)] {
+            assert!(close(illuminance(&params(2.5, angle, normalize)), [2.5; 3]));
+        }
+        // Exposure doubles per stop, and the color scales each channel.
+        let p = LightParams {
+            exposure: 1.5,
+            color: [1.0, 0.5, 0.25],
+            ..params(2.0, 0.0, false)
+        };
+        let lux = 2.0 * 1.5f32.exp2();
+        assert!(close(illuminance(&p), [lux, lux / 2.0, lux / 4.0]));
+        // Past the horizon, a wider light lights no more of a facing
+        // surface, but normalizes by its whole size.
+        let wide = illuminance(&params(1.0, 270.0, false))[0];
+        assert!((wide - PI).abs() < 1e-5);
+        let sin2 = (135f32.to_radians()).sin().powi(2);
+        let normalized = illuminance(&params(1.0, 270.0, true))[0];
+        assert!((normalized - 1.0 / (2.0 - sin2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn distant_lights_shine_down_their_z_axis() {
+        // Turned 90° about x, scaled by 2 and moved: +z goes to -y.
+        #[rustfmt::skip]
+        let transform = [
+            2.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 2.0, 0.0,
+            0.0, -2.0, 0.0, 0.0,
+            5.0, 6.0, 7.0, 1.0,
+        ];
+        let mut light = store::Light {
+            path: "/sun".into(),
+            params: Some(params(1.0, 0.0, false)),
+            transform: Some(transform),
+        };
+        let resolved = resolve(&light).unwrap();
+        assert_eq!(resolved.position, [0.0, -1.0, 0.0, 0.0]);
+        assert_eq!(resolved.illuminance, [1.0; 3]);
+        // Hidden, black or not yet synced, it gives nothing.
+        light.params.as_mut().unwrap().visible = false;
+        assert_eq!(resolve(&light), None);
+        light.params = Some(params(0.0, 0.0, false));
+        assert_eq!(resolve(&light), None);
+        light.params = None;
+        assert_eq!(resolve(&light), None);
     }
 
     #[test]
