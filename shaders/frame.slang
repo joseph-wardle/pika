@@ -108,6 +108,26 @@ float3 illuminance_vector(Light light, float3 P)
     return 0.5 * (dot(sum, c) < 0 ? -sum : sum);
 }
 
+// illuminance_vector of a light at c from P, past its far: a point at its
+// centre showing its projected area, of 4 |u × v| for a rect, the octagon's
+// 2√2 |u × v| for a disk and 2 radius × 2 |u| side on for a cylinder, whose
+// ends give nothing.
+float3 far_illuminance_vector(Light light, float3 c)
+{
+    float d2 = dot(c, c);
+    float3 toward = c * rsqrt(d2);
+    float area;
+    if (light.shape == CYLINDER)
+        area = 4 * light.radius * length(cross(light.u, toward));
+    else
+    {
+        float3 n = cross(light.u, light.v);
+        float flat = light.shape == RECT ? 4 : 2 * sqrt(2.0);
+        area = flat * max(-dot(toward, n), 0);
+    }
+    return toward * (area / d2);
+}
+
 // The lights that light P, on a mesh in the light-link collections of mask
 // `link`, one by one: the loop's whole view of which lights there are, so
 // that how they are found changes this file alone. Its tile lists those that
@@ -189,7 +209,9 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     }
     // An area light shines along its illuminance vector, as the BSDF's
     // cosine wants for diffuse light; specular takes it as a point's.
-    float3 e = illuminance_vector(light, P);
+    float3 c = light.position - P;
+    float3 e = dot(c, c) >= light.far * light.far ? far_illuminance_vector(light, c)
+                                                  : illuminance_vector(light, P);
     float magnitude = length(e);
     incident.direction = magnitude > 0 ? e / magnitude : N;
     incident.illuminance = light.illuminance * max(magnitude - light.fade, 0);
