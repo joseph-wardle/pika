@@ -217,9 +217,9 @@ struct Draws {
 pub struct Geometry {
     layout: Option<Layout>,
     draws: Option<Draws>,
-    /// The host buffer the frame's uploads are copied from, kept while
+    /// The host buffers the frame's uploads are copied from, kept while
     /// frames keep uploading and dropped by the first that does not.
-    staging: Option<Buffer>,
+    staging: Vec<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
     tangent: Tangent,
@@ -281,7 +281,7 @@ impl Geometry {
         Ok(Self {
             layout: None,
             draws: None,
-            staging: None,
+            staging: Vec::new(),
             subdiv: Subdiv::new(device, subdiv)?,
             smooth: Smooth::new(device, smooth)?,
             tangent: Tangent::new(device, tangent)?,
@@ -613,51 +613,64 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
     })
 }
 
-/// Writes `copies` into the staging buffer, grown when they do not fit, and
-/// records them into `cb` with a barrier making them visible to every pass.
-/// A frame with nothing to copy frees the buffer: a scene's first upload is
-/// its whole layout, gigabytes of host memory that playback, which moves a
-/// frame's points at a time, must not keep, while reusing the buffer between
-/// its own frames saves allocating one each.
+/// The largest staging buffer: the least `maxMemoryAllocationSize` Vulkan
+/// allows, so every driver grants it. A scene's first upload is its whole
+/// layout, 4.86 GB on ALab, past the 4.29 GB NVIDIA reports.
+const STAGING: u64 = 1 << 30;
+
+/// Writes `copies` into the staging buffers, more added when they do not
+/// fit, and records them into `cb` with a barrier making them visible to
+/// every pass. A frame with nothing to copy frees the buffers: a scene's
+/// first upload is gigabytes of host memory that playback, which moves a
+/// frame's points at a time, must not keep, while reusing them between its
+/// own frames saves allocating them each.
 fn upload(
     device: &gpu::Device,
-    staging: &mut Option<Buffer>,
+    staging: &mut Vec<Buffer>,
     copies: &[Upload],
     cb: vk::CommandBuffer,
 ) -> Result<u64, String> {
     let total: u64 = copies.iter().map(|c| c.bytes.len() as u64).sum();
     if total == 0 {
-        *staging = None;
+        staging.clear();
         return Ok(0);
     }
-    let staging = match staging.take() {
-        Some(s) if s.size >= total => staging.insert(s),
-        _ => {
-            // Write-combined memory: written once in order, never read.
-            let host =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            staging.insert(Buffer::host(
-                device,
-                total,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-                host,
-            )?)
-        }
-    };
+    let mut room: u64 = staging.iter().map(|s| s.size).sum();
+    while room < total {
+        let size = (total - room).min(STAGING);
+        // Write-combined memory: written once in order, never read.
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        staging.push(Buffer::host(
+            device,
+            size,
+            vk::BufferUsageFlags::TRANSFER_SRC,
+            host,
+        )?);
+        room += size;
+    }
     let d = &device.raw;
-    let mut at = 0;
-    for c in copies.iter().filter(|c| !c.bytes.is_empty()) {
-        let end = at + c.bytes.len();
-        staging.bytes()[at..end].copy_from_slice(c.bytes);
-        let region = vk::BufferCopy {
-            src_offset: at as u64,
-            dst_offset: c.offset,
-            size: c.bytes.len() as u64,
-        };
-        // SAFETY: `cb` is recording outside any rendering, both buffers
-        // were created on `d`, and the region lies inside each.
-        unsafe { d.cmd_copy_buffer(cb, staging.raw, c.buffer, &[region]) };
-        at = end;
+    let (mut buffer, mut at) = (0, 0);
+    for c in copies {
+        // A copy runs on into the next buffer where one ends.
+        let (mut bytes, mut offset) = (c.bytes, c.offset);
+        while !bytes.is_empty() {
+            if at == staging[buffer].size {
+                (buffer, at) = (buffer + 1, 0);
+            }
+            let s = &mut staging[buffer];
+            let n = (s.size - at).min(bytes.len() as u64);
+            s.bytes()[at as usize..(at + n) as usize].copy_from_slice(&bytes[..n as usize]);
+            let region = vk::BufferCopy {
+                src_offset: at,
+                dst_offset: offset,
+                size: n,
+            };
+            // SAFETY: `cb` is recording outside any rendering, both buffers
+            // were created on `d`, and the region lies inside each.
+            unsafe { d.cmd_copy_buffer(cb, s.raw, c.buffer, &[region]) };
+            bytes = &bytes[n as usize..];
+            (offset, at) = (offset + n, at + n);
+        }
     }
     let barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::COPY)
