@@ -1,0 +1,86 @@
+#usda 1.0
+(
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+# Distant, sphere, rect, disk and cylinder lights are stored with their
+# UsdLux inputs, UsdLux's fallbacks where none is authored, and their world
+# transforms. Frame 2 edits a distant light, turning its parent, removes the
+# other, and edits the sphere's radius and the cylinder's length: a light is
+# no material, so its edits compile nothing.
+#
+# compiles: 1 then 0
+def Xform "world"
+{
+    def Camera "camera" {}
+
+    def Mesh "tri" (prepend apiSchemas = ["MaterialBindingAPI"])
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        uniform token subdivisionScheme = "none"
+        rel material:binding = </world/mtl/paint>
+    }
+
+    def Scope "mtl"
+    {
+        def Material "paint"
+        {
+            token outputs:surface.connect = </world/mtl/paint/surface.outputs:surface>
+
+            def Shader "surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.2, 0.1)
+                token outputs:surface
+            }
+        }
+    }
+
+    def Xform "rig"
+    {
+        float xformOp:rotateY = 0
+        uniform token[] xformOpOrder = ["xformOp:rotateY"]
+
+        def DistantLight "sun"
+        {
+            float inputs:intensity = 50000
+            float inputs:exposure = -1
+            color3f inputs:color = (1, 0.9, 0.8)
+            float3 xformOp:rotateXYZ = (-45, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+        }
+    }
+
+    def DistantLight "moon"
+    {
+        float inputs:angle = 0
+        bool inputs:normalize = 1
+    }
+
+    def SphereLight "bulb"
+    {
+        double3 xformOp:translate = (1, 2, 3)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+    }
+
+    def RectLight "panel"
+    {
+        float inputs:width = 2
+        float inputs:height = 0.5
+        float inputs:intensity = 3
+    }
+
+    def DiskLight "spot"
+    {
+        bool inputs:normalize = 1
+    }
+
+    def CylinderLight "tube"
+    {
+        float inputs:radius = 0.1
+    }
+}

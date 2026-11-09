@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A moved and rotated point instancer of two prototypes, a pyramid and a transformed quad, with orientations, scales (one mirroring), positions that change at frame 2 and an instance hidden at frame 2. The orientations are exact in half floats."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

@@ -6,6 +6,7 @@
 
 #include <pxr/imaging/hd/basisCurves.h>
 #include <pxr/imaging/hd/instancer.h>
+#include <pxr/imaging/hd/light.h>
 #include <pxr/imaging/hd/material.h>
 #include <pxr/imaging/hd/mesh.h>
 #include <pxr/imaging/hd/sprim.h>
@@ -92,6 +93,26 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
 
 private:
+    Pika &_pika;
+    uint64_t _id = 0;
+};
+
+// A distant, sphere, rect, disk or cylinder light copies its transform and UsdLux inputs into the
+// store.
+class PikaLight final : public HdLight {
+public:
+    // Hydra's fallback light has no path and stands for nothing in the
+    // scene: it is accepted and never synced.
+    PikaLight(TfToken const &type, SdfPath const &id, Pika &pika);
+    ~PikaLight() override;
+
+    HdDirtyBits GetInitialDirtyBitsMask() const override {
+        return DirtyTransform | DirtyParams | DirtyCollection;
+    }
+    void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) override;
+
+private:
+    TfToken _type;
     Pika &_pika;
     uint64_t _id = 0;
 };

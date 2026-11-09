@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "One quad facing the camera, bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb sampled at its st, which runs half an image past the image on every side. The texture, bake/fixtures/acescg.exr, states no wrap mode; its wrapS and wrapT are repeat at frame 1 and clamp at frame 2. A wrap mode is a value, so the edit rewrites the material's block and rebinds its sampler without compiling (hydra/fixtures/rewrapped.usda counts that), and frame 2 must stretch the edge where frame 1 repeated. The texture is magnified, as the reference reads only the levels a file stores."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Four native instances of a quad and a triangle: one rotated, one mirrored, one hidden at frame 2 and one moving at frame 2, all under a rotated parent."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

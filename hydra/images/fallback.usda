@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb whose file does not exist, so its path arrives empty: the node's fallback is drawn in its place, as Storm draws it, and it changes at frame 2, which builds the material again. The wrap modes are authored, since useMetadata would read the missing file's."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

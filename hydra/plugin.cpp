@@ -1,8 +1,9 @@
 // The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
 // the Rust renderer (pika.h); it holds no renderer logic of its own.
 //
-// Meshes and instancers are synced into Pika's store, basis curves are
-// fetched and measured, and other prims are counted. Pika draws the meshes
+// Meshes, instancers, and distant, sphere, rect, disk and cylinder lights,
+// with their light links, are synced into Pika's store, basis curves are fetched and measured, and other prims are
+// counted. Pika draws the meshes
 // into the color, depth and normal AOVs.
 
 #include "buffer.h"
@@ -21,7 +22,10 @@
 #include <pxr/imaging/hd/rendererPlugin.h>
 #include <pxr/imaging/hd/rendererPluginRegistry.h>
 #include <pxr/imaging/hd/resourceRegistry.h>
+#include <pxr/imaging/hd/retainedDataSource.h>
+#include <pxr/imaging/hd/sceneIndexPluginRegistry.h>
 #include <pxr/imaging/hd/tokens.h>
+#include <pxr/imaging/hdsi/lightLinkingSceneIndex.h>
 
 #include <algorithm>
 #include <string>
@@ -170,6 +174,10 @@ public:
     TfTokenVector const &GetSupportedSprimTypes() const override {
         static const TfTokenVector types = [] {
             TfTokenVector t = HdLightPrimTypeTokens();
+            // Without it, usdview's and usdrecord's task controller sends
+            // its camera light as a distantLight, in UsdLux's terms, rather
+            // than as a GlfSimpleLight in Glf's.
+            t.erase(std::remove(t.begin(), t.end(), HdPrimTypeTokens->simpleLight), t.end());
             t.push_back(HdPrimTypeTokens->lightFilter);
             t.push_back(HdPrimTypeTokens->material);
             t.push_back(HdPrimTypeTokens->camera);
@@ -242,6 +250,10 @@ public:
             return new HdCamera(id);
         if (typeId == HdPrimTypeTokens->material)
             return new PikaMaterial(id, _pika);
+        if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->sphereLight ||
+            typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
+            typeId == HdPrimTypeTokens->cylinderLight)
+            return new PikaLight(typeId, id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }
     HdSprim *CreateFallbackSprim(TfToken const &typeId) override {
@@ -304,6 +316,30 @@ public:
 
 TF_REGISTRY_FUNCTION(TfType) {
     HdRendererPluginRegistry::Define<PikaRendererPlugin>();
+}
+
+// Hosts on scene indices (Houdini 22's, and husk on 21) hand a renderer
+// light links only through this scene index, which each renderer adds for
+// itself: without it, a light's lightLink and a mesh's categories arrive
+// empty. Houdini 21's usdview and usdrecord hand them over either way.
+TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
+    VtArray<TfToken> lights;
+    for (TfToken const &t : HdLightPrimTypeTokens())
+        lights.push_back(t);
+    using Tokens = HdRetainedTypedSampledDataSource<VtArray<TfToken>>;
+    HdContainerDataSourceHandle const args = HdRetainedContainerDataSource::New(
+        HdsiLightLinkingSceneIndexTokens->lightPrimTypes, Tokens::New(lights),
+        HdsiLightLinkingSceneIndexTokens->lightFilterPrimTypes,
+        Tokens::New({HdPrimTypeTokens->lightFilter}),
+        HdsiLightLinkingSceneIndexTokens->geometryPrimTypes,
+        Tokens::New({HdPrimTypeTokens->mesh}));
+    HdSceneIndexPluginRegistry::GetInstance().RegisterSceneIndexForRenderer(
+        "Pika",
+        [](std::string const &, HdSceneIndexBaseRefPtr const &input,
+           HdContainerDataSourceHandle const &args) {
+            return HdsiLightLinkingSceneIndex::New(input, args);
+        },
+        args, 0, HdSceneIndexPluginRegistry::InsertionOrderAtEnd);
 }
 
 PXR_NAMESPACE_CLOSE_SCOPE

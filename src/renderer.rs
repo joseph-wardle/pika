@@ -13,6 +13,8 @@ use crate::commands::Commands;
 use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
+use crate::light::{self, Tiles};
+use crate::link::Links;
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
@@ -171,6 +173,8 @@ struct Pending {
     update: geometry::Update,
     /// Whether the camera's view was culled, so its counts are this frame's.
     culled: bool,
+    /// The lights the view drew.
+    lights: usize,
     moved: usize,
     transforms: usize,
     latent: bool,
@@ -361,17 +365,28 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        // A headlight is the host's to send (hydra/plugin.cpp), so a store
+        // holding no light draws black.
+        let links = Links::new(&self.store);
+        let lights: Vec<_> = (self.store.lights().values())
+            .filter_map(|l| {
+                let link = links.light(l);
+                light::resolve(l).map(|r| light::Light { link, ..r })
+            })
+            .collect();
+        let tiles = Tiles::new(&lights, &camera, [w, h]);
+        let capacity = light::capacity(lights.len(), [w, h]);
         let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
-            (Some(g), Some(v)) if v.fits(g) => Some(v),
+            (Some(g), Some(v)) if v.fits(g, capacity) => Some(v),
             (Some(g), slot) => {
                 *slot = None;
-                Some(slot.insert(View::new(&self.device, g)?))
+                Some(slot.insert(View::new(&self.device, g, capacity)?))
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            view.begin(cb, &camera, geometry);
+            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h]);
             self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
@@ -410,6 +425,7 @@ impl Renderer {
             record: start.elapsed(),
             update,
             culled: view.is_some(),
+            lights: lights.len(),
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
             latent,
@@ -492,6 +508,7 @@ impl Renderer {
             update: pending.update,
             read_bytes,
             drawn,
+            lights: pending.lights,
             memory,
             moved: pending.moved,
             transforms: pending.transforms,

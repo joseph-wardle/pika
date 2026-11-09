@@ -15,6 +15,7 @@ mesh /world/tri
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -35,6 +36,7 @@ mesh /world/whole
     0 0 1 0
     0 0 0 1
   material "/world/mtl/base"
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -62,6 +64,7 @@ mesh /world/tri
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -81,6 +84,7 @@ mesh /world/whole
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2

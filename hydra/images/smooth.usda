@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Meshes whose normals are computed: a Catmull-Clark bump with misleading authored normals and a hole, whose points move at frame 2; a left-handed Catmull-Clark cap of three triangles, a quad and a pentagon around a valence-5 point; a left-handed polygonal cone without normals; and a render-purpose and a proxy-purpose tile, which husk and usdrecord each draw one of."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

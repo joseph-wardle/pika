@@ -136,6 +136,26 @@ typedef struct pika_network {
     const char *surface;
 } pika_network;
 
+// A light's UsdLux inputs, as Hydra hands them over: its Hydra type
+// ("distantLight", "sphereLight", "rectLight", "diskLight" or
+// "cylinderLight"), its intensity in nits, its exposure in stops, its color,
+// whether it is normalized, a distant light's angular diameter in degrees, a
+// sphere's, disk's or cylinder's radius, a rect's width and height, a
+// cylinder's length, and Hydra's visibility.
+typedef struct pika_light {
+    const char *type;
+    float intensity;
+    float exposure;
+    float color[3];
+    bool normalize;
+    float angle;
+    float radius;
+    float width;
+    float height;
+    float length;
+    bool visible;
+} pika_light;
+
 // A render buffer bound to an AOV: `len` bytes of `format`, Hydra's name
 // for its HdFormat ("HdFormatFloat16Vec4"), bottom row first. `pixels` is
 // null when the AOV is not bound.
@@ -228,6 +248,11 @@ int pika_mesh_render_tag(const pika_renderer *renderer, uint64_t id, const char 
 // The material bound to the whole mesh, or "".
 int pika_mesh_material(const pika_renderer *renderer, uint64_t id, const char *material);
 
+// The light-link collections the mesh is in: Hydra's categories, a token
+// per collection.
+int pika_mesh_categories(const pika_renderer *renderer, uint64_t id,
+                         const char *const *categories, size_t count);
+
 // The instancer a prototype mesh belongs to ("" when the mesh is not
 // instanced), and the instance indices it is drawn at.
 int pika_mesh_instancer(const pika_renderer *renderer, uint64_t id, const char *instancer,
@@ -259,15 +284,29 @@ int pika_curves_new(const pika_renderer *renderer, const char *path, uint64_t *o
 int pika_curves_free(const pika_renderer *renderer, uint64_t id);
 int pika_curves_pulled(const pika_renderer *renderer, uint64_t id, size_t bytes);
 
+// Adds a light and writes its id, never reused, to `*out`.
+int pika_light_new(const pika_renderer *renderer, const char *path, uint64_t *out);
+int pika_light_free(const pika_renderer *renderer, uint64_t id);
+int pika_light_params(const pika_renderer *renderer, uint64_t id,
+                      const pika_light *params);
+// The token of the light's lightLink collection, the category of the meshes
+// it lights; "" when it lights every mesh.
+int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *link);
+// The world transform: Hydra's row-major GfMatrix4d. A distant light
+// shines down its -z axis.
+int pika_light_transform(const pika_renderer *renderer, uint64_t id,
+                         const double matrix[16]);
+
 // A prim of any other supported type is only counted, by its Hydra type.
 int pika_counted_new(const pika_renderer *renderer, const char *type, const char *path,
                      uint64_t *out);
 int pika_counted_free(const pika_renderer *renderer, uint64_t id);
 
 // Draws the store's meshes of the frame's render tags into its data window:
-// color is each mesh's material under a headlight, 18 % grey clay where
-// none is bound; depth is OpenGL's window depth, cleared to 1; normals are
-// in world space, turned toward the viewer.
+// color is each mesh's material under the store's lights linked to it
+// (black under none), 18 % grey clay where none is bound; depth is OpenGL's
+// window depth, cleared to 1; normals are in world space, turned toward the
+// viewer.
 // Pixels outside the data window are left as they are.
 // While frames change, the buffers get the frame before this one, which
 // leaves this one's GPU work running while the host works; `*converged` is

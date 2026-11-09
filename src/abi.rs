@@ -15,8 +15,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, Normals, Refined, RefinedTexcoord, Scheme,
-    Stencils, Subset, Texcoord, Topology,
+    InstancePrimvars, Instancing, Interpolation, LightParams, Normals, Refined, RefinedTexcoord,
+    Scheme, Shape, Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -26,6 +26,22 @@ pub const PANIC: i32 = 2;
 /// The opaque `pika_renderer` C++ holds. The mutex serializes calls from
 /// Hydra's parallel sync and is what a panic poisons.
 pub type Handle = Mutex<Renderer>;
+
+/// `pika_light`.
+#[repr(C)]
+pub struct CLight {
+    light_type: *const c_char,
+    intensity: f32,
+    exposure: f32,
+    color: [f32; 3],
+    normalize: bool,
+    angle: f32,
+    radius: f32,
+    width: f32,
+    height: f32,
+    length: f32,
+    visible: bool,
+}
 
 /// `pika_subset`.
 #[repr(C)]
@@ -704,6 +720,29 @@ pub unsafe extern "C" fn pika_mesh_instancer(
     })
 }
 
+/// Sets the light-link collections the mesh is in, by Hydra's tokens.
+///
+/// # Safety
+/// `renderer` must be live, and `categories` valid for `count` reads of
+/// NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_mesh_categories(
+    renderer: *const Handle,
+    id: u64,
+    categories: *const *const c_char,
+    count: usize,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the array.
+        let (handle, categories) = unsafe { (&*renderer, slice(categories, count)) };
+        let categories = (categories.iter())
+            // SAFETY: as above.
+            .map(|&c| unsafe { string(c) })
+            .collect::<Result<_, _>>()?;
+        lock(handle)?.store.set_categories(id, categories)
+    })
+}
+
 /// Adds an instancer to the store and writes its id, never reused, to `*out`.
 ///
 /// # Safety
@@ -886,6 +925,108 @@ pub unsafe extern "C" fn pika_curves_free(renderer: *const Handle, id: u64) -> i
 pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, bytes: usize) -> i32 {
     // SAFETY: the caller guarantees the renderer.
     call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
+}
+
+/// Adds a light to the store and writes its id, never reused, to
+/// `*out`.
+///
+/// # Safety
+/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
+/// for one write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_new(
+    renderer: *const Handle,
+    path: *const c_char,
+    out: *mut u64,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, path) = unsafe { (&*renderer, string(path)?) };
+        let id = lock(handle)?.store.insert_light(path);
+        // SAFETY: the caller guarantees `out` is writable.
+        unsafe { out.write(id) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `renderer` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_free(renderer: *const Handle, id: u64) -> i32 {
+    // SAFETY: the caller guarantees the renderer.
+    call(|| lock(unsafe { &*renderer })?.store.remove_light(id))
+}
+
+/// # Safety
+/// `renderer` must be live, and `params` valid for one read, its type a
+/// NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_params(
+    renderer: *const Handle,
+    id: u64,
+    params: *const CLight,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the params.
+        let (handle, p) = unsafe { (&*renderer, &*params) };
+        // SAFETY: the caller guarantees the type string.
+        let shape = match unsafe { string(p.light_type)? }.as_str() {
+            "distantLight" => Shape::Distant { angle: p.angle },
+            "sphereLight" => Shape::Sphere { radius: p.radius },
+            "rectLight" => Shape::Rect {
+                width: p.width,
+                height: p.height,
+            },
+            "diskLight" => Shape::Disk { radius: p.radius },
+            "cylinderLight" => Shape::Cylinder {
+                length: p.length,
+                radius: p.radius,
+            },
+            other => return Err(format!("Pika draws no {other}")),
+        };
+        let params = LightParams {
+            intensity: p.intensity,
+            exposure: p.exposure,
+            color: p.color,
+            normalize: p.normalize,
+            shape,
+            visible: p.visible,
+        };
+        lock(handle)?.store.set_light_params(id, params)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, and `matrix` valid for 16 reads.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_transform(
+    renderer: *const Handle,
+    id: u64,
+    matrix: *const [f64; 16],
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the matrix.
+        let (handle, matrix) = unsafe { (&*renderer, *matrix) };
+        lock(handle)?.store.set_light_transform(id, matrix)
+    })
+}
+
+/// Sets the token of the light's lightLink collection, "" when it includes
+/// everything.
+///
+/// # Safety
+/// `renderer` must be live, and `link` a NUL-terminated string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_link(
+    renderer: *const Handle,
+    id: u64,
+    link: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the string.
+        let (handle, link) = unsafe { (&*renderer, string(link)?) };
+        lock(handle)?.store.set_light_link(id, link)
+    })
 }
 
 /// Adds a prim that is only counted and writes its id, never reused, to

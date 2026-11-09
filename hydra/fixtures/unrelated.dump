@@ -21,6 +21,7 @@ mesh /world/quad
     0 0 1 0
     0 0 0 1
   material "/world/mtl/paint"
+  categories []
   topology catmullClark rightHanded
     face_vertex_counts 4
     face_vertex_indices 0 1 2 3
@@ -59,6 +60,7 @@ mesh /world/quad
     0 0 1 0
     0 0 0 1
   material "/world/mtl/paint"
+  categories []
   topology catmullClark rightHanded
     face_vertex_counts 4
     face_vertex_indices 0 1 2 3

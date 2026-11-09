@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -209,7 +210,8 @@ HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
            HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar |
            HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyVisibility |
            HdChangeTracker::DirtyMaterialId | HdChangeTracker::DirtyInstancer |
-           HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtySubdivTags;
+           HdChangeTracker::DirtyInstanceIndex | HdChangeTracker::DirtySubdivTags |
+           HdChangeTracker::DirtyCategories;
 }
 
 void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
@@ -254,6 +256,14 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
         SyncTexcoord(delegate, renderer);
     if (bits & (HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex))
         _SyncInstancing(delegate, renderer);
+    if (bits & HdChangeTracker::DirtyCategories) {
+        VtArray<TfToken> const categories = delegate->GetCategories(GetId());
+        std::vector<const char *> names;
+        for (TfToken const &c : categories)
+            names.push_back(c.GetText());
+        _pika.report(pika_mesh_categories(renderer, _id, names.data(), names.size()),
+                     path + " categories");
+    }
 }
 
 // Hydra calls this for every rprim with a dirty render tag, before it decides
@@ -461,7 +471,8 @@ PikaInstancer::~PikaInstancer() {
 
 HdDirtyBits PikaInstancer::GetInitialDirtyBitsMask() const {
     return HdChangeTracker::DirtyTransform | HdChangeTracker::DirtyPrimvar |
-           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex;
+           HdChangeTracker::DirtyInstancer | HdChangeTracker::DirtyInstanceIndex |
+           HdChangeTracker::DirtyCategories;
 }
 
 void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
@@ -486,6 +497,16 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
         _SyncPrimvars(delegate, renderer);
+    // Pika links lights per mesh (src/link.rs), so it ignores categories
+    // that differ between instances.
+    static std::atomic<bool> warned{false};
+    if (bits & HdChangeTracker::DirtyCategories) {
+        for (VtArray<TfToken> const &c : delegate->GetInstanceCategories(GetId())) {
+            if (!c.empty() && !warned.exchange(true))
+                warn(path + ": its instances have light links of their own, which Pika ignores; "
+                            "each instance is lit as its prototype is (warned once)");
+        }
+    }
 }
 
 void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer) {
@@ -658,6 +679,71 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
         if (mesh && mesh->Binds(GetId()))
             mesh->SyncTexcoord(delegate, renderer);
     }
+}
+
+PikaLight::PikaLight(TfToken const &type, SdfPath const &id, Pika &pika)
+    : HdLight(id), _type(type), _pika(pika) {
+    if (id.IsEmpty())
+        return;
+    if (pika_renderer *renderer = _pika.renderer())
+        _pika.report(pika_light_new(renderer, id.GetText(), &_id), "adding light " + id.GetString());
+}
+
+PikaLight::~PikaLight() {
+    pika_renderer *renderer = _id ? _pika.renderer() : nullptr;
+    if (renderer)
+        _pika.report(pika_light_free(renderer, _id), "removing light " + GetId().GetString());
+}
+
+// A light's input as `T`, or UsdLux's fallback when the host hands over
+// none.
+template <typename T>
+static T light_param(HdSceneDelegate *delegate, SdfPath const &id, TfToken const &name,
+                     T fallback) {
+    VtValue value = delegate->GetLightParamValue(id, name);
+    return value.CanCast<T>() ? value.Cast<T>().template UncheckedGet<T>() : fallback;
+}
+
+void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits) {
+    HdDirtyBits bits = *dirtyBits;
+    *dirtyBits = Clean;
+    pika_renderer *renderer = _pika.renderer();
+    if (!renderer || !_id)
+        return;
+    SdfPath const &id = GetId();
+    if (bits & DirtyTransform) {
+        GfMatrix4d matrix = delegate->GetTransform(id);
+        _pika.report(pika_light_transform(renderer, _id, matrix.data()),
+                     id.GetString() + " transform");
+    }
+    // A changed link is a collection change, which hosts may send as a
+    // params change too.
+    if (bits & (DirtyParams | DirtyCollection)) {
+        TfToken link = light_param(delegate, id, HdTokens->lightLink, TfToken());
+        _pika.report(pika_light_link(renderer, _id, link.GetText()), id.GetString() + " link");
+    }
+    if (!(bits & DirtyParams))
+        return;
+    pika_light params = {};
+    params.type = _type.GetText();
+    // DistantLight's schema overrides LightAPI's fallback intensity of 1,
+    // approximating sunlight.
+    bool distant = _type == HdPrimTypeTokens->distantLight;
+    params.intensity = light_param(delegate, id, HdLightTokens->intensity, distant ? 50000.0f : 1.0f);
+    params.exposure = light_param(delegate, id, HdLightTokens->exposure, 0.0f);
+    GfVec3f color = light_param(delegate, id, HdLightTokens->color, GfVec3f(1.0f));
+    std::copy_n(color.data(), 3, params.color);
+    params.normalize = light_param(delegate, id, HdLightTokens->normalize, false);
+    params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
+    // treatAsPoint is a hint Pika need not take: above a surface's horizon a
+    // sphere lights it exactly as a point of the same power (src/light.rs).
+    // A cylinder's treatAsLine is a hint too.
+    params.radius = light_param(delegate, id, HdLightTokens->radius, 0.5f);
+    params.width = light_param(delegate, id, HdLightTokens->width, 1.0f);
+    params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);
+    params.length = light_param(delegate, id, HdLightTokens->length, 1.0f);
+    params.visible = delegate->GetVisible(id);
+    _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
 }
 
 PikaCurves::PikaCurves(SdfPath const &id, Pika &pika) : HdBasisCurves(id), _pika(pika) {

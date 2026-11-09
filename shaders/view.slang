@@ -28,19 +28,43 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
-// The lights a view has: the headlight.
-static const int LIGHTS = 1;
+// A light's shape (src/light.rs).
+static const uint DISTANT = 0;
+static const uint SPHERE = 1;
+static const uint RECT = 2;
+static const uint DISK = 3;
+static const uint CYLINDER = 4;
 
-// A light as the generated light loop reads it (shaders/frame.slang):
-// MaterialX's directional light, bound as type 1 by bake/generate.cpp,
-// which declares the same members, in this order.
-struct LightData
+// A light as the light loop reads it (shaders/frame.slang, src/light.rs).
+struct Light
 {
-    int type;
-    float3 direction;
-    float3 color;
-    float intensity;
+    // The unit direction toward a distant light, or the centre of another.
+    float3 position;
+    // A sphere's or cylinder's radius.
+    float radius;
+    // The illuminance a distant light gives a surface facing it, or a sphere
+    // at unit distance from its centre; the radiance of a rect, disk or
+    // cylinder.
+    float3 illuminance;
+    // How far it reaches: infinite for a distant light. The loop reads fade
+    // instead.
+    float reach;
+    // A rect's half sides or the axes of a disk's polygon, which light the
+    // side cross(u, v) points to; half a cylinder's axis.
+    float3 u;
+    uint shape;
+    float3 v;
+    // What a sphere's 1 / d² or an area light's illuminance vector loses so
+    // that it ends at its reach.
+    float fade;
+    // Its light-link collection's bit, or 0 when it lights every mesh
+    // (src/link.rs).
+    uint link;
+    uint3 pad;
 };
+
+// The side of a light tile in pixels (src/light.rs TILE).
+static const uint TILE = 16;
 
 struct View
 {
@@ -49,10 +73,14 @@ struct View
     float4 view_projection[4];
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
-    // The unit direction the camera looks along.
-    float4 forward;
-    // The headlight, along forward.
-    LightData lights[LIGHTS];
+    Light *lights;
+    // Per TILE-pixel tile, row by row: the first of its lights in
+    // tile_lights and how many (src/light.rs Tiles).
+    uint2 *tiles;
+    // Indices into lights.
+    uint *tile_lights;
+    // The target's width and height in pixels.
+    uint2 extent;
     float *points;
     float *normals;
     // One per point (src/geometry.rs Layout).

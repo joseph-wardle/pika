@@ -9,6 +9,7 @@ mesh /world/deleted
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -28,6 +29,7 @@ mesh /world/kept
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -48,6 +50,7 @@ mesh /world/kept
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2

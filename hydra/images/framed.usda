@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A 3:2 camera, moved and turned, rendered at 16:9. A quad wider than the aperture shows the expanded frustum."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

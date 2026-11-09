@@ -9,14 +9,17 @@ use std::collections::HashMap;
 
 use crate::store::{Instancer, Instancing};
 
-/// One mesh instance: its world matrix and normal matrix, and whether its
-/// winding is reversed. Laid out as the shader's 7 `float4`s per instance.
+/// One mesh instance: its world matrix and normal matrix, whether its
+/// winding is reversed, and its mesh's light links. Laid out as the
+/// shader's 7 `float4`s per instance.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Instance {
     world: [[f32; 4]; 3],
     normal: [[f32; 4]; 3],
-    /// Bit 0: front faces wind clockwise, as seen from in front.
+    /// Bit 0 of the first: front faces wind clockwise, as seen from in
+    /// front. The second: the bits of the light-link collections its mesh
+    /// is in (`link::Links`).
     flags: [u32; 4],
 }
 
@@ -27,9 +30,9 @@ impl Instance {
     }
 
     /// The instance at world transform `matrix` of a mesh with the given
-    /// orientation. `None` when the transform flattens the mesh, which then
-    /// covers no pixels.
-    pub fn new(matrix: &[f64; 16], left_handed: bool) -> Option<Self> {
+    /// orientation and light links. `None` when the transform flattens the
+    /// mesh, which then covers no pixels.
+    pub fn new(matrix: &[f64; 16], left_handed: bool, link: u32) -> Option<Self> {
         let linear = linear(matrix);
         let det = det3(&linear);
         let inverse = inverse3(&linear, det)?;
@@ -42,7 +45,7 @@ impl Instance {
         Some(Self {
             world,
             normal,
-            flags: [flip as u32, 0, 0, 0],
+            flags: [flip as u32, link, 0, 0],
         })
     }
 }
@@ -56,8 +59,6 @@ pub struct Camera {
     /// The camera position (w = 1), or for an orthographic camera the
     /// direction toward it (w = 0).
     pub eye: [f32; 4],
-    /// The unit direction the camera looks along (w = 0).
-    pub forward: [f32; 4],
 }
 
 impl Camera {
@@ -93,7 +94,6 @@ impl Camera {
         Ok(Self {
             view_projection,
             eye: eye.map(|v| v as f32),
-            forward: [-backward[0], -backward[1], -backward[2], 0.0].map(|v| v as f32),
         })
     }
 }
@@ -314,7 +314,6 @@ mod tests {
         ];
         let camera = Camera::new(&world_to_view, &perspective()).unwrap();
         assert_eq!(camera.eye, [2.0, 0.0, 0.0, 1.0]);
-        assert_eq!(camera.forward, [-1.0, 0.0, 0.0, 0.0]);
         let mut ortho = [0.0; 16];
         (ortho[0], ortho[5], ortho[10], ortho[15]) = (1.0, 1.0, -0.02, 1.0);
         let camera = Camera::new(&world_to_view, &ortho).unwrap();
@@ -328,7 +327,7 @@ mod tests {
         let m = [
             0.0, 2.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0,
         ];
-        let i = Instance::new(&m, false).unwrap();
+        let i = Instance::new(&m, false, 0).unwrap();
         let p = [1.0, 1.0, 0.0, 1.0];
         let world: [f64; 3] = std::array::from_fn(|r| dot(i.world[r], p));
         // Row vector p·M: (1, 1, 0) goes to (0 - 1, 2 + 0, 0) + (1, 2, 3).
@@ -434,7 +433,7 @@ mod tests {
     fn mirroring_and_left_handed_reverse_the_winding() {
         let mut mirror = translate(0.0, 0.0, 0.0);
         mirror[0] = -1.0;
-        let flip = |m: &[f64; 16], left| Instance::new(m, left).unwrap().flags[0];
+        let flip = |m: &[f64; 16], left| Instance::new(m, left, 0).unwrap().flags[0];
         assert_eq!(flip(&translate(0.0, 0.0, 0.0), false), 0);
         assert_eq!(flip(&mirror, false), 1);
         assert_eq!(flip(&translate(0.0, 0.0, 0.0), true), 1);
@@ -442,6 +441,6 @@ mod tests {
         // A transform that flattens the mesh draws nothing.
         let mut flat = mirror;
         flat[0] = 0.0;
-        assert_eq!(Instance::new(&flat, false), None);
+        assert_eq!(Instance::new(&flat, false, 0), None);
     }
 }

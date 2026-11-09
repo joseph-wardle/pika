@@ -26,6 +26,8 @@ struct Vertex
     float3 bitangent;
     // Whether the mesh's winding is reversed (src/transform.rs Instance).
     uint flip;
+    // The bits of the light-link collections the mesh is in (src/link.rs).
+    uint link;
 };
 
 float3 load3(float *values, uint i)
@@ -55,5 +57,6 @@ Vertex pull(uint vertex, uint slot)
     o.tangent = float3(dot(m[0].xyz, tangent.xyz), dot(m[1].xyz, tangent.xyz), dot(m[2].xyz, tangent.xyz));
     o.bitangent = float3(dot(m[0].xyz, bitangent), dot(m[1].xyz, bitangent), dot(m[2].xyz, bitangent));
     o.flip = asuint(m[6].x) & 1;
+    o.link = asuint(m[6].y);
     return o;
 }

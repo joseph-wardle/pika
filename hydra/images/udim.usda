@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a MaterialX surface that emits a two-tile UDIM set (bake/fixtures/udim.<UDIM>.exr) sampled at its st, which spans tiles 1001 to 1003 and 1011 to 1013: 1001 and 1012 hold ramps, the rest are missing and read black. Its st shifts at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

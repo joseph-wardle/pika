@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Two native instances of a bed holding a point instancer of pyramids: Hydra nests the point instancer in the native one. One bed moves at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a MaterialX surface that emits the vector3 sample of bake/fixtures/mips.exr, whose stored levels tell themselves apart, at an st scaled so that a pixel covers 2√2 texels at frame 1 (level 1.5) and 4√2 at frame 2 (level 2.5), under the default periodic modes."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

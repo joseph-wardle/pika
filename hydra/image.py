@@ -44,10 +44,41 @@ What the reference encodes:
   transpose of the world matrix and normalized. A face's front is the side
   its moved geometric normal points to, reversed when left-handed; seen from
   behind, the normal is negated.
-- Color is the material's albedo under the headlight plus its emission,
-  alpha 1: albedo × max(0, n · toward the eye), the normal turned toward
-  the eye first as MaterialX's BSDFs turn it, under a headlight of π along
-  the camera's axis (src/view.rs), so a facing surface shows its albedo.
+- Color is the material's albedo under the lights plus its emission,
+  alpha 1: albedo / π × the sum over the lights of their illuminance ×
+  max(0, n · toward the light), the normal turned toward the eye first as
+  MaterialX's BSDFs turn it. The lights are the stage's visible
+  DistantLights and SphereLights: UsdLux's intensity is radiance in nits,
+  times 2^exposure and the color, of which a disk of angular radius θ
+  gives π sin²θ (1 at angle 0, a parallel light), divided by that when
+  normalized; a distant light shines down its -z axis. A sphere's radius
+  is scaled by its transform, which must scale evenly, and normalized its
+  radiance is divided by its area, 4π r²; at distance d from its centre it
+  subtends an angle α with sin α = r / d and gives π sin²α times its
+  radiance, toward its centre. That holds only while the whole sphere is
+  above the surface's horizon or below it, so a surface inside it or
+  seeing it cross the horizon is refused. A rect, disk or cylinder light
+  gives what Lambert's formula does over its outline as each hit sees it,
+  its radiance times the illuminance vector, which is exact while the
+  outline is wholly above the surface's horizon, so a surface seeing it
+  cross is refused. The outline is a rect's corners, a disk's 64-gon of its
+  area, or the silhouette of a cylinder's side: the tangents from the hit,
+  joined at each end by the arc between them on the hit's side, 64 points
+  each. Normalized, the radiance is divided by its world-space area,
+  including a cylinder's side but not its ends; a rect or disk lights only
+  the side its -z axis points to; a cylinder's y and z axes must scale
+  evenly. Most scenes sublayer light.usda's π lux, under which a
+  facing surface shows its albedo. Hosts add no camera light (husk's
+  --headlight none, usdrecord's --disableCameraLight), but to the
+  CAMERA_LIT scenes, which have no lights: a distant light of the host's
+  intensity, angle 0.53 and not normalized, along the camera's axis
+  (husk's at the first frame it renders, usdrecord's at each). A
+  stage drawn without lights is black: Pika has no headlight of its own.
+  Pika's threshold takes up to 0.01 lux off each light, 5.7e-4 of a clay
+  surface's color, so a scene lights a surface with two at most. A light
+  lights only the meshes its lightLink collection includes; Pika links
+  per mesh, so a scene's instances must share their prototype's links.
+  Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -87,11 +118,13 @@ import sys
 import MaterialX as mx
 import numpy as np
 import OpenImageIO as oiio
-from pxr import CameraUtil, Gf, Tf, Usd, UsdGeom, UsdImagingGL, UsdRender, UsdShade
+from pxr import CameraUtil, Gf, Sdf, Tf, Usd, UsdGeom, UsdImagingGL, UsdLux, UsdRender, UsdShade
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
+# The layers the scenes sublayer, which are not scenes themselves.
+LAYERS = ("settings.usda", "light.usda")
 # The delegate's default texture cap (hydra/plugin.cpp): none.
 CAP = float("inf")
 # The scenes whose texture the cap shrinks, which husk must warn of in one
@@ -119,7 +152,12 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
             "cage drawn on subdivided meshes", "boundary rules of the interior",
-            "purposes ignored", "culled by box centre", "headlight from the eye",
+            "purposes ignored", "culled by box centre", "camera light from the eye",
+            "usdview's camera light in every host", "camera light held as the other host holds it",
+            "Pika's old headlight", "intensity read as lux",
+            "sphere light read as a point of its intensity", "sphere light's scale ignored",
+            "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
+            "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -138,7 +176,7 @@ CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided
 ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
                              [-0.130256, 1.140805, -0.010548],
                              [-0.024003, -0.128969, 1.152972]])
-# A material's closed form: its albedo under the headlight, its emission, the
+# A material's closed form: its albedo under π lux, its emission, the
 # image (file, address modes, primvar, colour space) whose sample it emits, if any, the
 # image whose sample perturbs its normal, if any, and the angle from facing
 # the eye within which the form holds (None: all).
@@ -160,15 +198,24 @@ LIT = {
 }
 # What a host hands Pika: the purposes it draws, whether a material whose
 # surface shader the shader registry does not know arrives with its network,
-# and whether the render settings prim's Pika settings arrive (see the
-# module's doc).
-Host = collections.namedtuple("Host", "purposes delivers_unknown settings")
-HUSK = Host(("default", "render"), True, True)
+# whether the render settings prim's Pika settings arrive, the intensity of
+# its camera light and whether it holds the light still while the camera
+# moves (see the module's doc).
+Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
+# husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and
+# husk holds it where the camera was at the first frame it renders.
+HUSK = Host(("default", "render"), True, True, 57225, True)
+# usdview's and usdrecord's, from HdxTaskController. Houdini's viewport sends
+# 37397.64, in every lighting mode, but cannot run on Xvnc.
+USDRECORD_CAMERA_LIGHT = 15000
+CAMERA_LIGHT_ANGLE = 0.53
+# The scenes rendered under the host's camera light; the rest with it off.
+CAMERA_LIT = {"headlit"}
 
 
 def usdrecord_host():
     scene_index = Tf.GetEnvSetting("USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX")
-    return Host(("default", "proxy"), scene_index, False)
+    return Host(("default", "proxy"), scene_index, False, USDRECORD_CAMERA_LIGHT, False)
 
 
 def meshes(stage, time, purposes, control=None):
@@ -905,6 +952,188 @@ def triangles(stage, time, host, control=None):
     return out
 
 
+def illuminance(intensity, exposure, color, angle, normalize, control):
+    """What a distant light gives a surface facing it (see the module's
+    doc)."""
+    theta = min(max(math.radians(angle) / 2, 0), math.pi)
+    sin2 = math.sin(theta) ** 2
+    if theta == 0:
+        received = size = 1.0
+    elif theta <= math.pi / 2:
+        received = size = math.pi * sin2
+    else:
+        received, size = math.pi, (2 - sin2) * math.pi
+    if not normalize:
+        size = 1.0
+    if control == "intensity read as lux":
+        received = size = 1.0
+    return tuple(np.array(color) * intensity * 2 ** exposure * received / size)
+
+
+def sphere(api, radius, time, p, control):
+    """The direction toward a sphere light from each hit at `p`, the
+    illuminance it gives a surface there facing it and the sine of the
+    angle it subtends (see the module's doc)."""
+    m = UsdGeom.Xformable(api.GetPrim()).ComputeLocalToWorldTransform(time)
+    scales = [np.linalg.norm([m[r][0], m[r][1], m[r][2]]) for r in range(3)]
+    if max(scales) - min(scales) > 1e-6 * max(scales):
+        raise ValueError(f"{api.GetPath()} is scaled unevenly: an ellipsoid has no closed form")
+    r = radius * (1 if control == "sphere light's scale ignored" else scales[0])
+    toward = np.array(m.ExtractTranslation()) - p
+    d = np.linalg.norm(toward, axis=1)
+    if (d <= r).any():
+        raise ValueError(f"a surface is inside {api.GetPath()}")
+    radiance = np.array(api.GetColorAttr().Get(time)) * api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
+    if api.GetNormalizeAttr().Get(time):
+        radiance = radiance / (4 * np.pi * r ** 2)
+    sin2 = (r / d) ** 2
+    if control == "sphere light read as a point of its intensity":
+        sin2 = 1 / (np.pi * d ** 2)
+    return toward / d[:, None], np.pi * sin2[:, None] * radiance, r / d
+
+
+def lambert(corners, c):
+    """The illuminance vector of an outline of radiance 1, `corners` (hits,
+    corners, 3) relative to each hit, pointing toward `c`, the light's
+    centre relative to each hit (Lambert's formula)."""
+    b = np.roll(corners, -1, axis=1)
+    k = np.cross(corners, b)
+    s = np.linalg.norm(k, axis=2)
+    gamma = np.arctan2(s, np.einsum("nkj,nkj->nk", corners, b))
+    e = 0.5 * np.einsum("nk,nkj->nj", np.where(s > 0, gamma / np.where(s > 0, s, 1), 0), k)
+    e[dot(e, c) < 0] *= -1
+    return e
+
+
+def area(prim, time, p, n, control):
+    """The direction a rect, disk or cylinder light shines on each hit at
+    `p`, facing `n`, and the illuminance it gives a surface there facing
+    that way (see the module's doc)."""
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    x, y, z, o = (np.array([m[r][0], m[r][1], m[r][2]]) for r in range(4))
+    cylinder = prim.IsA(UsdLux.CylinderLight)
+    if control == "area lights turned 90°":
+        # A cylinder about its z axis, keeping its axis as far from a
+        # surface below it as it was; a rect or disk about its y.
+        k = z if cylinder else y
+        k = k / np.linalg.norm(k)
+        x, y, z = (np.cross(k, v) + np.dot(k, v) * k for v in (x, y, z))
+    if control == "area lights' scale ignored":
+        x, y, z = (v / np.linalg.norm(v) for v in (x, y, z))
+    api = UsdLux.LightAPI(prim)
+    radiance = np.array(api.GetColorAttr().Get(time)) * api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
+    c = o - p
+    lit = np.ones(len(p), bool)
+    if cylinder:
+        light = UsdLux.CylinderLight(prim)
+        length, radius = light.GetLengthAttr().Get(time), light.GetRadiusAttr().Get(time)
+        ys, zs = np.linalg.norm(y), np.linalg.norm(z)
+        if abs(ys - zs) > 1e-6 * ys:
+            raise ValueError(f"{prim.GetPath()} scales y and z unevenly: an elliptic cylinder has no outline here")
+        r, half = radius * ys, x * length / 2
+        size = 2 * np.pi * r * length * np.linalg.norm(x)
+        shown = size / np.pi
+        axis = x / np.linalg.norm(x)
+        out = np.outer(dot(c, axis), axis) - c
+        rho = np.linalg.norm(out, axis=1)
+        lit = rho > r
+        out /= rho[:, None]
+        t = np.arccos(np.clip(r / rho, -1, 1))[:, None] * np.linspace(1, -1, 64)
+        arc = r * (np.cos(t)[..., None] * out[:, None] + np.sin(t)[..., None] * np.cross(axis, out)[:, None])
+        corners = np.concatenate([(c + half)[:, None] + arc, ((c - half)[:, None] + arc)[:, ::-1]], axis=1)
+        emitted = np.ones(len(p))
+    else:
+        if prim.IsA(UsdLux.RectLight):
+            light = UsdLux.RectLight(prim)
+            w, h = light.GetWidthAttr().Get(time), light.GetHeightAttr().Get(time)
+            outline = [(a * w / 2, b * h / 2) for a, b in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+            size = w * h * np.linalg.norm(np.cross(x, y))
+        else:
+            r = UsdLux.DiskLight(prim).GetRadiusAttr().Get(time)
+            # The regular 64-gon of the disk's area.
+            k = 64
+            s = r * math.sqrt(2 * math.pi / (k * math.sin(2 * math.pi / k)))
+            outline = [(s * math.cos(2 * math.pi * i / k), s * math.sin(2 * math.pi * i / k)) for i in range(k)]
+            size = math.pi * r ** 2 * np.linalg.norm(np.cross(x, y))
+        shown = size
+        corners = c[:, None] + np.array([a * x + b * y for a, b in outline])
+        front = np.cross(x, y)
+        front *= -np.sign(np.dot(front, z)) / np.linalg.norm(front)
+        # The cosine at the light of the direction to each hit.
+        emitted = np.clip(dot(-c, front) / np.linalg.norm(c, axis=1), 0, None)
+        if control != "area lights lit from both sides":
+            lit = emitted > 0
+    if api.GetNormalizeAttr().Get(time):
+        radiance = radiance / size
+    e = lambert(corners, c)
+    if control == "area lights read as points":
+        d = np.linalg.norm(c, axis=1)
+        e = c * (shown * emitted / d ** 3)[:, None]
+    e[~lit] = 0
+    seen = lit & (dot(e, n) > 0)
+    if (np.einsum("nkj,nj->nk", corners, n)[seen] < 0).any():
+        raise ValueError(f"a surface sees {prim.GetPath()} cross its horizon: only a whole outline has a closed form")
+    magnitude = np.linalg.norm(e, axis=1)
+    direction = np.where(magnitude[:, None] > 0, e / np.where(magnitude > 0, magnitude, 1)[:, None], n)
+    return direction, magnitude[:, None] * radiance, 0
+
+
+AREA = (UsdLux.RectLight, UsdLux.DiskLight, UsdLux.CylinderLight)
+
+
+def links(prim, paths, control):
+    """Which hits' meshes, by the hits' prim `paths`, the light's lightLink
+    collection includes."""
+    if control == "light links ignored":
+        return np.ones(len(paths), bool)
+    query = UsdLux.LightAPI(prim).GetLightLinkCollectionAPI().ComputeMembershipQuery()
+    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(paths)}
+    return np.array([included[path] for path in paths], bool)
+
+
+def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
+    """Each light as the direction toward it, one for every hit or one
+    per hit, the illuminance it gives a surface facing it, likewise, and
+    the sine of the angle it subtends, 0 but for a sphere (see the
+    module's doc). `axis` is the direction the host's camera light shines;
+    `p` holds the hits, `n` their normals, turned toward the eye, and
+    `paths` their prims' paths. A light gives the hits it is not linked to
+    nothing, and is refused only over those it is."""
+    found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
+    for prim in found:
+        if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
+            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant, sphere, rect, disk and cylinder lights have a closed form")
+    if not found and lit:
+        light = toward if control == "camera light from the eye" else -axis
+        intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
+        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control), 0)]
+    if not found and control == "Pika's old headlight":
+        return [(-axis, (np.pi,) * 3, 0)]
+    out = []
+    for prim in found:
+        if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
+            continue
+        api = UsdLux.LightAPI(prim)
+        on = links(prim, paths, control)
+        if prim.IsA(UsdLux.SphereLight):
+            given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
+        elif any(prim.IsA(t) for t in AREA):
+            given = area(prim, time, p[on], n[on], control)
+        else:
+            m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+            z = np.array([m[2][0], m[2][1], m[2][2]])
+            if control == "lights shining up their z axis":
+                z = -z
+            e = illuminance(api.GetIntensityAttr().Get(time), api.GetExposureAttr().Get(time),
+                            api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
+                            api.GetNormalizeAttr().Get(time), control)
+            given = (z / np.linalg.norm(z), e, 0)
+        d, e, sin = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.zeros(len(p))
+        d[on], e[on], sin[on] = given
+        out.append((d, e, sin))
+    return out
+
+
 def frustum(stage, time, width, height, focal, policy):
     settings = UsdRender.Settings(stage.GetPrimAtPath(SETTINGS))
     camera_path = settings.GetCameraRel().GetTargets()[0]
@@ -915,10 +1144,12 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, host, lowered, control=None):
+def reference(stage, time, width, height, host, lowered, lit, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
+    held = host.holds_camera_light != (control == "camera light held as the other host holds it")
+    axis = np.array((frustum(stage, FRAMES[0], width, height, focal, policy) if held else f).ComputeViewDirection())
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
@@ -1005,14 +1236,19 @@ def reference(stage, time, width, height, host, lowered, control=None):
     # before lighting.
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
-    light = toward if control == "headlight from the eye" else -np.array(f.ComputeViewDirection())
-    lambert = np.clip(dot(facing, light), 0.0, 1.0)[:, None]
+    shine = np.zeros((len(p), 3))
+    paths = [tris[k]["face"][0] for k in i]
+    for d, e, sin in lights(stage, time, axis, toward, p, facing, paths, host, lit, control):
+        cos = dot(facing, d)
+        if (abs(cos) < sin).any():
+            raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")
+        shine += np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
     albedo = np.array([l.albedo for l in looks])[i]
     emission = np.array([l.emission for l in looks])[i]
-    color = np.c_[albedo * lambert + emission, np.ones(len(p))]
+    color = np.c_[albedo * shine + emission, np.ones(len(p))]
     color[:, :3] += sampled("image")[0]
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
@@ -1169,8 +1405,9 @@ def husk(scene, out):
     log = os.path.join(out, f"{name}.husk.log")
     env = budget(name)
     env["PIKA_STATS"] = os.path.join(out, f"{name}.husk.stats")
+    headlight = [] if name in CAMERA_LIT else ["--headlight", "none"]
     with open(log, "w") as f:
-        subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur",
+        subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur", *headlight,
                         "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=env)
@@ -1196,8 +1433,9 @@ def blurred(stats, name):
 def usdrecord(scene, out, width):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
+    off = [] if name in CAMERA_LIT else ["--disableCameraLight"]
     with open(log, "w") as f:
-        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera",
+        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off,
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
                         "--frames", f"{FRAMES[0]}:{FRAMES[-1]}",
                         scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
@@ -1209,9 +1447,10 @@ def references(scene, width, height, host):
     """The reference and each control's, for each frame, of the scene at
     `scene`: a path, which a process pool can be handed."""
     stage = Usd.Stage.Open(scene)
-    lowered = os.path.splitext(os.path.basename(scene))[0] in BUDGET
+    name = os.path.splitext(os.path.basename(scene))[0]
+    lowered, lit = name in BUDGET, name in CAMERA_LIT
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, lowered, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in FRAMES}
 
 
 def differs(stage, host):
@@ -1273,7 +1512,7 @@ def main():
     out = sys.argv[1]
     record = sys.argv[2:] == ["usdrecord"]
     os.makedirs(out, exist_ok=True)
-    scenes = sorted(os.path.join(SCENES, s) for s in os.listdir(SCENES) if s != "settings.usda")
+    scenes = sorted(os.path.join(SCENES, s) for s in os.listdir(SCENES) if s not in LAYERS)
     stages = {s: Usd.Stage.Open(s) for s in scenes}
     sizes = {s: tuple(UsdRender.Settings(stages[s].GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get())
              for s in scenes}
@@ -1288,7 +1527,7 @@ def main():
             # usdrecord takes the image's height from the camera's aspect.
             shape = job.result()[0][FRAMES[0]]["color"].shape
             host = usdrecord_host()
-            if shape[:2] != sizes[s][::-1] or differs(stages[s], host):
+            if shape[:2] != sizes[s][::-1] or differs(stages[s], host) or os.path.basename(s)[:-5] in CAMERA_LIT:
                 recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
         failures = []
         changed = set()

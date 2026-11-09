@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Meshes the cull pass must keep although their box centres are out of view: a wall whose points move at frame 2 to cross the right edge, a floor crossing the near plane with its centre behind the camera, and an instance of a Catmull-Clark card crossing the left edge. Also a cube that moves from behind the camera into view, and card instances in view, off to the right (one moving into view at frame 2) and behind the camera."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

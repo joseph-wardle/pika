@@ -9,6 +9,7 @@ mesh /world/quad
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology loop rightHanded
     face_vertex_counts 4
     face_vertex_indices 0 1 2 3
@@ -30,6 +31,7 @@ mesh /world/quad
     0 0 1 0
     0 0 0 1
   material ""
+  categories []
   topology loop rightHanded
     face_vertex_counts 3 3
     face_vertex_indices 0 1 2 0 2 3

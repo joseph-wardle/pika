@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "The textured quad, its material reading the ramp through a primvar named perfuv instead of st, which is authored too, at other values: the mesh must carry the primvar its material names."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

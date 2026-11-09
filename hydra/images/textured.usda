@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "A quad facing the camera, bound to a MaterialX surface that emits the uv ramp (bake/fixtures/ramp.exr) sampled at its st, which runs past the image on every side and clamps. Its st shifts at frame 2."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1

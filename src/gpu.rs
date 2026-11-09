@@ -265,14 +265,17 @@ impl Instance {
             .queue_priorities(&priorities)];
         // Dynamic rendering, synchronization2 and buffer device addresses are
         // mandatory in Vulkan 1.3. The rest are optional, but every desktop
-        // GPU has them. Independent blend lets the prepass and the material
+        // GPU has them. Scalar block layout is how slangc lays out what a
+        // pointer reads, and how `repr(C)` lays out the structs written for
+        // it: a float3 after a float3 sits at offset 12. Independent blend lets the prepass and the material
         // pass each write some of the same attachments; the textures are
         // block compressed.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
-        let mut vulkan12 =
-            vk::PhysicalDeviceVulkan12Features::default().buffer_device_address(true);
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
+            .buffer_device_address(true)
+            .scalar_block_layout(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
@@ -292,7 +295,8 @@ impl Instance {
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
                     "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
-                 drawIndirectFirstInstance, independentBlend and textureCompressionBC.",
+                 drawIndirectFirstInstance, independentBlend, textureCompressionBC and \
+                 scalarBlockLayout.",
                     info.name
                 )
             })?;

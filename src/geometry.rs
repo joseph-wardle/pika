@@ -29,6 +29,7 @@ use ash::vk;
 
 use crate::commands::Commands;
 use crate::gpu::{self, Buffer};
+use crate::link::Links;
 use crate::need::{self, Footprint};
 use crate::smooth::{self, Smooth};
 use crate::store::{
@@ -1381,6 +1382,7 @@ fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mu
 /// material's.
 fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawTables {
     let instancers = by_path(store);
+    let links = Links::new(store);
     let materials: HashMap<&str, u64> = (store.materials().iter())
         .map(|(&id, m)| (m.path.as_str(), id))
         .collect();
@@ -1404,7 +1406,7 @@ fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawT
         let (mesh, range) = (&store.meshes()[&id], &ranges[&id]);
         let first = t.instances.len();
         t.instances
-            .extend(mesh_instances(&instancers, mesh, range, tags));
+            .extend(mesh_instances(&instancers, &links, mesh, range, tags));
         if t.instances.len() == first {
             continue;
         }
@@ -1529,12 +1531,13 @@ fn patch(
     tags: &[String],
 ) -> Option<Patch> {
     let instancers = by_path(store);
+    let links = Links::new(store);
     let mut instances = Vec::new();
     for id in &moved.transforms {
         let Some(range) = ranges.get(id) else {
             continue;
         };
-        let moved = mesh_instances(&instancers, &store.meshes()[id], range, tags);
+        let moved = mesh_instances(&instancers, &links, &store.meshes()[id], range, tags);
         let rows = rows.get(id).map_or(&[][..], Vec::as_slice);
         if moved.len() != rows.first().map_or(0, |r| r.instances.len()) {
             return None;
@@ -1574,6 +1577,7 @@ fn patch_uploads<'a>(p: &'a Patch, d: &Draws) -> Vec<Upload<'a>> {
 /// not fit together, with a warning.
 fn mesh_instances(
     instancers: &HashMap<&str, &Instancer>,
+    links: &Links,
     mesh: &Mesh,
     range: &Range,
     tags: &[String],
@@ -1600,8 +1604,9 @@ fn mesh_instances(
             }
         },
     };
+    let link = links.mesh(mesh);
     (matrices.iter())
-        .filter_map(|m| Instance::new(m, topology.left_handed))
+        .filter_map(|m| Instance::new(m, topology.left_handed, link))
         .collect()
 }
 
@@ -1649,6 +1654,7 @@ mod tests {
             instancing: None,
             material: None,
             render_tag: None,
+            categories: None,
         }
     }
 

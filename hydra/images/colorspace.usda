@@ -1,7 +1,7 @@
 #usda 1.0
 (
     doc = "Five strips facing the camera, each emitting an image sampled at its st, which shifts at frame 2 and clamps: the sixteen greys of bake/fixtures/greys.jpg as a color3 declared srgb_texture, declared nothing (auto: sRGB for 8 bits) and declared raw, then as a vector3 declared nothing (read as it is: the auto rule is for colour), and bake/fixtures/acescg.exr, eight colours stored in ACEScg primaries, declared acescg. The first two strips show one ramp of greys, the third and fourth a lighter one, the fifth the colours in Rec.709."
-    subLayers = [@settings.usda@]
+    subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
     metersPerUnit = 1
