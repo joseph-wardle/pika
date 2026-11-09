@@ -44,7 +44,7 @@ grep -qx '#include "frame.slang"' "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not read the frame through shaders/frame.slang"
 ! grep -q "u_viewPosition;" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage declares the eye in the material's block"
-grep -q "incident_light(light_index, P, N)" "$OUT/network/pixel.slang" ||
+grep -q "while (lights.next(light_index))" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not run Pika's light loop"
 ! grep -qE "LightData|sampleLightSource|numActiveLightSources" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage holds MaterialX's light code"

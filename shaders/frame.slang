@@ -39,11 +39,6 @@ uint2 tile(float3 P)
     return view->tiles[xy.y * grid.x + xy.x];
 }
 
-// The lights that may reach P.
-uint light_count(float3 P)
-{
-    return tile(P).y;
-}
 
 // The illuminance vector at P of a rect, disk or cylinder of radiance 1: a
 // surface there with normal N gets dot(N, it), exactly while the light is
@@ -113,19 +108,65 @@ float3 illuminance_vector(Light light, float3 P)
     return 0.5 * (dot(sum, c) < 0 ? -sum : sum);
 }
 
-// Whether light light_index of P's tile lights a mesh in the light-link
-// collections of mask `link`: one linked to everything, or to one of them
-// (src/link.rs).
-bool linked(uint light_index, float3 P, int link)
+// The lights that light P, on a mesh in the light-link collections of mask
+// `link`, one by one: the loop's whole view of which lights there are, so
+// that how they are found changes this file alone. Its tile lists those that
+// may reach P's pixel anywhere in depth; the rest are skipped here, before
+// the BSDF runs, where they give exactly 0.
+struct Lights
 {
-    uint bit = view->lights[view->tile_lights[tile(P).x + light_index]].link;
-    return (bit & uint(link)) == bit;
+    float3 P;
+    uint link;
+    // The tile's slots in tile_lights still to walk.
+    uint next_slot;
+    uint end_slot;
+
+    // Writes the next light's index in view->lights, or returns false.
+    [mutating]
+    bool next(out uint light_index)
+    {
+        while (next_slot < end_slot)
+        {
+            light_index = view->tile_lights[next_slot++];
+            if (lit_by(view->lights[light_index], P, link))
+                return true;
+        }
+        light_index = 0;
+        return false;
+    }
 }
 
-// What light light_index of P's tile gives P, on a surface with normal N.
+Lights lights_at(float3 P, int link)
+{
+    uint2 t = tile(P);
+    Lights lights;
+    lights.P = P;
+    lights.link = uint(link);
+    lights.next_slot = t.x;
+    lights.end_slot = t.x + t.y;
+    return lights;
+}
+
+// Whether P, on a mesh in the collections of mask `link`, is lit by `light`.
+// It must be linked to everything or to one of them (src/link.rs). Past its
+// reach its illuminance has faded to 0, and a rect or disk lights only the
+// side cross(u, v) points to (illuminance_vector gives 0 behind it).
+bool lit_by(Light light, float3 P, uint link)
+{
+    if ((light.link & link) != light.link)
+        return false;
+    if (light.shape == DISTANT)
+        return true;
+    float3 d = P - light.position;
+    if (dot(d, d) >= light.reach * light.reach)
+        return false;
+    return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
+}
+
+// What light light_index gives P, on a surface with normal N.
 Incident incident_light(uint light_index, float3 P, float3 N)
 {
-    Light light = view->lights[view->tile_lights[tile(P).x + light_index]];
+    Light light = view->lights[light_index];
     Incident incident;
     if (light.shape == DISTANT)
     {
