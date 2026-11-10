@@ -39,15 +39,14 @@ uint2 tile(float3 P)
     return view->tiles[xy.y * grid.x + xy.x];
 }
 
-// The illuminance vector at P of a rect, disk or cylinder of radiance 1: a
-// surface there with normal N gets dot(N, it), exactly while the light is
+// The illuminance vector of a rect, disk or cylinder of radiance 1 at c
+// from P: a surface at P with normal N gets dot(N, it), exactly while the light is
 // wholly above the surface's horizon. It is Lambert's formula over the
 // light's outline as P sees it, a polygon of up to 8 corners: a disk's
 // matches its area, and a cylinder's follows its silhouette (src/light.rs
 // area).
-float3 illuminance_vector(Light light, float3 P)
+float3 illuminance_vector(Light light, float3 c)
 {
-    float3 c = light.position - P;
     float3 corners[8];
     uint n = 8;
     if (light.shape == CYLINDER)
@@ -159,7 +158,7 @@ Lights lights_at(float3 P, int link)
     uint2 t = tile(P);
     Lights lights;
     lights.P = P;
-    lights.link = uint(link);
+    lights.link = asuint(link);
     lights.next_slot = t.x;
     lights.end_slot = t.x + t.y;
     return lights;
@@ -209,7 +208,7 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     // cosine wants for diffuse light; specular takes it as a point's.
     float3 c = light.position - P;
     float3 e = dot(c, c) >= light.far * light.far ? far_illuminance_vector(light, c)
-                                                  : illuminance_vector(light, P);
+                                                  : illuminance_vector(light, c);
     float magnitude = length(e);
     incident.direction = magnitude > 0 ? e / magnitude : N;
     incident.illuminance = light.illuminance * max(magnitude - light.fade, 0);

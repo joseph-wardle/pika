@@ -649,8 +649,7 @@ mod tests {
     }
 
     /// `shaders/frame.slang`'s illuminance_vector.
-    fn illuminance_vector(light: &Light, p: [f32; 3]) -> [f32; 3] {
-        let c = add(light.position, p, -1.0);
+    fn illuminance_vector(light: &Light, c: [f32; 3]) -> [f32; 3] {
         let (u, v) = (light.u, light.v);
         let corners: Vec<[f32; 3]> = match light.shape {
             CYLINDER => {
@@ -722,7 +721,7 @@ mod tests {
             let c = add(light.position, p, -1.0);
             let e = match dot(c, c) >= light.far * light.far {
                 true => far_illuminance_vector(light, c),
-                false => illuminance_vector(light, p),
+                false => illuminance_vector(light, c),
             };
             let magnitude = dot(e, e).sqrt();
             if magnitude == 0.0 {
@@ -1073,14 +1072,14 @@ mod tests {
                     continue;
                 }
                 let distance = far + (light.reach - far).max(0.0) * random.next(0.0, 1.0).powi(3);
-                let p = add(light.position, d, -distance / length);
-                let c = add(light.position, p, -1.0);
+                let c = d.map(|v| v * distance / length);
                 let miss = add(
-                    illuminance_vector(light, p),
+                    illuminance_vector(light, c),
                     far_illuminance_vector(light, c),
                     -1.0,
                 );
-                worst = worst.max(light.illuminance[0] * dot(miss, miss).sqrt() / THRESHOLD);
+                worst =
+                    worst.max(brightest(light.illuminance) * dot(miss, miss).sqrt() / THRESHOLD);
             }
         }
         (worst, points)
