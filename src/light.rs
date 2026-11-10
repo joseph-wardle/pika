@@ -105,19 +105,7 @@ impl Light {
     /// centre's distance d, so its illuminance vector is under
     /// area / (d - bound)². The loop takes `THRESHOLD` / radiance off it,
     /// which loses that much and ends the light where the bound falls to
-    /// it.
-    ///
-    /// Past `far` the loop reads it as a point at its centre showing its
-    /// projected area. That point's illuminance vector misses Lambert's
-    /// polygon's by a share falling as area × bound² / d⁴ for a rect or
-    /// disk, and area × bound / d³ for a cylinder, whose outline's arcs
-    /// converge more slowly. `far` is where area × bound² / (d - bound)⁴,
-    /// or 0.5 × area × bound / (d - bound)³, falls to `THRESHOLD` /
-    /// radiance, constants chosen so that the miss
-    /// `area_lights_read_as_points_past_their_far` samples stays under
-    /// `THRESHOLD`. That bounds the illuminance vector, so a diffuse
-    /// surface's error, not a sharp specular lobe's. Nearer than twice the
-    /// bound, which was not sampled, it is never a point.
+    /// it. Past `far` the loop reads it as a point (`far`).
     #[allow(clippy::too_many_arguments)]
     fn area(
         shape: u32,
@@ -131,24 +119,40 @@ impl Light {
     ) -> Self {
         let brightest = brightest(radiance);
         let shown = brightest * area / THRESHOLD;
-        let far = match shape {
-            CYLINDER => (0.5 * shown * bound).cbrt(),
-            _ => (shown * bound * bound).sqrt().sqrt(),
-        };
         Self {
             position: centre,
             radius,
             illuminance: radiance,
-            reach: bound + (brightest * area / THRESHOLD).sqrt(),
+            reach: bound + shown.sqrt(),
             u,
             shape,
             v,
             fade: THRESHOLD / brightest,
             link: 0,
-            far: (bound + far).max(2.0 * bound),
+            far: far(shape, shown, bound),
             pad: [0; 2],
         }
     }
+}
+
+/// Where a rect, disk or cylinder of `shape`, within `bound` of its centre,
+/// becomes a point at its centre showing its projected area, `shown` being
+/// its area × radiance / `THRESHOLD`. That point's illuminance vector
+/// misses Lambert's polygon's by a share falling as area × bound² / d⁴ for
+/// a rect or disk, and area × bound / d³ for a cylinder, whose outline's
+/// arcs converge more slowly. It is where area × bound² / (d - bound)⁴, or
+/// 0.5 × area × bound / (d - bound)³, falls to `THRESHOLD` / radiance,
+/// constants chosen so that the miss
+/// `area_lights_read_as_points_past_their_far` samples stays under
+/// `THRESHOLD`. That bounds the illuminance vector, so a diffuse surface's
+/// error, not a sharp specular lobe's. Nearer than twice the bound, which
+/// was not sampled, a light is never a point.
+fn far(shape: u32, shown: f32, bound: f32) -> f32 {
+    let beyond = match shape {
+        CYLINDER => (0.5 * shown * bound).cbrt(),
+        _ => (shown * bound * bound).powf(0.25),
+    };
+    (bound + beyond).max(2.0 * bound)
 }
 
 fn brightest(c: [f32; 3]) -> f32 {
