@@ -1,6 +1,5 @@
-//! The JSON `slangc -reflection-json` writes, read into a tree. Only what
-//! a shader's reflection uses: objects, lists, strings, numbers and the
-//! three keywords, with no escapes beyond `\"` and `\\`.
+//! The JSON `slangc -reflection-json` writes: objects, lists, strings, numbers and the three
+//! keywords, with no escapes beyond `\"` and `\\`.
 
 #[derive(Debug, PartialEq)]
 pub enum Json {

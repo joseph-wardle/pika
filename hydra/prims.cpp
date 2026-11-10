@@ -36,12 +36,9 @@ const float *xy(VtVec2fArray const &values) {
     return reinterpret_cast<const float *>(values.cdata());
 }
 
-// The level every subdivision surface is refined to. It is part of Pika's
-// look, so the host's complexity setting (HdDisplayStyle's refineLevel) does
-// not change it.
+// Part of Pika's look, so the host's complexity setting (refineLevel) does not change it.
 constexpr int refine_level = 1;
 
-// The arrays a pika_stencils points to.
 struct Stencils {
     std::vector<uint32_t> offsets;
     std::vector<int32_t> indices;
@@ -52,25 +49,19 @@ struct Stencils {
     }
 };
 
-// The arrays a pika_refined points to.
 struct Refined {
     std::vector<int32_t> counts, indices, holes;
     Stencils stencils;
 };
 
-// The arrays a pika_refined_texcoord points to, and the values its stencils
-// are over.
 struct RefinedTexcoord {
     std::vector<GfVec2f> values;
     std::vector<int32_t> indices;
     Stencils stencils;
 };
 
-// Refines `topology` uniformly with OpenSubdiv, through the factory Storm
-// uses, so USD's subdivision tags read as they do there, with a face-varying
-// channel per topology in `fvar`. Null when the topology is invalid, which
-// OpenSubdiv does not check, or OpenSubdiv refuses it (a Loop mesh with a
-// quad, say).
+// Through the factory Storm uses, so USD's subdivision tags read as they do there. Null when
+// the topology is invalid, which OpenSubdiv does not check, or OpenSubdiv refuses it.
 PxOsdTopologyRefinerSharedPtr refine(HdMeshTopology const &topology,
                                      std::vector<VtIntArray> const &fvar) {
     using namespace OpenSubdiv;
@@ -83,7 +74,6 @@ PxOsdTopologyRefinerSharedPtr refine(HdMeshTopology const &topology,
     return refiner;
 }
 
-// The stencils of the refined level's `count` values interpolated in `mode`.
 // False when OpenSubdiv's table does not cover them.
 bool stencils(OpenSubdiv::Far::TopologyRefiner const &refiner,
               OpenSubdiv::Far::StencilTableFactory::Mode mode, int count, Stencils &out) {
@@ -109,8 +99,6 @@ bool stencils(OpenSubdiv::Far::TopologyRefiner const &refiner,
     return true;
 }
 
-// The refined faces and the refined points' stencils of `topology`. False
-// when OpenSubdiv refuses it.
 bool refine(HdMeshTopology const &topology, Refined &out) {
     using namespace OpenSubdiv;
     PxOsdTopologyRefinerSharedPtr refiner = refine(topology, {});
@@ -139,12 +127,8 @@ struct CornerHash {
     }
 };
 
-// Welds a face-varying primvar's values by point and value (bitwise): the
-// distinct values, and the one each corner reads, a face-varying topology
-// for OpenSubdiv. It makes the primvar continuous across an edge whose
-// faces agree on it and a seam where they do not, the reading of Houdini's
-// subdivision, Karma and Blender; Storm keeps every corner apart, which
-// interpolates each cage face on its own.
+// Welds by point and value (bitwise), so the primvar is continuous where faces agree and
+// seamed where not, as Houdini, Karma and Blender read it; Storm keeps every corner apart.
 void weld(VtIntArray const &corners, VtVec2fArray const &values, std::vector<GfVec2f> &welded,
           VtIntArray &indices) {
     std::unordered_map<std::array<uint32_t, 3>, int32_t, CornerHash> seen;
@@ -159,11 +143,8 @@ void weld(VtIntArray const &corners, VtVec2fArray const &values, std::vector<GfV
     }
 }
 
-// Refines a subdivided mesh's texcoord with its faces, so each refined
-// corner reads a refined value: a vertex or varying texcoord through the
-// points' stencils, a face-varying one through its welded values' under the
-// mesh's faceVaryingLinearInterpolation. False when OpenSubdiv refuses the
-// mesh, as it then refused its topology.
+// A face-varying texcoord refines through its welded values, under the mesh's
+// faceVaryingLinearInterpolation.
 bool refine_texcoord(HdMeshTopology const &topology, HdInterpolation interpolation,
                      VtVec2fArray const &values, RefinedTexcoord &out) {
     using namespace OpenSubdiv;
@@ -244,8 +225,7 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     }
     if (bits & HdChangeTracker::DirtyMaterialId) {
         SdfPath material = delegate->GetMaterialId(GetId());
-        // Kept on the rprim for PikaMaterial::Sync to find the meshes bound
-        // to it.
+        // Kept for PikaMaterial::Sync to find the meshes bound to it.
         SetMaterialId(material);
         _pika.report(pika_mesh_material(renderer, _id, material.GetText()), path + " material");
     }
@@ -341,7 +321,6 @@ bool PikaMesh::Binds(SdfPath const &material) const {
 
 bool PikaMesh::_FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
                             HdInterpolation &interpolation) const {
-    // The interpolations a mesh primvar can have.
     static const HdInterpolation interpolations[] = {
         HdInterpolationConstant, HdInterpolationUniform, HdInterpolationVarying,
         HdInterpolationVertex,   HdInterpolationFaceVarying,
@@ -497,8 +476,7 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
         _SyncPrimvars(delegate, renderer);
-    // Pika links lights per mesh (src/link.rs), so it ignores categories
-    // that differ between instances.
+    // Pika links lights per mesh, so it ignores categories that differ between instances.
     static std::atomic<bool> warned{false};
     if (bits & HdChangeTracker::DirtyCategories) {
         for (VtArray<TfToken> const &c : delegate->GetInstanceCategories(GetId())) {
@@ -575,8 +553,7 @@ PikaMaterial::~PikaMaterial() {
         _pika.report(pika_material_free(renderer, _id), "removing material " + GetId().GetString());
 }
 
-// Flattens a parameter's value into `param`; false for a type Pika has no
-// use for.
+// False for a type Pika has no use for.
 static bool flatten(VtValue const &value, pika_param &param) {
     auto floats = [&](float const *data, size_t count) {
         param.kind = "float";
@@ -634,8 +611,7 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     if (resource.IsHolding<HdMaterialNetworkMap>())
         network = HdConvertToHdMaterialNetwork2(resource.UncheckedGet<HdMaterialNetworkMap>());
 
-    // The flat arrays borrow every string from `network`, which outlives
-    // the call.
+    // The flat arrays borrow every string from `network`, which outlives the call.
     std::vector<pika_node> nodes;
     std::vector<pika_connection> connections;
     std::vector<std::vector<pika_param>> params(network.nodes.size());
@@ -665,11 +641,9 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     bool dirty = false;
     if (!_pika.report(pika_material_network(renderer, _id, &flat, &dirty), path + " network"))
         return;
-    // Hydra tells no mesh that its material's network changed, so the
-    // meshes bound to it, whole or by a subset, fetch their texcoord again
-    // here. Marking them dirty instead does not reach them: with scene
-    // index emulation on, the bits go through the emulation scene index,
-    // which drops them on USD 25 and the custom bits too on USD 26.
+    // Hydra tells no mesh its material's network changed, so the bound meshes refetch here.
+    // Marking them dirty does not reach them: the emulation scene index drops the bits on USD 25,
+    // and the custom bits too on USD 26.
     if (!dirty)
         return;
     HdRenderIndex &index = delegate->GetRenderIndex();
@@ -695,8 +669,7 @@ PikaLight::~PikaLight() {
         _pika.report(pika_light_free(renderer, _id), "removing light " + GetId().GetString());
 }
 
-// A light's input as `T`, or UsdLux's fallback when the host hands over
-// none.
+// UsdLux's fallback when the host hands over none.
 template <typename T>
 static T light_param(HdSceneDelegate *delegate, SdfPath const &id, TfToken const &name,
                      T fallback) {
@@ -735,9 +708,8 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     std::copy_n(color.data(), 3, params.color);
     params.normalize = light_param(delegate, id, HdLightTokens->normalize, false);
     params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
-    // treatAsPoint is a hint Pika need not take: above a surface's horizon a
-    // sphere lights it exactly as a point of the same power (src/light.rs).
-    // A cylinder's treatAsLine is a hint too.
+    // treatAsPoint and treatAsLine are hints Pika need not take: above a surface's horizon a
+    // sphere lights it exactly as a point of the same power.
     params.radius = light_param(delegate, id, HdLightTokens->radius, 0.5f);
     params.width = light_param(delegate, id, HdLightTokens->width, 1.0f);
     params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);

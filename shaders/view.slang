@@ -1,8 +1,5 @@
-// One view, as its passes read it: the camera, the lights, src/geometry.rs's
-// buffers and the view's own. src/view.rs writes it each frame into a
-// buffer whose address is a pass's one push constant: push constants are
-// 128 bytes at minimum, which the camera and the addresses alone filled,
-// so what lights and materials add goes here.
+// One view as its passes read it, at the one push constant's address: push constants
+// guarantee only 128 bytes, which the camera and addresses alone filled.
 
 #pragma once
 
@@ -11,10 +8,8 @@ static const uint SMOOTH = 0xffffffff;
 // A vertex's texcoord index when its mesh has none.
 static const uint NONE = 0xffffffff;
 
-// A vertex's tangent in 4 bytes: x, y and z as signed 10-bit fractions of
-// 511 from the low bits up, and its handedness, 1 or -1, in the top two
-// (Vulkan's A2B10G10R10_SNORM). 10 bits turn a unit vector by at most 0.1
-// degree, under what a normal map's 8-bit texels resolve.
+// x, y, z as signed 10-bit fractions of 511 from the low bits, handedness in the top two
+// (A2B10G10R10_SNORM); 10 bits turn a unit vector by at most 0.1°, under 8-bit normal maps.
 uint pack_tangent(float4 t)
 {
     uint3 xyz = uint3(int3(round(clamp(t.xyz, -1, 1) * 511))) & 0x3ff;
@@ -35,33 +30,18 @@ static const uint RECT = 2;
 static const uint DISK = 3;
 static const uint CYLINDER = 4;
 
-// A light as the light loop reads it (shaders/frame.slang, src/light.rs).
+// A light as src/light.rs writes it, field for field.
 struct Light
 {
-    // The unit direction toward a distant light, or the centre of another.
     float3 position;
-    // A sphere's or cylinder's radius.
     float radius;
-    // The illuminance a distant light gives a surface facing it, or a sphere
-    // at unit distance from its centre; the radiance of a rect, disk or
-    // cylinder.
     float3 illuminance;
-    // How far it reaches: infinite for a distant light. The loop skips it
-    // beyond, where fade has taken its illuminance to 0.
     float reach;
-    // A rect's half sides or the axes of a disk's polygon, which light the
-    // side cross(u, v) points to; half a cylinder's axis.
     float3 u;
     uint shape;
     float3 v;
-    // What a sphere's 1 / d² or an area light's illuminance vector loses so
-    // that it ends at its reach.
     float fade;
-    // Its light-link collection's bit, or 0 when it lights every mesh
-    // (src/link.rs).
     uint link;
-    // How far off a rect, disk or cylinder gives what a point does to within
-    // the threshold (src/light.rs Light::area): infinite for another light.
     float far;
     uint2 pad;
 };
@@ -77,40 +57,30 @@ struct View
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
     Light *lights;
-    // Per TILE-pixel tile, row by row: the first of its lights in
-    // tile_lights and how many (src/light.rs Tiles).
+    // Per tile, row by row: the first of its tile_lights and how many.
     uint2 *tiles;
-    // Indices into lights.
     uint *tile_lights;
-    // The target's width and height in pixels.
     uint2 extent;
     float *points;
     float *normals;
-    // One per point (src/geometry.rs Layout).
     float *smooth;
     uint2 *vertices;
     // Per texcoord value, and the texcoord index (or NONE) per vertex.
     float *texcoord;
     uint *vertex_texcoord;
-    // Per vertex: its tangent and handedness, packed (shaders/tangent.slang).
     uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
-    // Each instance's draw record.
     uint *owners;
     // Per record: the low corner of its mesh's box, then the high one.
     float *boxes;
-    // vk::DrawIndexedIndirectCommand, 5 per record: index_count,
-    // instance_count, first_index, vertex_offset, first_instance. The cull
-    // pass counts the instances it keeps.
+    // vk::DrawIndexedIndirectCommand, 5 per record; the cull pass counts instance_count.
     Atomic<uint> *records;
     // The instances the cull pass kept, at each record's first instance.
     uint *visible;
-    // The instances and triangles drawn.
     Atomic<uint> *drawn;
 };
 
-// A world-space position in the view's clip space.
 float4 project(View *view, float4 world)
 {
     return float4(dot(view->view_projection[0], world), dot(view->view_projection[1], world),

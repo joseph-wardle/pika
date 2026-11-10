@@ -1,5 +1,3 @@
-# Edits the sun's inputs and hides it, turns its parent, removes the moon,
-# widens the bulb and lengthens the tube.
 from pxr import Sdf, UsdGeom
 stage.GetAttributeAtPath("/world/rig/sun.inputs:intensity").Set(2.0)
 stage.GetAttributeAtPath("/world/rig/sun.inputs:normalize").Set(True)

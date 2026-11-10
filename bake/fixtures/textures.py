@@ -55,9 +55,8 @@ import OpenImageIO as oiio
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SWATCH = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)]
-# Neighbouring blocks of these differ by at most 0.2 in linear light: the
-# GPU blends texels with 8-bit weights, so a larger step misses
-# hydra/image.py's tolerance where two blocks blend.
+# Neighbouring blocks differ by at most 0.2 in linear light: the GPU's 8-bit blend
+# weights miss hydra/image.py's tolerance at larger steps.
 GREYS = [17 * i for i in range(16)]
 WRAPPED = [51, 102, 153, 204]
 COLORS = [(240, 60, 60), (220, 100, 60), (200, 140, 60), (180, 180, 60),

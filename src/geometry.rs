@@ -1,27 +1,5 @@
-//! The GPU copy of the store's meshes: one device-local buffer per kind of
-//! data, with a range in each for every mesh, and the instances and draw
-//! records the mesh pass reads.
-//!
-//! The layout (the vertex table, the triangle indices, the stencils, the
-//! smooth normal pass's table and every mesh's ranges) is rebuilt only when a
-//! mesh is added, removed or remodelled. A playing frame writes only the
-//! points, normals and texcoords that moved, reruns the stencil and smooth
-//! normal passes on the meshes whose points moved, the stencil pass on
-//! the texcoords that did, the tangent pass on the vertices of meshes
-//! whose points, normals or texcoord did, and rewrites the instances of
-//! meshes whose transform moved. It rewrites every instance and draw record when a
-//! visibility, render tag or instancer changes, or a moved mesh's instance
-//! count does. Each mesh is one draw record per part (its faces in no
-//! GeomSubset, then each subset's, which the layout orders its triangles
-//! by), of the instances of it that the cull pass finds in a view; its box,
-//! in its own space, is recomputed when its points move.
-//!
-//! A subdivision surface the delegate refined is drawn as its refined faces,
-//! whose points the stencil pass writes from its cage, and whose texcoord it
-//! writes from the cage's values likewise. A mesh's normals are
-//! its authored ones only when it is not subdivided, as USD specifies; Hydra
-//! hands them over on subdivided meshes too. Otherwise they are its smooth
-//! normals, which the smooth normal pass computes from the points drawn.
+//! The GPU copy of the store's meshes, laid out afresh only when a mesh is
+//! remodelled; a playing frame writes only what moved.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -45,91 +23,72 @@ const SMOOTH: u32 = u32::MAX;
 /// A vertex's texcoord index when its mesh has none.
 const NONE: u32 = u32::MAX;
 
-/// Where one mesh's data lives in the shared buffers.
 struct Range {
     first_point: u64,
-    /// The points drawn: a subdivision surface's refined points.
+    /// Refined points when refined.
     point_count: u32,
-    /// Where a refined mesh's cage points go; `None` when its points are
-    /// drawn as they are.
+    /// `None` when its points are drawn as they are.
     first_cage: Option<u64>,
     first_normal: u64,
     normal_count: usize,
-    /// The texcoord values drawn: a refined mesh's refined values.
+    /// Refined values when refined.
     first_texcoord: u64,
     texcoord_count: usize,
-    /// Where a refined mesh's cage texcoord values go; `None` when its
-    /// values are drawn as they are.
+    /// `None` when its values are drawn as they are.
     first_cage_texcoord: Option<u64>,
     first_vertex: i32,
     vertex_count: u32,
     index_count: u32,
-    /// The mesh's triangles by material, in order, none empty.
+    /// By material, in order, none empty.
     parts: Vec<Part>,
-    /// How far a refined point can lie outside its cage's box, as a fraction
-    /// of the box's size on each axis (see `stencils`); 0 when not refined.
+    /// The fraction of its cage box's size a refined point can lie outside it;
+    /// 0 when not refined.
     spread: f32,
-    /// Its texcoord's units per unit of its own space (`need::density`),
-    /// recomputed when its texcoord moves, not its points.
+    /// Texcoord units per unit of its own space; recomputed when its texcoord moves.
     density: Option<f32>,
 }
 
-/// The triangles of the faces of one mesh bound to one material: those in
-/// no GeomSubset, or one subset's.
+/// One material's triangles of a mesh: its faces in no GeomSubset, or one subset's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Part {
-    /// The subset's index in the topology; `None` for the faces in none.
+    /// `None` for the faces in no subset.
     subset: Option<usize>,
     first_index: u32,
     index_count: u32,
 }
 
-/// What changes only when a mesh is remodelled, and the buffers sized by it.
 struct Layout {
     ranges: BTreeMap<u64, Range>,
     point_count: u32,
     vertex_count: u32,
-    /// The refined points, which come first in `points`, so refined point
-    /// p's stencil is the pth.
+    /// They come first in `points`, so refined point p's stencil is the pth.
     refined_count: u32,
-    /// xyz per point drawn, every mesh's in turn.
     points: Buffer,
-    /// xyz per cage point of the refined meshes.
     cage: Buffer,
     stencils: Stencils,
-    /// xyz per normal, as authored: per point, face, corner or mesh.
     normals: Buffer,
-    /// xyz per point: its smooth normal, or zero when its mesh's normals are
-    /// authored.
+    /// Zero where its mesh's normals are authored.
     smooth: Buffer,
     adjacency: Adjacency,
-    /// The refined texcoord values, which come first in `texcoord`, so
-    /// refined value t's stencil is the tth.
+    /// They come first in `texcoord`, so refined value t's stencil is the tth.
     refined_texcoord_count: u32,
-    /// xy per texcoord value drawn, every mesh's in turn: a refined mesh's
-    /// refined values, else its authored ones, per point or corner.
     texcoord: Buffer,
-    /// xy per cage value of the refined meshes' texcoords.
     cage_texcoord: Buffer,
     texcoord_stencils: Stencils,
-    /// Point and normal index (or `SMOOTH`) per unique triple of them and
-    /// the texcoord index, every mesh's in turn.
+    /// Point and normal index (or `SMOOTH`) per unique point, normal and texcoord.
     vertices: Buffer,
-    /// The texcoord index (or `NONE`) per vertex.
+    /// Texcoord index (or `NONE`) per vertex.
     vertex_texcoord: Buffer,
-    /// The tangent and handedness per vertex, packed into 4 bytes by the
-    /// tangent pass (`shaders/view.slang`).
+    /// Tangent and handedness packed in 4 bytes (`shaders/view.slang`).
     tangents: Buffer,
     vertex_adjacency: Adjacency,
-    /// Three vertex indices per triangle, counted from the mesh's first vertex.
+    /// Counted from the mesh's first vertex.
     indices: Buffer,
 }
 
-/// Refined values' stencils, which the stencil pass sums.
 struct Stencils {
-    /// Where each refined value's stencil starts, and the end of the last.
+    /// One per refined value, then the end of the last stencil.
     offsets: Buffer,
-    /// The cage value and weight of each stencil entry.
     indices: Buffer,
     weights: Buffer,
 }
@@ -155,34 +114,27 @@ impl Stencils {
     }
 }
 
-/// Each point's corners, whose faces the smooth normal pass sums, or each
-/// vertex's, whose triangles the tangent pass sums.
 struct Adjacency {
-    /// Where each point's (or vertex's) corners start, and the end of the
-    /// last one's.
+    /// One per point (or vertex), then the end of the last one's corners.
     offsets: Buffer,
-    /// Per corner, grouped by point: the previous and next point of its
-    /// face; grouped by vertex: its position among the triangle indices.
+    /// Per corner, grouped by point: the previous and next point of its face;
+    /// grouped by vertex: its position in the triangle indices.
     corners: Buffer,
 }
 
-/// One of a drawn mesh's draw records and its rows of the instances.
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
     record: u32,
     instances: std::ops::Range<usize>,
 }
 
-/// Each drawn mesh's rows, one per part.
 type Rows = BTreeMap<u64, Vec<Row>>;
 
-/// The instances and their draw records.
 #[derive(Default)]
 struct DrawTables {
     instances: Vec<Instance>,
-    /// Each instance's draw record.
     owners: Vec<u32>,
-    /// Each record's box: its mesh's low corner, then its high one.
+    /// Low corner, then high, in the mesh's own space.
     boxes: Vec<[f32; 6]>,
     /// No record has instances until the cull pass counts a view's.
     records: Vec<vk::DrawIndexedIndirectCommand>,
@@ -190,42 +142,35 @@ struct DrawTables {
     rows: Rows,
 }
 
-/// The consecutive draw records of the meshes bound to one material, which
-/// the material pass draws with one multi-draw.
+/// Consecutive records of one material, drawn with one multi-draw.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Group {
-    /// The store's material id; none for meshes with no material bound.
+    /// `None` for meshes with no material bound.
     pub material: Option<u64>,
     pub first: u32,
     pub count: u32,
 }
 
-/// The instances and their draw records, sized to fit.
 struct Draws {
     instances: Buffer,
     owners: Buffer,
     boxes: Buffer,
     records: Buffer,
-    /// What the buffers hold, kept on the host for the need estimate
-    /// (`footprints`); a patch writes both.
+    /// Kept on the host for `footprints`; a patch writes both.
     tables: DrawTables,
-    /// The render tags they were written for.
     tags: Vec<String>,
 }
 
-/// The buffers the mesh pass reads, and the passes that write them.
 pub struct Geometry {
     layout: Option<Layout>,
     draws: Option<Draws>,
-    /// The host buffers the frame's uploads are copied from, kept while
-    /// frames keep uploading and dropped by the first that does not.
+    /// Kept while frames keep uploading, dropped by the first that does not.
     staging: Vec<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
     tangent: Tangent,
 }
 
-/// The addresses and buffers the cull and mesh passes bind.
 pub struct Bound {
     pub points: vk::DeviceAddress,
     pub normals: vk::DeviceAddress,
@@ -238,22 +183,18 @@ pub struct Bound {
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
-    /// The draw records without instances, which each view copies.
+    /// Without instances; each view copies them.
     pub records: vk::Buffer,
     pub count: u32,
     pub instance_count: u32,
 }
 
-/// What one frame's `update` wrote.
 pub struct Update {
     pub bytes: u64,
-    /// The layout was rebuilt.
     pub layout: bool,
-    /// The instances and draw records were rewritten.
     pub draws: bool,
 }
 
-/// One copy into a device-local buffer.
 struct Upload<'a> {
     bytes: &'a [u8],
     buffer: vk::Buffer,
@@ -261,7 +202,6 @@ struct Upload<'a> {
 }
 
 impl<'a> Upload<'a> {
-    /// A whole table into the buffer sized for it.
     fn table(bytes: &'a [u8], buffer: &Buffer) -> Self {
         Self {
             bytes,
@@ -288,12 +228,8 @@ impl Geometry {
         })
     }
 
-    /// Records into `commands` the uploads of what moved, the refined
-    /// points, smooth normals and tangents of meshes whose points moved,
-    /// and barriers making them visible to the mesh pass, which draws the
-    /// meshes of render `tags` (all of them when there are none), marking
-    /// each step every frame, run or not. No GPU work may be pending:
-    /// buffers are replaced and the staging buffers rewritten.
+    /// Empty `tags` draws every tag. Marks every step each frame, run or not.
+    /// No GPU work may be pending: buffers are replaced and staging rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -366,7 +302,6 @@ impl Geometry {
         })
     }
 
-    /// Lays the store's meshes out afresh and returns the tables to upload.
     fn rebuild(&mut self, device: &gpu::Device, store: &Store) -> Result<Tables, String> {
         // Free the old buffers before allocating their replacements.
         self.layout = None;
@@ -375,10 +310,6 @@ impl Geometry {
         Ok(tables)
     }
 
-    /// Records the stencil pass over the refined texcoord values and points
-    /// in `rewrite`, the smooth normal pass over its points and the tangent
-    /// pass over its vertices, each with the barrier its readers need and
-    /// a mark after it.
     fn refine(
         &self,
         device: &gpu::Device,
@@ -433,7 +364,6 @@ impl Geometry {
         commands.mark("tangent")
     }
 
-    /// The buffers to draw from, once `update` has run.
     pub fn bound(&self) -> Option<Bound> {
         let (layout, draws) = (self.layout.as_ref()?, self.draws.as_ref()?);
         Some(Bound {
@@ -454,15 +384,11 @@ impl Geometry {
         })
     }
 
-    /// The draw records by material, once `update` has run.
     pub fn groups(&self) -> &[Group] {
         self.draws.as_ref().map_or(&[], |d| &d.tables.groups)
     }
 
-    /// Where each material's meshes are drawn through `view_projection`
-    /// into `size` pixels, by the store's material id, once `update` has
-    /// run: an instance outside the view adds nothing, and a material
-    /// with none inside has no entry.
+    /// An instance outside the view adds nothing; a material with none inside has no entry.
     pub fn footprints(
         &self,
         view_projection: &[[f32; 4]; 4],
@@ -507,7 +433,6 @@ impl Geometry {
         footprints
     }
 
-    /// The bytes of every buffer, the staging buffers on the host side.
     pub fn memory(&self) -> gpu::Memory {
         let layout = self.layout.iter().flat_map(|l| {
             [
@@ -543,7 +468,6 @@ impl Geometry {
     }
 }
 
-/// The uploads of a rebuilt layout's tables.
 fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 13] {
     [
         Upload::table(bytes(&t.vertices), &l.vertices),
@@ -571,8 +495,6 @@ fn table_uploads<'a>(t: &'a Tables, l: &Layout) -> [Upload<'a>; 13] {
     ]
 }
 
-/// The upload of a mesh's points: to its cage when it is refined, else to
-/// the points drawn.
 fn point_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Upload<'a> {
     let (buffer, first) = match range.first_cage {
         Some(first) => (layout.cage.raw, first),
@@ -585,7 +507,6 @@ fn point_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Upload<'a
     }
 }
 
-/// The upload of a mesh's normals, when it is drawn with its authored ones.
 fn normal_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<Upload<'a>> {
     if range.normal_count == 0 {
         return None;
@@ -598,8 +519,6 @@ fn normal_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<U
     })
 }
 
-/// The upload of a mesh's texcoord values, when it has one: to the cage
-/// values when it is refined, else to the values drawn.
 fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option<Upload<'a>> {
     let t = texcoord(mesh).filter(|t| !t.values.is_empty())?;
     let (buffer, first) = match range.first_cage_texcoord {
@@ -613,14 +532,10 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
     })
 }
 
-/// The largest staging buffer: the least `maxMemoryAllocationSize` Vulkan
-/// requires, so no driver rejects the size. A scene's first upload is its
-/// whole layout, which can pass the 4 GiB NVIDIA reports.
+/// The least `maxMemoryAllocationSize` Vulkan requires; a first upload can pass
+/// the 4 GiB NVIDIA reports.
 const STAGING: u64 = 1 << 30;
 
-/// Writes `copies` into the staging buffers, replaced when they do not fit
-/// or [`reuses`] says they keep too much, and records them into `cb` with a
-/// barrier making them visible to every pass.
 fn upload(
     device: &gpu::Device,
     staging: &mut Vec<Buffer>,
@@ -660,8 +575,7 @@ fn upload(
             dst_offset: c.offset + p.start,
             size: p.size,
         };
-        // SAFETY: `cb` is recording outside any rendering, both buffers
-        // were created on `d`, and the region lies inside each.
+        // SAFETY: `cb` records outside rendering; both buffers are `d`'s and hold the region.
         unsafe { d.cmd_copy_buffer(cb, s.raw, c.buffer, &[region]) };
     }
     let barrier = vk::MemoryBarrier2::default()
@@ -688,17 +602,12 @@ fn upload(
     Ok(total)
 }
 
-/// Whether staging buffers of `staged` bytes take a frame's `total` bytes
-/// without keeping more than twice them. A scene's first upload is
-/// gigabytes of host memory that playback, which moves a frame's points at
-/// a time, must not keep, while reusing the buffers between its own frames
-/// saves allocating them each.
+/// Never keeps more than twice a frame's bytes: playback must not keep a first
+/// upload's gigabytes, but reusing between its own frames saves allocating.
 fn reuses(staged: u64, total: u64) -> bool {
     total <= staged && staged <= 2 * total
 }
 
-/// `size` bytes of copy `copy` from `start`, staged at `at` in buffer
-/// `buffer`.
 struct Piece {
     copy: usize,
     start: u64,
@@ -707,8 +616,7 @@ struct Piece {
     size: u64,
 }
 
-/// Lays copies of `lengths` bytes end to end in staging buffers of `chunk`
-/// bytes, splitting a copy where a buffer ends.
+/// Splits a copy where a staging buffer ends.
 fn pieces(lengths: &[u64], chunk: u64) -> Vec<Piece> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -729,37 +637,32 @@ fn pieces(lengths: &[u64], chunk: u64) -> Vec<Piece> {
     out
 }
 
-/// The vertex table, triangle indices, stencils and the smooth normal and
-/// tangent passes' tables of every mesh, before upload.
 #[derive(Default)]
 struct Tables {
     vertices: Vec<[u32; 2]>,
     vertex_texcoord: Vec<u32>,
     indices: Vec<u32>,
-    /// One per point, then the end of the last point's corners.
+    /// One per point, then the end of the last one's corners.
     corner_offsets: Vec<u32>,
     corners: Vec<[u32; 2]>,
-    /// One per vertex, then the end of the last vertex's corners.
+    /// One per vertex, then the end of the last one's corners.
     vertex_offsets: Vec<u32>,
-    /// Each corner's position in `indices`, grouped by vertex.
+    /// Each corner's position in `indices`.
     vertex_corners: Vec<u32>,
-    /// The refined points' stencils, and the refined texcoord values'.
     stencils: StencilTables,
     texcoord_stencils: StencilTables,
 }
 
-/// Stencils before upload, their entries counted from the start of the
-/// tables and their cage values from the start of the cage buffer.
+/// Entries count from the tables' start, cage values from the cage buffer's.
 #[derive(Default)]
 struct StencilTables {
-    /// One per refined value, then the end of the last one's stencil.
+    /// One per refined value, then the end of the last stencil.
     offsets: Vec<u32>,
     indices: Vec<u32>,
     weights: Vec<f32>,
 }
 
-/// Lays out every mesh with topology and points, the refined ones first. A
-/// mesh whose data does not fit together is left out, with a warning.
+/// Refined meshes first. A mesh whose data does not fit together is left out, with a warning.
 fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String> {
     let mut ranges = BTreeMap::new();
     let mut tables = Tables::default();
@@ -873,8 +776,6 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
         point_count: points as u32,
         vertex_count: vertices as u32,
         refined_count,
-        // Refined points and texcoord values are written by the stencil
-        // pass, the rest uploaded.
         points: Buffer::device_local(device, points * 12, storage)?,
         cage: Buffer::device_local(device, cage * 12, storage)?,
         stencils: Stencils::new(device, &tables.stencils)?,
@@ -901,9 +802,6 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
     Ok((layout, tables))
 }
 
-/// What the compute passes rewrite: the refined points to sum from their
-/// cages, the points drawn whose smooth normals to recompute, the refined
-/// texcoord values to sum, and the vertices whose tangents to recompute.
 struct Rewrite {
     refined: Vec<std::ops::Range<u32>>,
     points: Vec<std::ops::Range<u32>>,
@@ -911,7 +809,6 @@ struct Rewrite {
     vertices: Vec<std::ops::Range<u32>>,
 }
 
-/// The rewrite for the meshes whose points, normals or texcoord moved.
 fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
     let mut rewrite = Rewrite {
         refined: Vec::new(),
@@ -949,12 +846,10 @@ fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
     rewrite
 }
 
-/// `0..count` as a list of ranges, empty when there is nothing to rewrite.
 fn whole(count: u32) -> Vec<std::ops::Range<u32>> {
     (count > 0).then_some(0..count).into_iter().collect()
 }
 
-/// Makes the compute passes' writes visible to `stage`'s reads.
 fn barrier(device: &gpu::Device, cb: vk::CommandBuffer, stage: vk::PipelineStageFlags2) {
     let barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -970,8 +865,8 @@ fn barrier(device: &gpu::Device, cb: vk::CommandBuffer, stage: vk::PipelineStage
     };
 }
 
-/// The normals a mesh is drawn with, when they are authored and it is not
-/// subdivided.
+/// Authored normals only when not subdivided, as USD specifies; Hydra hands
+/// them over on subdivided meshes too.
 fn authored(mesh: &Mesh) -> Option<&Normals> {
     match (&mesh.topology, &mesh.normals) {
         (Some(t), Some(Some(n))) if t.scheme == Scheme::None => Some(n),
@@ -979,12 +874,10 @@ fn authored(mesh: &Mesh) -> Option<&Normals> {
     }
 }
 
-/// The texcoord a mesh is drawn with, when it has one.
 fn texcoord(mesh: &Mesh) -> Option<&Texcoord> {
     mesh.texcoord.as_ref()?.as_ref()
 }
 
-/// Where a mesh's data starts in each buffer.
 #[derive(Clone, Copy)]
 struct Firsts {
     point: u32,
@@ -994,7 +887,6 @@ struct Firsts {
     cage_texcoord: u32,
 }
 
-/// The faces a mesh is drawn as: its refined ones, or its cage's.
 struct Faces<'a> {
     counts: &'a [i32],
     corners: &'a [i32],
@@ -1002,13 +894,8 @@ struct Faces<'a> {
     points: usize,
 }
 
-/// Appends a mesh's vertex table and its faces but the holes, part by
-/// part, split into triangles by a fan from each face's first corner, its
-/// points' corners, its vertices' corners and, when refined, its stencils
-/// and its texcoord's. A vertex is a unique triple of point, normal and
-/// texcoord, a faceVarying texcoord's corners welded by value; each index
-/// counts from the start of its buffer. Returns the points drawn and the
-/// parts.
+/// A vertex is a unique point, normal and texcoord. Faces fan from their first
+/// corner; holes are left out.
 fn triangulate(
     mesh: &Mesh,
     first: Firsts,
@@ -1106,9 +993,8 @@ fn triangulate(
         None => point_corners(&faces, topology.left_handed, first.point, tables),
     }
 
-    // A faceVarying texcoord's corners agreeing on a value (bitwise, as the
-    // delegate welds a subdivided mesh's) are one vertex, so the tangent
-    // pass sums both sides of the edge; a seam keeps them apart.
+    // Welded by value (bitwise, as the delegate welds), so the tangent pass sums both
+    // sides of an edge; a seam keeps them apart.
     let welded_texcoord: Vec<u32> = match texcoord {
         Some(t) if t.refined.is_none() && t.interpolation == Interpolation::FaceVarying => {
             let mut first_of: HashMap<[u32; 2], u32> = HashMap::new();
@@ -1187,12 +1073,9 @@ fn triangulate(
     Ok((faces.points, parts))
 }
 
-/// The faces drawn (not the holes) in the order of their parts: those in no
-/// subset, then each subset's, a face in two subsets in the first. A
-/// refined face belongs to its cage face's subset: OpenSubdiv's uniform
-/// refinement lists a cage face's children together, in the cage's face
-/// order, one per corner under catmullClark and bilinear and four under
-/// loop.
+/// A face in two subsets goes in the first. OpenSubdiv's uniform refinement lists a
+/// cage face's children together in cage order: one per corner under catmullClark
+/// and bilinear, four under loop.
 fn ordered_faces(
     topology: &Topology,
     faces: &Faces,
@@ -1245,16 +1128,12 @@ fn ordered_faces(
         .collect())
 }
 
-/// Appends each vertex's corners, from the mesh's first vertex and
-/// triangle index on: the positions in the indices of the corners reading
-/// it, which the tangent pass sums the triangles of.
 fn vertex_corners(first_vertex: usize, first_index: usize, tables: &mut Tables) {
     let count = tables.vertices.len() - first_vertex;
     let mut uses = vec![0u32; count];
     for &v in &tables.indices[first_index..] {
         uses[v as usize] += 1;
     }
-    // Where each vertex's next corner goes.
     let mut slot = Vec::with_capacity(count);
     let mut at = tables.vertex_corners.len() as u32;
     for n in uses {
@@ -1270,9 +1149,6 @@ fn vertex_corners(first_vertex: usize, first_index: usize, tables: &mut Tables) 
     }
 }
 
-/// Appends a refined mesh's texcoord stencils, after checking that it was
-/// refined with the mesh (a cage's texcoord must not be) and that its
-/// `corners` each read one of the refined values.
 fn refined_texcoord(
     t: &Texcoord,
     refined: bool,
@@ -1306,8 +1182,6 @@ fn refined_texcoord(
     Ok(())
 }
 
-/// Appends stencils over `cage_count` values, their entries counted from the
-/// start of the tables' and their cage values from `first_cage`.
 fn stencils(
     s: &store::Stencils,
     cage_count: usize,
@@ -1342,12 +1216,8 @@ fn stencils(
     Ok(())
 }
 
-/// How far outside its cage's box a refined point can lie, as a fraction of
-/// the box's size on each axis. A stencil's weights sum to 1, so its point
-/// is the box's high corner less a weighted sum of each cage point's
-/// distance below it: the positive weights pull it inside, and only the
-/// negative ones, which Catmull-Clark gives a vertex of valence 2, push it
-/// out, by at most their sum times the box's size.
+/// Weights sum to 1, so only negative ones (Catmull-Clark at valence 2) push a
+/// refined point outside the cage box, by at most their sum times its size.
 fn spread(refined: &Refined) -> f32 {
     (refined.stencils.offsets.windows(2))
         .map(|w| {
@@ -1361,8 +1231,7 @@ fn spread(refined: &Refined) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// The box around a mesh's cage points, grown by `spread` of its size: the
-/// low corner, then the high one. It holds every point drawn.
+/// Low corner, then high; holds every point drawn.
 fn mesh_box(mesh: &Mesh, spread: f32) -> [f32; 6] {
     let points = mesh.points.as_deref().unwrap_or_default();
     if points.is_empty() {
@@ -1386,17 +1255,14 @@ fn mesh_box(mesh: &Mesh, spread: f32) -> [f32; 6] {
     ]
 }
 
-/// Appends each point's corners, as Hydra's Hd_VertexAdjacency lists them:
-/// the previous and next point of the face, swapped on a left-handed mesh so
-/// the normal faces its front. Hole faces are kept, as Hydra keeps them: a
-/// hole is not drawn, but the surface around it is shaped as if it were.
+/// As Hydra's Hd_VertexAdjacency: swapped on left-handed meshes, hole faces kept
+/// (a hole is not drawn but shapes the surface around it).
 fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mut Tables) {
     let indices = faces.corners;
     let mut uses = vec![0u32; faces.points];
     for &p in indices {
         uses[p as usize] += 1;
     }
-    // Where each point's next corner goes.
     let mut slot = Vec::with_capacity(faces.points);
     let mut at = tables.corners.len() as u32;
     for n in uses {
@@ -1422,10 +1288,7 @@ fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mu
     }
 }
 
-/// One draw record per part of each visible mesh of render `tags` (or of
-/// any, when there are none), with its box and its rows of the instances
-/// it is drawn at, grouped by material: the unbound parts first, then each
-/// material's.
+/// Empty `tags` draws every tag. Grouped by material, the unbound parts first.
 fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawTables {
     let instancers = by_path(store);
     let links = Links::new(store);
@@ -1482,9 +1345,7 @@ fn draws(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> DrawT
     t
 }
 
-/// The store id of the material a part is drawn with: its subset's, or the
-/// mesh's for the faces in no subset and for a subset binding none; `None`
-/// when Hydra has not made it.
+/// A subset binding none uses the mesh's; `None` when Hydra has not made it.
 fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Option<u64> {
     let subset = part
         .subset
@@ -1496,8 +1357,6 @@ fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Op
     path.and_then(|p| materials.get(p).copied())
 }
 
-/// Rewrites every instance and draw record of render `tags` into `slot`,
-/// its buffers replaced when they are too small, for `draw_uploads`.
 fn rewrite(
     device: &gpu::Device,
     store: &Store,
@@ -1536,7 +1395,6 @@ fn rewrite(
     Ok(())
 }
 
-/// The uploads of rewritten draws.
 fn draw_uploads(d: &Draws) -> [Upload<'_>; 4] {
     let t = &d.tables;
     [
@@ -1547,16 +1405,12 @@ fn draw_uploads(d: &Draws) -> [Upload<'_>; 4] {
     ]
 }
 
-/// What a frame writes into draws it keeps: the instances of the meshes
-/// whose transform moved, each with its first row, and the box of each
-/// record whose mesh's points moved.
 struct Patch {
     instances: Vec<(usize, Vec<Instance>)>,
     boxes: Vec<(u32, [f32; 6])>,
 }
 
 impl Patch {
-    /// Writes it into the tables it was made against.
     fn apply(&self, t: &mut DrawTables) {
         for (first, instances) in &self.instances {
             t.instances[*first..first + instances.len()].copy_from_slice(instances);
@@ -1567,8 +1421,7 @@ impl Patch {
     }
 }
 
-/// The patch for the meshes in `moved`. `None` when a mesh's instance count
-/// changed, so the rows no longer fit and every record must be rewritten.
+/// `None` when an instance count changed, so every record must be rewritten.
 fn patch(
     store: &Store,
     ranges: &BTreeMap<u64, Range>,
@@ -1603,7 +1456,6 @@ fn patch(
     Some(Patch { instances, boxes })
 }
 
-/// The uploads of a patch.
 fn patch_uploads<'a>(p: &'a Patch, d: &Draws) -> Vec<Upload<'a>> {
     let instances = p.instances.iter().map(|(first, instances)| Upload {
         bytes: bytes(instances),
@@ -1618,9 +1470,6 @@ fn patch_uploads<'a>(p: &'a Patch, d: &Draws) -> Vec<Upload<'a>> {
     instances.chain(boxes).collect()
 }
 
-/// The instances `mesh` is drawn at in a pass of render `tags`. None when it
-/// is invisible, unsynced, empty or of another tag, or when its instancers do
-/// not fit together, with a warning.
 fn mesh_instances(
     instancers: &HashMap<&str, &Instancer>,
     links: &Links,
@@ -1666,11 +1515,9 @@ fn size<T>(values: &[T]) -> u64 {
     size_of_val(values) as u64
 }
 
-/// The bytes of a slice of plain values: floats, integers and the `repr(C)`
-/// records the shader reads, none of which has padding.
+/// Only for padding-free plain values: floats, integers, the shaders' `repr(C)` records.
 fn bytes<T: Copy>(values: &[T]) -> &[u8] {
-    // SAFETY: every caller's `T` is plain data without padding, so all its
-    // bytes are initialized, and u8 has no alignment requirement.
+    // SAFETY: callers pass padding-free plain data, so every byte is initialized.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), size_of_val(values)) }
 }
 
@@ -1679,7 +1526,6 @@ mod tests {
     use super::*;
     use crate::store::{RefinedTexcoord, Stencils, Subset};
 
-    /// A quad and a triangle sharing an edge, with optional normals.
     fn mesh(scheme: Scheme, normals: Option<Normals>) -> Mesh {
         Mesh {
             path: "/m".into(),
@@ -1733,10 +1579,7 @@ mod tests {
         Ok(t)
     }
 
-    /// Stages copies of `lengths` bytes (each byte naming its copy and
-    /// place) in `chunk`-byte buffers by `pieces`, then copies them out as
-    /// the GPU would, after every write, each piece moved `shift` bytes
-    /// back: whether every copy's bytes came back.
+    /// Whether every copy's bytes come back with each piece moved `shift` bytes back.
     fn round_trips(lengths: &[u64], chunk: u64, shift: u64) -> bool {
         let copies: Vec<Vec<u8>> = (lengths.iter().enumerate())
             .map(|(c, &n)| (0..n).map(|i| (c as u8) << 5 | i as u8).collect())
@@ -1761,8 +1604,6 @@ mod tests {
 
     #[test]
     fn staging_splits_copies_at_buffer_ends() {
-        // Copies shorter than, ending on and spanning several buffers, and
-        // an empty one.
         let lengths = [3, 5, 0, 20, 8, 1];
         let p = pieces(&lengths, 8);
         assert!(p.iter().all(|p| p.size > 0 && p.at + p.size <= 8));
@@ -1775,8 +1616,7 @@ mod tests {
     #[test]
     fn staging_is_kept_only_while_it_fits_closely() {
         assert!(reuses(10, 10) && reuses(20, 10) && reuses(0, 0));
-        // Negative controls: too small, and a first upload's staging kept
-        // for a frame of playback or one with nothing to copy.
+        // Negative controls: too small, kept too large, and nothing to copy.
         assert!(!reuses(9, 10));
         assert!(!reuses(583_000_000, 5_400_000));
         assert!(!reuses(5, 0));
@@ -1785,24 +1625,18 @@ mod tests {
     #[test]
     fn faces_fan_and_vertices_weld() {
         let t = tables(&mesh(Scheme::None, normals(Interpolation::Vertex, 5))).unwrap();
-        // Vertex normals weld to one vertex per point; indices count from
-        // the mesh's first vertex, after the earlier mesh's one.
         assert_eq!(
             t.vertices[1..],
             [[10, 20], [11, 21], [12, 22], [13, 23], [14, 24]]
         );
         assert_eq!(t.indices, [0, 1, 2, 0, 2, 3, 1, 4, 2]);
-        // Authored normals need no smooth normals.
         assert_eq!((t.corner_offsets, t.corners.len()), (vec![0; 5], 0));
 
-        // Face-varying normals keep every corner apart.
         let t = tables(&mesh(Scheme::None, normals(Interpolation::FaceVarying, 7))).unwrap();
         assert_eq!(t.vertices.len() - 1, 7);
         assert_eq!(t.vertices[5..], [[11, 24], [14, 25], [12, 26]]);
-        // Uniform normals split the points the two faces share.
         let t = tables(&mesh(Scheme::None, normals(Interpolation::Uniform, 2))).unwrap();
         assert_eq!(t.vertices.len() - 1, 4 + 3);
-        // Smooth normals are per point, so vertices are points.
         let t = tables(&mesh(Scheme::None, None)).unwrap();
         assert_eq!(t.vertices[1], [10, SMOOTH]);
         assert_eq!(t.vertices.len() - 1, 5);
@@ -1811,14 +1645,11 @@ mod tests {
 
     #[test]
     fn vertex_corners_are_positions_in_the_indices() {
-        // The quad's fan: vertex 0 and 2 are read by both triangles, the
-        // triangle's vertex 4 by one.
         let t = tables(&mesh(Scheme::None, None)).unwrap();
         assert_eq!(t.indices, [0, 1, 2, 0, 2, 3, 1, 4, 2]);
         assert_eq!(t.vertex_offsets, [0, 2, 4, 7, 8]);
         assert_eq!(t.vertex_corners, [0, 3, 1, 6, 2, 4, 8, 5, 7]);
-        // The control: a second mesh's corners count from the start of the
-        // indices, not its own, and its offsets from the earlier corners.
+        // Control: a second mesh's corners count from the start of the indices.
         let mut t = t;
         triangulate(
             &mesh(Scheme::None, None),
@@ -1851,9 +1682,7 @@ mod tests {
         let t = tables(&m).unwrap();
         assert_eq!(t.vertices.len() - 1, 5);
         assert_eq!(t.vertex_texcoord[1..], [40, 41, 42, 43, 44]);
-        // A face-varying texcoord welds by value: the triangle's corners at
-        // points 1 and 2 (corners 4 and 6) read the quad's values there, so
-        // they are the quad's vertices; its own corner at point 4 is new.
+        // A face-varying texcoord welds by value.
         let (a, b, c, d, e) = ([0., 0.], [1., 0.], [1., 1.], [0., 1.], [2., 0.]);
         let mut m = mesh(Scheme::None, normals(Interpolation::Vertex, 5));
         m.texcoord = Some(st(Interpolation::FaceVarying, vec![a, b, c, d, b, e, c]));
@@ -1861,14 +1690,13 @@ mod tests {
         assert_eq!(t.vertices.len() - 1, 5);
         assert_eq!(t.vertex_texcoord[1..], [40, 41, 42, 43, 45]);
         assert_eq!(t.indices, [0, 1, 2, 0, 2, 3, 1, 4, 2]);
-        // The control: a seam, where the triangle reads other values at the
-        // shared points, splits them, as face-varying normals do.
+        // Control: a seam splits the shared points.
         m.texcoord = Some(st(Interpolation::FaceVarying, vec![a, b, c, d, e, e, e]));
         let t = tables(&m).unwrap();
         assert_eq!(t.vertices.len() - 1, 7);
         assert_eq!(t.vertices[5..], [[11, 21], [14, 24], [12, 22]]);
         assert_eq!(t.vertex_texcoord[5..], [44, 44, 44]);
-        // The wrong count is refused, as for normals.
+        // Control: the wrong count is refused.
         let mut m = mesh(Scheme::None, None);
         m.texcoord = Some(st(Interpolation::FaceVarying, vec![[0.5, 0.5]; 5]));
         let error = tables(&m).err().unwrap();
@@ -1880,8 +1708,6 @@ mod tests {
 
     #[test]
     fn refined_texcoords_are_read_through_their_refined_corners() {
-        /// The refined mesh with a texcoord refined with it: two welded
-        /// values, refined into four.
         fn textured() -> Mesh {
             let mut m = refined();
             m.texcoord = Some(Some(Texcoord {
@@ -1901,13 +1727,10 @@ mod tests {
         }
         let t = tables(&textured()).unwrap();
         assert_eq!(t.vertex_texcoord[1..], [40, 41, 42]);
-        // Its stencils are laid out like the points', from the mesh's first
-        // cage value.
         assert_eq!(t.texcoord_stencils.offsets, [0, 1, 2, 4]);
         assert_eq!(t.texcoord_stencils.indices, [50, 51, 50, 51, 51]);
         assert_eq!(t.texcoord_stencils.weights, [1.0, 1.0, 0.5, 0.5, 1.0]);
-        // The controls: a texcoord not refined with its refined mesh, one
-        // refined for a cage, a corner too many and a value too few.
+        // Controls: unrefined on a refined mesh, refined on a cage, extra corner, missing value.
         fn texcoord(m: &mut Mesh) -> &mut Texcoord {
             m.texcoord.as_mut().unwrap().as_mut().unwrap()
         }
@@ -1934,17 +1757,15 @@ mod tests {
         .unwrap();
         assert_eq!(t.vertices[1..3], [[10, SMOOTH], [11, SMOOTH]]);
         assert_eq!(t.corners.len(), 7);
-        // Even when they would not fit.
+        // Ignored on subdivided meshes even when the count is wrong.
         assert!(tables(&mesh(Scheme::Loop, normals(Interpolation::Vertex, 4))).is_ok());
     }
 
     #[test]
     fn corners_follow_hydras_adjacency() {
         let t = tables(&mesh(Scheme::CatmullClark, None)).unwrap();
-        // Points 1 and 2 are on both faces, the others on one.
         assert_eq!(t.corner_offsets, [0, 1, 3, 5, 6]);
         assert_eq!(t.corners[1..5], [[10, 12], [12, 14], [11, 13], [14, 11]]);
-        // Left-handed faces wind the other way.
         let mut m = mesh(Scheme::CatmullClark, None);
         m.topology.as_mut().unwrap().left_handed = true;
         let t = tables(&m).unwrap();
@@ -1959,7 +1780,7 @@ mod tests {
         assert_eq!(t.indices, [0, 1, 2, 0, 2, 3]);
         // The hole's corners still count, as Hydra counts them.
         assert_eq!(t.corners.len(), 7);
-        // The control: the same mesh without its hole draws both faces.
+        // Control: without its hole both faces draw.
         assert_eq!(
             tables(&mesh(Scheme::CatmullClark, None))
                 .unwrap()
@@ -1969,8 +1790,6 @@ mod tests {
         );
     }
 
-    /// The quad and triangle refined into two triangles over four points,
-    /// the second a hole.
     fn refined() -> Mesh {
         let mut m = mesh(Scheme::CatmullClark, None);
         m.topology.as_mut().unwrap().refined = Some(Refined {
@@ -1991,10 +1810,7 @@ mod tests {
         let t = tables(&refined()).unwrap();
         assert_eq!(t.indices, [0, 1, 2]);
         assert_eq!(t.vertices[1..], [[10, SMOOTH], [11, SMOOTH], [12, SMOOTH]]);
-        // Smooth normals come from the refined faces, the hole's included.
         assert_eq!(t.corner_offsets, [0, 1, 3, 5]);
-        // Stencils count their entries after the earlier mesh's two, and
-        // their cage points from the mesh's first cage point.
         assert_eq!(t.stencils.offsets, [0, 2, 3, 5, 6]);
         assert_eq!(t.stencils.indices[2..], [30, 31, 32, 33, 34, 30]);
         assert_eq!(t.stencils.weights.len(), 2 + 6);
@@ -2025,7 +1841,6 @@ mod tests {
         );
     }
 
-    /// Each refined point, as the stencil pass writes it.
     fn refined_points(r: &Refined, cage: &[[f32; 3]]) -> Vec<[f32; 3]> {
         let s = &r.stencils;
         (s.offsets.windows(2))
@@ -2050,8 +1865,7 @@ mod tests {
             [0.0, 2.0, 1.0],
             [2.0, 1.0, 0.0],
         ]);
-        // Point 3's stencil leans on a negative weight, as Catmull-Clark's
-        // does at a vertex of valence 2, and lands outside the cage's box.
+        // Point 3 leans on a negative weight and lands outside the cage's box.
         let r = m.topology.as_mut().unwrap().refined.as_mut().unwrap();
         r.stencils.weights[4..6].copy_from_slice(&[-0.5, 1.5]);
         let r = r.clone();
@@ -2086,7 +1900,6 @@ mod tests {
         1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
-    /// A store of drawn meshes, one per path and render tag, and their ranges.
     fn drawn(meshes: &[(&str, &str)]) -> (Store, BTreeMap<u64, Range>) {
         let mut store = Store::new();
         let mut ranges = BTreeMap::new();
@@ -2145,7 +1958,6 @@ mod tests {
         let ids: Vec<u64> = ranges.keys().copied().collect();
         store.set_material(ids[0], "/mtl/red".into()).unwrap();
         store.set_material(ids[2], "/mtl/red".into()).unwrap();
-        // An unbound mesh, and one bound to a material Hydra has not made.
         store.set_material(ids[1], "/mtl/missing".into()).unwrap();
         let t = draws(&store, &ranges, &[]);
         let group = |material, first, count| Group {
@@ -2154,7 +1966,6 @@ mod tests {
             count,
         };
         assert_eq!(t.groups, [group(None, 0, 1), group(Some(red), 1, 2)]);
-        // The records follow the groups, not the meshes' ids.
         let record = |id| t.rows[&id][0].record;
         assert_eq!([record(ids[1]), record(ids[0]), record(ids[2])], [0, 1, 2]);
         assert_ne!(record(ids[0]), 0);
@@ -2165,7 +1976,6 @@ mod tests {
     fn records_start_empty_and_instances_name_theirs() {
         let (store, ranges) = drawn(&[("/a", "render"), ("/b", "render")]);
         let t = draws(&store, &ranges, &[]);
-        // The cull pass counts each view's instances.
         assert!(t.records.iter().all(|r| r.instance_count == 0));
         assert_eq!(t.owners, [0, 1]);
         assert_eq!(
@@ -2212,8 +2022,6 @@ mod tests {
             first,
             count,
         };
-        // The subset's record is grouped with its material, after the two
-        // unbound ones, and draws its own triangles over the mesh's instance.
         assert_eq!(t.groups, [group(None, 0, 2), group(Some(red), 2, 1)]);
         let record = |r: &vk::DrawIndexedIndirectCommand| (r.first_index, r.index_count);
         let records: Vec<_> = t.records.iter().map(record).collect();
@@ -2221,7 +2029,7 @@ mod tests {
         assert_eq!(t.owners, [0, 1, 2]);
         assert_eq!(t.rows[&ids[0]].len(), 2);
         assert_eq!(t.boxes.len(), 3);
-        // The control: a subset binding no material draws with the mesh's.
+        // Control: a subset binding no material draws with the mesh's.
         store.set_material(ids[0], "/mtl/red".into()).unwrap();
         let mut topology = mesh(Scheme::None, None).topology.unwrap();
         topology.subsets = vec![Subset {
@@ -2265,8 +2073,6 @@ mod tests {
         };
         m.topology.as_mut().unwrap().subsets = vec![subset(vec![0]), subset(vec![0, 1])];
         assert_eq!(faces(&m).unwrap(), [(Some(0), 0), (Some(1), 1)]);
-        // Refined: the quad's four children, then the triangle's three; the
-        // subset of the triangle has the last three, less the hole.
         let mut r = refined();
         let t = r.topology.as_mut().unwrap();
         t.subsets = vec![subset(vec![1])];
@@ -2283,8 +2089,7 @@ mod tests {
                 (Some(0), 6)
             ]
         );
-        // The controls: a face the cage lacks, and refined faces the rule
-        // does not account for.
+        // Controls: a face the cage lacks, and refined faces the rule does not account for.
         r.topology.as_mut().unwrap().subsets = vec![subset(vec![2])];
         assert!(faces(&r).unwrap_err().contains("subset face 2"));
         let t = r.topology.as_mut().unwrap();
@@ -2310,8 +2115,7 @@ mod tests {
         assert_eq!(tables.instances, rewritten);
         assert!(patched.boxes.is_empty());
 
-        // The control: a transform that flattens the mesh drops its instance,
-        // so the rows after it shift.
+        // Control: a flattening transform drops its instance, shifting later rows.
         store.set_transform(ids[1], [0.0; 16]).unwrap();
         let moved = store.take_moved();
         assert!(patch(&store, &ranges, &rows, &moved, &[]).is_none());

@@ -172,9 +172,8 @@ def main(clay, painted, mipped):
         sys.exit(f"engine: the painted cube stayed clay {pixels[-1]} once built: {last}")
     print("engine: the painted cube was clay %s for %d frames, then %s" % (grey, len(pixels), pixels[-1]))
 
-    # Connecting the surface's diffuse colour to the green node changes the
-    # material's structure, so it is built again: meanwhile the cube keeps
-    # its look.
+    # Connecting the diffuse colour to the green node changes the structure, so it is built
+    # again: meanwhile the cube keeps its look.
     red = pixels[-1]
     surface = UsdShade.Shader.Get(stage, "/world/mtl/paint/surface")
     green = UsdShade.Shader.Get(stage, "/world/mtl/paint/green")
@@ -221,9 +220,8 @@ def main(clay, painted, mipped):
     if image != fresh[2]:
         sys.exit("engine: a raise whose read failed did not keep the 2×2 levels")
     print(f"engine: a raise whose read failed kept the cap 2 image, converged in {frames} frames")
-    # Written back in place, as the session reads the file it holds open:
-    # the cap changing releases the hold. Unreleased, it would draw the 2×2
-    # levels, which differ from the cap 4 image (the control above).
+    # Written back in place, as the session reads the file it holds open. Unreleased, it would
+    # draw the 2×2 levels, which differ from the cap 4 image (the control above).
     for path, data in whole.items():
         with open(path, "r+b") as f:
             f.write(data)

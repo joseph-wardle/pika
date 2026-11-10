@@ -1,23 +1,5 @@
-// The generate tool, the one Pika program that links MaterialX; the
-// renderer runs it (src/bake.rs), so MaterialX never loads into the host
-// beside the host's own.
-//
-//   generate <document.mtlx> <out>
-//
-// A material's document (src/material.rs) in, the pixel stage from
-// Houdini's MaterialX Slang generator out, as <out>/pixel.slang, with
-// <out>/surface.slang, the vertex stage that fills what it reads from the
-// renderer's vertices, and <out>/manifest saying what the stage expects of
-// the renderer: its public uniforms with their types and initial values
-// and its textures.
-//
-//   generate libraries
-//
-// Lists what generate reads beyond the document, for the renderer's cache
-// key. The eye and the lights the pixel
-// stage reads come from the renderer's view (shaders/frame.slang), not from
-// the material's block, which holds the public uniforms alone, and the
-// light loop is Pika's: MaterialX's generator supplies the BSDFs alone.
+// The generate tool, run apart from the host so MaterialX never loads beside the host's own.
+// MaterialX supplies the BSDFs; the eye, the lights and the light loop are Pika's.
 
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/Util.h>
@@ -45,7 +27,7 @@ namespace mx = MaterialX;
 
 namespace {
 
-// The Makefile names the Houdini and this directory.
+// HFS and BAKE come from the Makefile.
 const std::string materialx = HFS "/houdini/materialx";
 const std::string bake = BAKE;
 
@@ -72,13 +54,9 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
     return text;
 }
 
-// The vertex stage: pixel.slang's VertexData, filled from the vertex
-// shaders/vertex.slang pulls. Every float2 primvar the surface reads is the
-// mesh's one texcoord: a geomprop it names, or UV0, the texcoord MaterialX's
-// nodes read by default, which is the primvar st, as Storm and Karma read
-// it. The renderer fetches the first primvar a network names, else st
-// (src/material.rs); only the nodedefs say which inputs read UV0, so a
-// surface reading two is refused here.
+// Every float2 primvar the surface reads is the mesh's one texcoord: a geomprop, or
+// UV0, which is st as Storm and Karma read it. Only the nodedefs say which inputs
+// read UV0, so a surface reading two is refused here.
 std::string vertex(mx::ShaderStage const &stage) {
     std::string text = "// Written by bake/generate.cpp: the vertex stage for the pixel stage beside it.\n\n"
                        "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"
@@ -127,14 +105,9 @@ std::string vertex(mx::ShaderStage const &stage) {
     return text + "    return o;\n}\n";
 }
 
-// MaterialX's surface with Pika's light loop in place of its own. The
-// generator is told of no lights (hwMaxActiveLightSources 0), so the pixel
-// stage holds no LightData, light shaders or sampleLightSource; the loop
-// asks shaders/frame.slang for the lights that light P instead. The loop
-// walks frame.slang's Lights rather
-// than the view so that the lights' kinds, lists and culling change
-// frame.slang alone: a change to the text emitted here changes the tool,
-// which re-bakes every texture (src/bake.rs keys both on the tool's bytes).
+// MaterialX's surface with Pika's light loop. The generator is told of no lights;
+// the loop asks frame.slang for them, so lights change frame.slang alone. Editing
+// the text emitted here changes the tool, which re-bakes every texture.
 class Surface : public mx::HwSurfaceNode {
   public:
     static mx::ShaderNodeImplPtr create() { return std::make_shared<Surface>(); }
@@ -142,11 +115,8 @@ class Surface : public mx::HwSurfaceNode {
     void createVariables(mx::ShaderNode const &node, mx::GenContext &context,
                          mx::Shader &shader) const override {
         mx::HwSurfaceNode::createVariables(node, context, shader);
-        // The mesh's light-link mask, an int because MaterialX has no uint
-        // (Slang does not interpolate ints): the vertex stage writes asint of
-        // it and frame.slang's lights_at reads the bits back. Only the loop
-        // reads it, and Slang drops an input nothing reads, which leaves the
-        // vertex stage's output unmatched.
+        // An int, as MaterialX has no uint (and Slang does not interpolate ints). Only the
+        // loop reads it; Slang drops an unread input, unmatching the vertex stage's output.
         if (bsdf(node))
             mx::addStageInput(mx::HW::VERTEX_DATA, mx::Type::INTEGER, "link",
                               shader.getStage(mx::Stage::PIXEL));
@@ -194,11 +164,8 @@ class Surface : public mx::HwSurfaceNode {
     }
 };
 
-// The generator with Pika's surface, and the pixel stage's block holding
-// the public uniforms alone: the private ones, which are the eye alone, are
-// read from the view (shaders/frame.slang), which is written once a frame
-// rather than once a material. A surface reading a private uniform the view
-// lacks (a time node's u_time) is refused.
+// The pixel block holds the public uniforms alone; the eye comes from the view.
+// A surface reading another private uniform (a time node's u_time) is refused.
 class Generator : public mx::SlangShaderGenerator {
   public:
     Generator() : mx::SlangShaderGenerator(mx::TypeSystem::create()) {
@@ -210,8 +177,7 @@ class Generator : public mx::SlangShaderGenerator {
                       bool lighting) const override {
         if (stage.getName() != mx::Stage::PIXEL)
             return mx::SlangShaderGenerator::emitUniforms(context, stage, lighting);
-        // A private uniform is still its token here ($time), substituted
-        // with its name (u_time) once the stage is complete.
+        // A private uniform is still its token here ($time), not its name (u_time).
         mx::VariableBlock const &priv = stage.getUniformBlock(mx::HW::PRIVATE_UNIFORMS);
         for (size_t i = 0; i < priv.size(); ++i) {
             std::string const &token = priv[i]->getVariable();
@@ -274,18 +240,15 @@ void generate(std::string const &path, std::string const &out) {
     write(out + "/manifest", manifest);
 }
 
-// Each library file with its size and modification time rather than its
-// bytes: a Houdini build stamps every file it installs, so the listing
-// changes with the generator's shared objects too, which no library file
-// shows.
+// Size and modification time rather than bytes: a Houdini build stamps every file,
+// so the listing also changes with the generator's shared objects.
 void libraries() {
     std::filesystem::path root = materialx + "/libraries";
     std::vector<std::string> lines;
     for (auto const &entry : std::filesystem::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file())
             continue;
-        // The time as Unix seconds: std::filesystem's has an epoch of its
-        // own before C++20.
+        // stat, as std::filesystem's clock has its own epoch before C++20.
         struct stat status;
         if (stat(entry.path().c_str(), &status) != 0)
             throw std::runtime_error("cannot stat " + entry.path().string());

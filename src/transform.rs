@@ -1,44 +1,33 @@
-//! Hydra's transforms, converted into what `shaders/mesh.slang` reads.
-//!
-//! Hydra's `GfMatrix4d` is row-major and multiplies row vectors, with the
-//! translation in the last row. The shader multiplies column vectors, so each
-//! matrix it reads is the transpose, sent as rows of f32. The conversions are
-//! done in f64, so the f32 rounding happens once.
+//! Hydra's transforms, converted for `shaders/mesh.slang`. `GfMatrix4d` multiplies row vectors
+//! and the shader column vectors, so each matrix is sent transposed, converted in f64.
 
 use std::collections::HashMap;
 
 use crate::store::{Instancer, Instancing};
 
-/// One mesh instance: its world matrix and normal matrix, whether its
-/// winding is reversed, and its mesh's light links. Laid out as the
-/// shader's 7 `float4`s per instance.
+/// Laid out as the shader's 7 `float4`s per instance.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Instance {
     world: [[f32; 4]; 3],
     normal: [[f32; 4]; 3],
-    /// Bit 0 of the first: front faces wind clockwise, as seen from in
-    /// front. The second: the bits of the light-link collections its mesh
-    /// is in (`link::Links`).
+    /// Bit 0 of [0]: front faces wind clockwise. [1]: the light-link collection bits.
     flags: [u32; 4],
 }
 
 impl Instance {
-    /// Its world matrix: rows of the column-vector matrix.
+    /// Rows of the column-vector matrix.
     pub fn world(&self) -> &[[f32; 4]; 3] {
         &self.world
     }
 
-    /// The instance at world transform `matrix` of a mesh with the given
-    /// orientation and light links. `None` when the transform flattens the
-    /// mesh, which then covers no pixels.
+    /// `None` when the transform flattens the mesh, which then covers no pixels.
     pub fn new(matrix: &[f64; 16], left_handed: bool, link: u32) -> Option<Self> {
         let linear = linear(matrix);
         let det = det3(&linear);
         let inverse = inverse3(&linear, det)?;
         let world = std::array::from_fn(|j| column(matrix, j).map(|v| v as f32));
-        // Normals transform by the inverse transpose of the linear part. In
-        // column-vector form that is the inverse itself, read by rows.
+        // Normals take the inverse transpose: in column-vector form, the inverse read by rows.
         let normal = inverse.map(|[a, b, c]| [a as f32, b as f32, c as f32, 0.0]);
         // A mirroring transform reverses the winding, as a left-handed mesh does.
         let flip = left_handed != (det < 0.0);
@@ -50,7 +39,6 @@ impl Instance {
     }
 }
 
-/// The camera: world to Vulkan clip space, and where the viewer is.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Camera {
@@ -62,16 +50,12 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// From the render pass's world-to-view and projection matrices.
-    /// Hydra's projection is OpenGL's: clip z/w runs from -1 at the near
-    /// plane to 1 at the far plane. Pika's runs from 1 to 0 (reversed), which
-    /// keeps float depth precise far away. Its y is not flipped, so the first
-    /// image row is the bottom one, as in Hydra's render buffers.
+    /// Hydra's clip z/w runs -1 (near) to 1 (far); Pika's runs 1 to 0, reversed for precision far
+    /// away. y is not flipped, so the first image row is the bottom one, as in Hydra's buffers.
     pub fn new(world_to_view: &[f64; 16], projection: &[f64; 16]) -> Result<Self, String> {
         let m = multiply(world_to_view, projection);
         let [x, y, z, w] = std::array::from_fn(|j| column(&m, j));
-        // z' = (w - z) / 2, built into the matrix so no vertex subtracts
-        // nearly equal values.
+        // z' = (w - z) / 2, built into the matrix so no vertex subtracts nearly equal values.
         let z = std::array::from_fn(|i| 0.5 * (w[i] - z[i]));
         let view_projection = [x, y, z, w].map(|row| row.map(|v| v as f32));
 
@@ -98,12 +82,8 @@ impl Camera {
     }
 }
 
-/// The transforms a prototype is drawn at in `instancing`, as Hydra composes
-/// them: at each level of instancers, each instance's primvars, then the
-/// instancer's transform; the next level out repeats all of those once per
-/// instance of its own. The prototype's own transform goes first, before
-/// these. Fails when an instancer is missing, unsynced, nested in itself or
-/// short of an index.
+/// The transforms a prototype is drawn at, composed as Hydra does: per instancer level, each
+/// instance's primvars then the instancer's transform, outer levels repeating per instance.
 pub fn instance_transforms(
     instancers: &HashMap<&str, &Instancer>,
     instancing: &Instancing,
@@ -127,7 +107,6 @@ pub fn instance_transforms(
     Err(format!("instancer {} is nested in itself", at.instancer))
 }
 
-/// One instancer's transform at each of `indices`, without its parents'.
 fn level(instancer: &Instancer, indices: &[i32]) -> Result<Vec<[f64; 16]>, String> {
     let (Some(transform), Some(primvars)) = (&instancer.transform, &instancer.primvars) else {
         return Err(format!("instancer {} is not synced", instancer.path));
@@ -172,8 +151,7 @@ fn level(instancer: &Instancer, indices: &[i32]) -> Result<Vec<[f64; 16]>, Strin
         .collect()
 }
 
-/// The row-vector rotation of a `GfQuatf` (i, j, k, real), as Gf builds it.
-/// USD's point instancer authors half-float quaternions, which are not
+/// From (i, j, k, real), as Gf builds it. Point instancers author half-float quaternions, not
 /// quite unit length; dividing by the squared length keeps them rigid.
 fn rotate(q: [f32; 4]) -> [f64; 16] {
     let [i, j, k, r] = q.map(f64::from);
@@ -202,17 +180,15 @@ const IDENTITY: [f64; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
-/// Column `j` of a row-major 4×4 matrix: row `j` of its transpose.
 fn column(m: &[f64; 16], j: usize) -> [f64; 4] {
     [m[j], m[4 + j], m[8 + j], m[12 + j]]
 }
 
-/// The upper-left 3×3 of a row-major 4×4 matrix.
 fn linear(m: &[f64; 16]) -> [[f64; 3]; 3] {
     std::array::from_fn(|r| std::array::from_fn(|c| m[r * 4 + c]))
 }
 
-/// The row-major product `a b`: `a` applies first to a row vector.
+/// Row-major `a b`: `a` applies first to a row vector.
 pub fn multiply(a: &[f64; 16], b: &[f64; 16]) -> [f64; 16] {
     std::array::from_fn(|i| (0..4).map(|k| a[i / 4 * 4 + k] * b[k * 4 + i % 4]).sum())
 }
@@ -223,7 +199,6 @@ fn det3(m: &[[f64; 3]; 3]) -> f64 {
         + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
 }
 
-/// The inverse of `m`, whose determinant is `det`; `None` when it is singular.
 fn inverse3(m: &[[f64; 3]; 3], det: f64) -> Option<[[f64; 3]; 3]> {
     if det == 0.0 || !det.is_finite() {
         return None;
@@ -247,15 +222,13 @@ mod tests {
         (0..4).map(|i| a[i] as f64 * b[i]).sum()
     }
 
-    /// A row-major translation.
     fn translate(x: f64, y: f64, z: f64) -> [f64; 16] {
         [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, x, y, z, 1.0,
         ]
     }
 
-    /// OpenGL's perspective projection, as GfFrustum computes it: a 90°
-    /// field of view, near 1 and far 100.
+    /// As GfFrustum computes it: a 90° field of view, near 1 and far 100.
     fn perspective() -> [f64; 16] {
         let (n, f) = (1.0, 100.0);
         let mut p = [0.0; 16];
@@ -267,7 +240,6 @@ mod tests {
         p
     }
 
-    /// Clip-space position of a world point, and its depth z/w.
     fn clip(camera: &Camera, p: [f64; 3]) -> ([f64; 4], f64) {
         let p = [p[0], p[1], p[2], 1.0];
         let c: [f64; 4] = std::array::from_fn(|i| dot(camera.view_projection[i], p));
@@ -307,8 +279,7 @@ mod tests {
 
     #[test]
     fn eye_is_the_camera_position_or_direction() {
-        // Rotated a quarter turn about y, then placed at (2, 0, 0): in
-        // row-vector form, view-to-world is R then T, and world-to-view the inverse.
+        // A quarter turn about y, then placed at (2, 0, 0); world-to-view is the inverse.
         let world_to_view = [
             0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 1.0,
         ];
@@ -317,7 +288,6 @@ mod tests {
         let mut ortho = [0.0; 16];
         (ortho[0], ortho[5], ortho[10], ortho[15]) = (1.0, 1.0, -0.02, 1.0);
         let camera = Camera::new(&world_to_view, &ortho).unwrap();
-        // The camera's +z, toward the viewer, points along world +x.
         assert_eq!(camera.eye, [1.0, 0.0, 0.0, 0.0]);
     }
 
@@ -332,8 +302,7 @@ mod tests {
         let world: [f64; 3] = std::array::from_fn(|r| dot(i.world[r], p));
         // Row vector p·M: (1, 1, 0) goes to (0 - 1, 2 + 0, 0) + (1, 2, 3).
         assert_eq!(world, [0.0, 4.0, 3.0]);
-        // A normal stays perpendicular to the surface: the plane x + y = 0
-        // has tangent (1, -1, 0) and normal (1, 1, 0).
+        // The plane x + y = 0 has tangent (1, -1, 0) and normal (1, 1, 0).
         let n: [f64; 3] = std::array::from_fn(|r| dot(i.normal[r], [1.0, 1.0, 0.0, 0.0]));
         let t: [f64; 3] =
             std::array::from_fn(|c| (0..3).map(|k| [1.0, -1.0, 0.0][k] * m[k * 4 + c]).sum());
@@ -347,8 +316,6 @@ mod tests {
         std::array::from_fn(|c| (0..3).map(|k| p[k] * m[k * 4 + c]).sum::<f64>() + m[12 + c])
     }
 
-    /// An inner instancer with every primvar, nested in an outer one with
-    /// two translated instances.
     fn nested() -> (Instancer, Instancer) {
         let to = translate(10.0, 0.0, 0.0);
         // A quarter turn about x.
@@ -391,15 +358,13 @@ mod tests {
             indices: vec![0],
         };
         let m = instance_transforms(&instancers, &at).unwrap();
-        // The point (1, 1, 1) as Gf moves it through M S R T Ti, then O To
-        // for each outer instance O.
+        // (1, 1, 1) as Gf moves it through M S R T Ti, then O To for each outer instance O.
         let expected = [[11.0, -2.0, 9.0], [11.0, 98.0, 9.0]];
         assert_eq!(m.len(), 2);
         for (m, e) in m.iter().zip(expected) {
             let p = moved(m, [1.0, 1.0, 1.0]);
             assert!((0..3).all(|k| (p[k] - e[k]).abs() < 1e-5), "{p:?} {e:?}");
         }
-        // Gf's rotation of x by the normalized quaternion.
         let x = moved(&rotate([0.1, 0.5, -0.3, 0.8]), [1.0, 0.0, 0.0]);
         let e = [31.0 / 99.0, -38.0 / 99.0, -86.0 / 99.0];
         assert!((0..3).all(|k| (x[k] - e[k]).abs() < 1e-6), "{x:?}");

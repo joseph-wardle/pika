@@ -1,5 +1,4 @@
-//! The images a frame renders into, a depth buffer, and the host-visible
-//! buffers the CPU reads them back from.
+//! The images a frame renders into, its depth buffer and the buffers read back from them.
 
 use ash::vk;
 
@@ -9,7 +8,6 @@ use crate::gpu::{self, Buffer, Memory};
 /// beyond, so the depth buffer is cleared to 0.
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
-/// A color image and the buffer it is read back into.
 struct Attachment {
     format: vk::Format,
     image: vk::Image,
@@ -19,12 +17,9 @@ struct Attachment {
     readback: Buffer,
 }
 
-/// `width` × `height` color images of the given formats, in attachment
-/// order, and a depth buffer. Every handle starts null, so a failed `new`
-/// can drop a partly built value.
+/// Every handle starts null, so a failed `new` can drop a partly built value.
 pub struct Target {
-    // A copy of the owner's device table. The owner keeps the `gpu::Device`
-    // alive longer than this target (field order), which `drop` relies on.
+    // A copy of the owner's device table; the owner outlives this (field order), as `drop` needs.
     device: ash::Device,
     pub width: u32,
     pub height: u32,
@@ -36,8 +31,7 @@ pub struct Target {
 }
 
 impl Target {
-    /// `formats` pairs each color attachment's format with its bytes per
-    /// pixel, which size its readback buffer.
+    /// `formats` pairs each color format with its bytes per pixel.
     pub fn new(
         device: &gpu::Device,
         formats: &[(vk::Format, usize)],
@@ -78,7 +72,6 @@ impl Target {
         Ok(t)
     }
 
-    /// Whether the target has these color formats and this size.
     pub fn fits(&self, formats: &[(vk::Format, usize)], width: u32, height: u32) -> bool {
         let same = self
             .colors
@@ -88,14 +81,11 @@ impl Target {
         same && (self.width, self.height) == (width, height)
     }
 
-    /// Attachment `index`'s read-back pixels as tightly packed rows, first
-    /// row first. They are safe to read only between the frame's wait and
-    /// its next submit.
+    /// Tightly packed rows, safe to read only between the frame's wait and its next submit.
     pub fn pixels(&mut self, index: usize) -> &mut [u8] {
         self.colors[index].readback.bytes()
     }
 
-    /// The images' bytes on the device and the readback buffers' on the host.
     pub fn memory(&self) -> Memory {
         let mut memory = Memory {
             device: self.depth_bytes,
@@ -108,9 +98,7 @@ impl Target {
         memory
     }
 
-    /// Begins dynamic rendering into every attachment, each color cleared to
-    /// its value in `clears`, the depth buffer to the far plane. Record draws,
-    /// then call `end_rendering`.
+    /// Each color is cleared to its value in `clears`, the depth to the far plane.
     pub fn begin_rendering(&self, cb: vk::CommandBuffer, clears: &[vk::ClearColorValue]) {
         let d = &self.device;
         let mut barriers: Vec<_> = (self.colors.iter())
@@ -175,15 +163,12 @@ impl Target {
         }
     }
 
-    /// Ends the rendering `begin_rendering` began.
     pub fn end_rendering(&self, cb: vk::CommandBuffer) {
         // SAFETY: `cb` is recording inside that rendering.
         unsafe { self.device.cmd_end_rendering(cb) };
     }
 
-    /// Records, after `end_rendering`, the copy of each attachment that
-    /// `read` marks into its readback buffer, visible to the host once the
-    /// frame is waited for.
+    /// Records after `end_rendering`; host-visible once the frame is waited for.
     pub fn readback(&self, cb: vk::CommandBuffer, read: &[bool]) {
         let d = &self.device;
         let read: Vec<&Attachment> = (self.colors.iter().zip(read))
@@ -251,7 +236,6 @@ impl Target {
         }
     }
 
-    /// The whole image, for render areas, viewports and scissors.
     pub fn area(&self) -> vk::Rect2D {
         vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
@@ -266,9 +250,8 @@ impl Target {
 impl Drop for Target {
     fn drop(&mut self) {
         let d = &self.device;
-        // SAFETY: every handle was created on `d` or is null, which destroy
-        // calls accept, and waiting for idle means none is still in use.
-        // The readback buffers drop with `colors`, after this.
+        // SAFETY: every handle is `d`'s or null, which destroy calls accept, and after waiting for
+        // idle none is in use. The readback buffers drop with `colors`, after this.
         unsafe {
             let _ = d.device_wait_idle();
             for a in &self.colors {
@@ -296,8 +279,6 @@ const DEPTH: vk::ImageSubresourceRange = vk::ImageSubresourceRange {
     ..COLOR
 };
 
-/// A device-local 2D image with its memory, the bytes allocated for it and
-/// a view of `range`.
 fn image(
     device: &gpu::Device,
     format: vk::Format,
@@ -319,9 +300,8 @@ fn image(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .usage(usage);
-    // SAFETY (this and every call below): `d` is a live device, each info
-    // struct outlives its call, and each handle passed in was created on `d`
-    // just above. On an error, the handles made so far are destroyed here.
+    // SAFETY (this and every call below): `d` is live, each info outlives its call, and each
+    // handle was created on `d` above. On an error, the handles made so far are destroyed here.
     let image = unsafe { d.create_image(&info, None) }
         .map_err(|e| format!("vkCreateImage ({width}×{height} {format:?}) failed: {e}"))?;
     let needs = unsafe { d.get_image_memory_requirements(image) };

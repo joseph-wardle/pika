@@ -1,5 +1,4 @@
-//! The smooth normal pass: a compute pipeline writing each point's normal
-//! from the faces around it, for meshes whose normals are not authored.
+//! The smooth normal pass, for meshes whose normals are not authored.
 
 use std::ops::Range;
 
@@ -11,7 +10,6 @@ pub struct Smooth {
     compute: gpu::Compute,
 }
 
-/// The addresses of the buffers `shaders/smooth.slang` reads and writes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Addresses {
@@ -21,7 +19,6 @@ pub struct Addresses {
     pub normals: vk::DeviceAddress,
 }
 
-/// `shaders/smooth.slang`'s push constants.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -38,8 +35,6 @@ impl Smooth {
         Ok(Self { compute })
     }
 
-    /// Records into `cb`, outside rendering, the normals of the points in
-    /// `ranges`. The buffers must be live and as large as their table says.
     pub fn record(&self, cb: vk::CommandBuffer, addresses: Addresses, ranges: &[Range<u32>]) {
         (self.compute).record(cb, ranges, |first, count, stride| Push {
             addresses,

@@ -1,17 +1,5 @@
-//! The bake tools as the renderer runs them, and each material's build,
-//! which runs them off the render thread. `bake/generate.cpp`: a
-//! material's document in, the pixel stage Houdini's MaterialX generates,
-//! the vertex stage feeding it and the manifest describing them out;
-//! `bake/texture.cpp`: a texture as authored in, the file the renderer
-//! uploads out. Both kept under the cache so nothing is baked twice, each
-//! cache keyed on its own tool. A build generates
-//! a material's stages, compiles its surface (`shader`) and bakes and
-//! reads its textures, on one of `WORKERS` threads (`Builder`), and its
-//! result waits for the frame that installs it. Each job for a material is
-//! a later generation than the one before, and `drain` hands out only the
-//! latest's result, so an edit's build never replaces a newer edit's. The
-//! texture cap is not a build's: a build reads every level's place, and
-//! the frame that installs it loads those within the cap (`Textures`).
+//! Runs the bake tools, cached, and builds materials on worker threads. A
+//! build's result lands only while it is its material's latest job.
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
@@ -27,47 +15,36 @@ use crate::shader;
 use crate::texture::{self, Texture};
 use crate::uniforms::{self, Manifest};
 
-// Built by `make -C bake` from the checkout, like the shaders.
 const GENERATE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/generate");
 const TEXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/bake/texture");
-// The library files that shadow Houdini's, which the generator inlines.
+// Shadows Houdini's library files; the generator inlines them.
 const LIBRARIES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/bake/libraries");
 
-/// The tool's output for one document: the directory holding its
-/// `pixel.slang`, `surface.slang` and `manifest`.
 pub struct Generated {
     pub dir: PathBuf,
     pub manifest: Manifest,
 }
 
-/// A texture as the renderer uploads it, read from the cache, or the texel
-/// a missing file's node draws instead (`fallback`).
 pub struct Baked {
-    /// What the renderer keys the loaded textures by: its file under the
-    /// cache, or `fallback` and its texel.
+    /// Its cache file, or `fallback` and its texel.
     pub key: String,
     pub texture: Texture,
-    /// Whether the texture tool ran now rather than the cache answering.
+    /// The tool ran rather than the cache answering.
     pub fresh: bool,
 }
 
 #[derive(Clone)]
 pub struct Bake {
-    /// The cache's `materials` directory, one entry per document and tool.
     materials: PathBuf,
-    /// The cache's `textures` directory, mirroring each source's path.
     textures: PathBuf,
-    /// The host's OCIO config, or empty for OpenImageIO's default, through
-    /// which the texture tool converts textures to the working space.
+    /// The host's OCIO config, or empty for OpenImageIO's default.
     config: String,
-    /// The generate tool, also keyed on the library files it inlines.
     generate: Tool,
     texture: Tool,
 }
 
-/// A bake tool and the hash its cache is keyed on: its own bytes and what
-/// it lists of the libraries beneath it (`<tool> libraries`), so a rebuilt
-/// tool, or a Houdini update beneath it, misses that cache alone.
+/// A bake tool and its cache key: its bytes and the libraries it lists, so a
+/// rebuilt tool or a Houdini update misses its own cache alone.
 #[derive(Clone)]
 struct Tool {
     path: &'static str,
@@ -75,7 +52,6 @@ struct Tool {
 }
 
 impl Tool {
-    /// The tool at `path`, its hash taking in `more` too.
     fn new(path: &'static str, more: &[u8]) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| {
             format!("cannot read the bake tool {path}: {e}. Build it with `make -C bake`.")
@@ -92,15 +68,12 @@ impl Tool {
 
     fn command(&self) -> Command {
         let mut command = Command::new(self.path);
-        // The tool's rpath beats a host's library path for its own libraries
-        // (bake/Makefile), but the libraries those load carry a runpath,
-        // which the path beats: a Houdini 21 host's would supply the codecs
-        // beneath OpenImageIO from Houdini 21, beside Houdini 22's MaterialX.
+        // A host's library path beats the runpath of the libraries the tool loads:
+        // a Houdini 21 host would mix its codecs with Houdini 22's MaterialX.
         command.env_remove("LD_LIBRARY_PATH");
         command
     }
 
-    /// Runs the tool on `args`, failing with its complaint.
     fn run(&self, command: &mut Command) -> Result<(), String> {
         let output = (command.output())
             .map_err(|e| format!("could not run the bake tool {}: {e}", self.path))?;
@@ -148,20 +121,16 @@ impl Bake {
         })
     }
 
-    /// Generates `document`'s pixel stage, unless the cache holds it.
     pub fn generate(&self, document: &Document) -> Result<Generated, String> {
         let key = cache::fnv1a(&[document.text.as_bytes(), &self.generate.hash.to_le_bytes()]);
         let dir = self.materials.join(format!("{key:016x}"));
         match generated(&dir) {
             Ok(manifest) => return Ok(Generated { manifest, dir }),
-            // Left partial by a run that never finished: the tool runs into
-            // a directory with nothing left of the old.
+            // Left partial by a run that never finished.
             Err(why) if dir.exists() => cache::discard(&dir, &why)?,
             Err(_) => {}
         }
-        // The tool runs into a directory beside `dir`, moved into place
-        // once complete, so `dir` exists only whole; a run that fails, or
-        // that another process beat to it, leaves nothing behind.
+        // Run beside `dir` and rename into place, so `dir` exists only whole.
         let tmp = dir.with_extension(cache::unique());
         let path = tmp.join("document.mtlx");
         let run = || -> Result<(), String> {
@@ -188,8 +157,6 @@ impl Bake {
         })
     }
 
-    /// Bakes `source`'s image, or the UDIM set its `<UDIM>` pattern names,
-    /// unless the cache holds it, and reads its header, every level's place.
     pub fn texture(&self, source: &Source) -> Result<Baked, String> {
         let set = tiles(Path::new(&source.file))?;
         let path = self.texture_path(source, &set)?;
@@ -231,13 +198,8 @@ impl Bake {
         })
     }
 
-    /// Where `source`'s bake lives, its files being `set` (`tiles`): under
-    /// `textures`, mirroring the source's own path so one asset's bakes can
-    /// be found and deleted, named by a hash of each file's name, size and
-    /// modification time, the space and encoding, the config and the
-    /// texture tool,
-    /// so an edited source, a tile added or a changed setting misses. Not
-    /// the cap: the bake holds every level, and a cap loads fewer.
+    /// Mirrors the source's path so an asset's bakes can be found and deleted.
+    /// Not keyed on the cap: the bake holds every level.
     pub fn texture_path(&self, source: &Source, set: &[(u32, PathBuf)]) -> Result<PathBuf, String> {
         let mut state = Vec::new();
         for (_, file) in set {
@@ -276,7 +238,6 @@ impl Bake {
     }
 }
 
-/// Every file under `dir`, in path order.
 fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut found = Vec::new();
     let entries =
@@ -295,14 +256,10 @@ fn files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(found)
 }
 
-/// The files `source` names, each with its tile number: itself, numbered
-/// 0, or for a `<UDIM>` pattern the tiles 1001 to 1100 that exist, as USD
-/// reads a set. The tool bakes what it is given; the key here is what
-/// makes a bake miss.
+/// A single file is tile 0; a `<UDIM>` pattern is tiles 1001 to 1100, as USD reads a set.
 pub fn tiles(source: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
     let text = source.to_string_lossy();
-    // The delegate hands over the path as it resolved, so one that did
-    // not resolve arrives like one never authored.
+    // The delegate passes a path that did not resolve as empty.
     if text.is_empty() {
         return Err("its path is empty or did not resolve".into());
     }
@@ -324,7 +281,6 @@ pub fn tiles(source: &Path) -> Result<Vec<(u32, PathBuf)>, String> {
     Ok(set)
 }
 
-/// What the entry `dir` holds: its manifest, with the pixel stage beside it.
 fn generated(dir: &Path) -> Result<Manifest, String> {
     let path = dir.join("manifest");
     let text = std::fs::read_to_string(&path)
@@ -337,7 +293,7 @@ fn generated(dir: &Path) -> Result<Manifest, String> {
     uniforms::manifest(&text)
 }
 
-/// The tool's complaint, on one line so a warning quoting it stays one.
+/// On one line, so a warning quoting it stays one.
 fn failed(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!(
@@ -346,9 +302,8 @@ fn failed(output: &std::process::Output) -> String {
     )
 }
 
-// slangc takes one core for a third of a second, and the texture tool spreads
-// a texture over every core, so a few jobs at a time keep the cores busy
-// without piling up decoded 4K images.
+// slangc takes one core and the texture tool all of them; a few jobs keep
+// the cores busy without piling up decoded 4K images.
 const WORKERS: usize = 4;
 
 struct Job {
@@ -358,7 +313,6 @@ struct Job {
     network: Network,
 }
 
-/// A finished job, with what the frame installing it needs.
 pub struct Built {
     pub id: u64,
     generation: u64,
@@ -368,7 +322,6 @@ pub struct Built {
 }
 
 impl Built {
-    /// The texture inputs whose file is missing, to warn of when it installs.
     pub fn missing(&self) -> &[String] {
         match &self.result {
             Ok(output) => &output.missing,
@@ -376,8 +329,7 @@ impl Built {
         }
     }
 
-    /// `network`'s build, run now on this thread: Pika's own networks are
-    /// built before the first frame, with no textures.
+    /// Builds on this thread, without textures: Pika's own networks, before the first frame.
     pub fn now(bake: &Bake, document: Document, network: Network) -> Self {
         let result = build(bake, &document, &network, &|| true);
         Self {
@@ -392,14 +344,11 @@ impl Built {
 
 pub struct Output {
     pub manifest: Manifest,
-    /// The surface's SPIR-V and reflection.
     pub compiled: shader::Compiled,
-    /// What the textures were baked from, and the textures, in the
-    /// manifest's order.
+    /// Both in the manifest's order.
     pub sources: Vec<Source>,
     pub textures: Vec<Baked>,
-    /// The texture inputs whose file is missing, each as a warning names it,
-    /// drawn as their nodes' fallback.
+    /// Warnings for texture inputs whose file is missing, drawn as fallbacks.
     pub missing: Vec<String>,
 }
 
@@ -407,12 +356,10 @@ pub struct Builder {
     jobs: Sender<Job>,
     done: Receiver<Built>,
     latest: Latest,
-    /// What `wait` received, for `drain`.
     arrived: Vec<Built>,
 }
 
-/// The generation of each material's latest job while it is out, shared
-/// with the workers, which skip a job the material has resubmitted since.
+/// Each material's latest generation while its job is out; workers skip stale jobs.
 #[derive(Default)]
 struct Latest {
     jobs: Arc<Mutex<BTreeMap<u64, u64>>>,
@@ -423,9 +370,7 @@ impl Builder {
     pub fn new(bake: Bake) -> Self {
         let (jobs, queue) = mpsc::channel();
         let queue = Arc::new(Mutex::new(queue));
-        // A finished build holds its baked files until a frame installs
-        // it, and a frame installs so many: the workers wait with their
-        // results rather than run ahead to a scene's every texture.
+        // Bounded: a finished build holds its baked files until a frame installs it.
         let (finished, done) = mpsc::sync_channel(WORKERS);
         let latest = Latest::default();
         for _ in 0..WORKERS {
@@ -441,8 +386,6 @@ impl Builder {
         }
     }
 
-    /// Queues a build of material `id`'s `network`, whose document is
-    /// `document`.
     pub fn submit(&mut self, id: u64, document: Document, network: Network) -> Result<(), String> {
         let generation = self.latest.submit(id);
         let job = Job {
@@ -454,8 +397,6 @@ impl Builder {
         (self.jobs.send(job)).map_err(|_| "the build workers have exited".to_string())
     }
 
-    /// Waits up to `timeout` for a build to finish, and says whether one
-    /// waits to be installed; at once when one does or none is out.
     pub fn wait(&mut self, timeout: Duration) -> Result<bool, String> {
         if !self.arrived.is_empty() {
             return Ok(true);
@@ -473,9 +414,7 @@ impl Builder {
         }
     }
 
-    /// The finished builds that are their material's latest, as they
-    /// finished: the frame's uploads are bounded where it loads their
-    /// textures (`texture::UPLOAD`). A stale one is dropped here.
+    /// The finished builds still their material's latest; stale ones are dropped.
     pub fn drain(&mut self) -> Vec<Built> {
         let mut arrived = std::mem::take(&mut self.arrived);
         arrived.extend(self.done.try_iter());
@@ -484,7 +423,7 @@ impl Builder {
             .collect()
     }
 
-    /// Drops material `id`'s job, if one is out: its result will be stale.
+    /// Drops material `id`'s job: its result will not land.
     pub fn forget(&mut self, id: u64) {
         self.latest.jobs().remove(&id);
     }
@@ -493,7 +432,6 @@ impl Builder {
         self.latest.jobs().retain(|id, _| keep(id));
     }
 
-    /// The materials whose build is out.
     pub fn len(&self) -> usize {
         self.latest.jobs().len()
     }
@@ -514,8 +452,7 @@ impl Latest {
         self.generation
     }
 
-    /// Whether the job of `generation` is material `id`'s latest, which
-    /// then lands; an older one, or one forgotten, does not.
+    /// Whether this is material `id`'s latest job; each lands at most once.
     fn landed(&mut self, id: u64, generation: u64) -> bool {
         let mut jobs = self.jobs();
         if jobs.get(&id) != Some(&generation) {
@@ -526,16 +463,12 @@ impl Latest {
     }
 }
 
-/// Whether the job of `generation` is still material `id`'s latest in
-/// `jobs`.
 fn current(jobs: &Mutex<BTreeMap<u64, u64>>, id: u64, generation: u64) -> bool {
     (jobs.lock().unwrap_or_else(PoisonError::into_inner)).get(&id) == Some(&generation)
 }
 
-/// A worker: builds each job from the queue until the builder is dropped.
-/// A job the material has resubmitted since is skipped, or dropped between
-/// its textures; one dropped mid-build finishes it, and the cache's
-/// temporary names keep a build cut short by exit from leaving a partial entry.
+/// A dropped builder finishes the job in hand; the cache's temporary names
+/// keep an exit mid-build from leaving a partial entry.
 fn work(
     bake: &Bake,
     queue: &Mutex<Receiver<Job>>,
@@ -551,8 +484,7 @@ fn work(
         if !wanted() {
             continue;
         }
-        // A panic here would leave the material pending for good, with no
-        // frame to report it: it is the build's failure, warned of like one.
+        // A panic would leave the material pending for good; report it as a failure.
         let result = panic::catch_unwind(AssertUnwindSafe(|| {
             build(bake, &job.document, &job.network, &wanted)
         }))
@@ -575,11 +507,7 @@ fn work(
     }
 }
 
-/// Generates `document`'s stages, bakes and reads each texture `network`
-/// gives it, while `wanted` says the build still is,
-/// and then compiles its surface, which the cache answers once any
-/// material of the document has: a texture that cannot be read fails the
-/// build before the compile is paid for.
+/// Textures are read before the compile, so a bad one fails the build first.
 fn build(
     bake: &Bake,
     document: &Document,
@@ -615,9 +543,8 @@ fn build(
     })
 }
 
-/// What an image whose file is missing is drawn as: a 1×1 texel of
-/// `default`, bound in place of the texture, since the Slang image
-/// implementation never reads the node's own `default` input.
+/// A 1×1 texel of `default`: the Slang image implementation never reads the
+/// node's own `default` input.
 fn fallback(default: &[f32]) -> Baked {
     let mut texel = [0.0; 4];
     let n = default.len().min(4);
@@ -629,8 +556,6 @@ fn fallback(default: &[f32]) -> Baked {
     }
 }
 
-/// The texture each of `manifest`'s textures reads, from the node and
-/// input of `network` the name stands for.
 pub fn sources(
     manifest: &Manifest,
     document: &Document,
@@ -733,7 +658,7 @@ mod tests {
             );
         }
 
-        // The control: the same file saved again is another texture.
+        // Negative control: the same file saved again is another texture.
         let file = std::fs::File::options().write(true).open(&source).unwrap();
         file.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
             .unwrap();
@@ -808,7 +733,6 @@ mod tests {
             !latest.landed(8, other),
             "a forgotten material's build is stale"
         );
-        // What a worker asks before and between a job's textures.
         let third = latest.submit(9);
         assert!(current(&latest.jobs, 9, third));
         let fourth = latest.submit(9);

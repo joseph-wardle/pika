@@ -1,20 +1,14 @@
-// The smooth normal pass: each point's normal from the faces around it, as
-// Hydra's Hd_SmoothNormals computes it. src/geometry.rs builds the table of
-// each point's corners.
+// Smooth normals as Hydra's Hd_SmoothNormals computes them.
 
 struct Push
 {
     float *points;
-    // Point p's corners are entries offsets[p] to offsets[p + 1].
     uint *offsets;
-    // Per corner, the face's previous and next points, swapped on
-    // left-handed meshes.
+    // Per corner, the face's previous and next points, swapped if left-handed.
     uint2 *corners;
     float *normals;
-    // The points this dispatch writes.
     uint first;
     uint count;
-    // The threads dispatched.
     uint stride;
 };
 
@@ -41,7 +35,6 @@ void cs(uint3 thread : SV_DispatchThreadID)
             uint2 c = push.corners[e];
             n += cross(load3(push.points, c.y) - curr, load3(push.points, c.x) - curr);
         }
-        // A point no face uses, or whose faces are degenerate, gets none.
         n = dot(n, n) > 0 ? normalize(n) : float3(0);
         push.normals[3 * p] = n.x;
         push.normals[3 * p + 1] = n.y;

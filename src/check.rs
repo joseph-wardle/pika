@@ -20,7 +20,6 @@ pub const RECT: [i32; 4] = [16, 8, 56, 40];
 /// own position, only the two edge columns differ: 2 × height pixels.
 pub const SHIFTED: [i32; 4] = [17, 8, 57, 40];
 
-/// Mismatches a draw of `SHIFTED` must give against `expected(RECT)`.
 pub const SHIFTED_MISMATCHES: usize = 2 * (RECT[3] - RECT[1]) as usize;
 
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UINT;
@@ -44,17 +43,14 @@ pub fn expected(rect: [i32; 4]) -> Vec<u8> {
     pixels
 }
 
-/// How many RGBA8 pixels differ between two images of the same size.
 pub fn mismatches(a: &[u8], b: &[u8]) -> usize {
     assert_eq!(a.len(), b.len(), "images differ in size");
     let (a, b) = (a.as_chunks::<4>().0, b.as_chunks::<4>().0);
     a.iter().zip(b).filter(|(p, q)| p != q).count()
 }
 
-/// The check pipeline drawing into a `SIZE`² RGBA8_UINT target.
 pub struct Offscreen<'a> {
-    // Field order is drop order: the commands and target wait for idle
-    // before the pipeline is destroyed.
+    // Field order is drop order: the commands and target wait for idle first.
     commands: Commands,
     target: Target,
     device: &'a gpu::Device<'a>,
@@ -84,8 +80,6 @@ impl<'a> Offscreen<'a> {
         Ok(o)
     }
 
-    /// Clears the target, draws `rect` and returns the read-back pixels as
-    /// tightly packed RGBA8 rows.
     pub fn draw(&mut self, rect: [i32; 4]) -> Result<Vec<u8>, String> {
         // A draw or copy that never lands leaves 0xCD, which no pixel can be.
         self.target.pixels(0).fill(0xCD);
@@ -97,8 +91,7 @@ impl<'a> Offscreen<'a> {
             size: [SIZE, SIZE],
         };
         let d = &self.device.raw;
-        // SAFETY: `cb` is recording inside `begin`'s rendering, and the
-        // pipeline and layout were created on `d` for the target's format.
+        // SAFETY: `cb` is recording inside rendering of the format the pipeline was built for on `d`.
         unsafe {
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             d.cmd_push_constants(
@@ -121,8 +114,7 @@ impl<'a> Offscreen<'a> {
 impl Drop for Offscreen<'_> {
     fn drop(&mut self) {
         let d = &self.device.raw;
-        // SAFETY: both handles were created on `d` or are null, which destroy
-        // calls accept, and no submit is pending: `draw` waits for each one.
+        // SAFETY: both handles are `d`'s or null, and no submit is pending: `draw` waits for each.
         unsafe {
             d.destroy_pipeline(self.pipeline, None);
             d.destroy_pipeline_layout(self.layout, None);
@@ -130,7 +122,7 @@ impl Drop for Offscreen<'_> {
     }
 }
 
-/// `check.slang`'s push constants, laid out as Slang lays out `Push`.
+/// Laid out as Slang lays out `check.slang`'s `Push`.
 #[repr(C)]
 struct Push {
     rect: [i32; 4],
@@ -147,9 +139,7 @@ impl Push {
     }
 }
 
-/// The check pipeline: no vertex input, no blending (integer formats cannot
-/// blend), two-sided, rendering to one `FORMAT` attachment. The target's
-/// depth buffer is attached but unused.
+/// No blending: integer formats cannot blend. The target's depth buffer is attached but unused.
 fn pipeline(
     d: &ash::Device,
     layout: vk::PipelineLayout,
@@ -210,8 +200,7 @@ fn pipeline(
         .depth_stencil_state(&depth)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: `d` is live, `module` and `layout` were created on it, and
-    // `info` and what it points to outlive the call.
+    // SAFETY: `d` is live, `module` and `layout` are its, and `info`'s pointees outlive the call.
     let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) };
     // SAFETY: pipeline creation is complete, so the module is no longer used.
     unsafe { d.destroy_shader_module(module, None) };

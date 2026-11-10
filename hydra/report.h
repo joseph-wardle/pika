@@ -22,8 +22,6 @@ inline void warn(std::string const &message) {
     TF_WARN("Pika: %s", message.c_str());
 }
 
-// The delegate's renderer, which its prims and passes call for as long as
-// the delegate lives.
 class Pika {
 public:
     Pika() { report(pika_renderer_new(&_renderer), "opening a GPU"); }
@@ -34,14 +32,12 @@ public:
     Pika(Pika const &) = delete;
     Pika &operator=(Pika const &) = delete;
 
-    // The renderer to call, or null when there is nothing to render with:
-    // no GPU opened, or Pika panicked, after which it renders nothing until
-    // the delegate is recreated.
+    // Null when no GPU opened, or after Pika panicked: it then renders nothing until the delegate
+    // is recreated.
     pika_renderer *renderer() const { return _stopped ? nullptr : _renderer; }
 
-    // Reports a failed call, saying what the delegate was doing, and says
-    // whether it succeeded. After a panic every call fails, so the first to
-    // see it stops the rest and is the only one reported.
+    // After a panic every call fails, so the first to see it stops the rest and is the only one
+    // reported.
     bool report(int status, std::string const &what) const {
         if (status == PIKA_OK)
             return true;

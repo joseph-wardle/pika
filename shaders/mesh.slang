@@ -1,8 +1,5 @@
-// The prepass: every mesh instance into the depth buffer and the depth and
-// normal AOVs, pulled through vertex.slang. The material pass draws the
-// same instances again with depth EQUAL, so its vertex stage must run the
-// same pull() and project() code: slangc 2026.9 ignores `precise` and has
-// no invariant attribute, and hydra/images shows holes if they diverge.
+// The prepass. The material pass redraws with depth EQUAL, so both must run the
+// same pull() and project(): slangc 2026.9 ignores `precise`, has no invariant.
 
 #include "vertex.slang"
 
@@ -24,9 +21,8 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
     return o;
 }
 
-// slangc 2026.9 numbers the outputs from 0 in declaration order, whatever
-// SV_Target says, so the color AOV keeps its slot here although the
-// pipeline's write mask leaves it to the material pass.
+// slangc 2026.9 numbers outputs in declaration order, ignoring SV_Target, so
+// color keeps its slot although the write mask leaves it to the material pass.
 struct Targets
 {
     float4 color : SV_Target0;
@@ -38,9 +34,7 @@ struct Targets
 Targets fs(Varyings v, bool front : SV_IsFrontFace)
 {
     float3 n = dot(v.normal, v.normal) > 0 ? normalize(v.normal) : float3(0);
-    // Everything is two-sided: a normal seen from behind is turned toward
-    // the viewer. Which side is behind follows the winding, which a
-    // left-handed mesh or a mirroring transform reverses.
+    // Two-sided; a left-handed mesh or mirroring transform reverses the winding.
     if (front == (v.flip != 0))
         n = -n;
 

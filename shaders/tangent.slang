@@ -1,13 +1,5 @@
-// The tangent pass: each vertex's tangent from the triangles around it,
-// for normal maps. The tangent is the direction its mesh's texcoord u
-// increases in, made orthogonal to its normal, and w says which way v
-// increases: 1 when cross(normal, tangent) does, -1 on a mirrored mapping.
-// Each triangle's u and v directions are solved from its edges and texcoord
-// deltas and summed over the vertex's triangles (Lengyel's method);
-// src/geometry.rs builds the table of each vertex's corners. A vertex
-// without a texcoord, or whose triangles span no texcoord area, gets a unit
-// tangent orthogonal to its normal with w 1, so a surface reading tangents
-// always gets a frame.
+// Lengyel's tangents. w is -1 on a mirrored mapping. A vertex with no texcoord
+// area still gets a unit tangent orthogonal to its normal, so a frame exists.
 
 #include "view.slang"
 
@@ -19,18 +11,14 @@ struct Push
     uint2 *vertices;
     float *texcoord;
     uint *vertex_texcoord;
-    // Vertex v's corners are entries offsets[v] to offsets[v + 1], each the
-    // position in `indices` of one of v's corners, in the mesh's triangles.
+    // Vertex v's corners, as positions in `indices`, are offsets[v]..offsets[v + 1].
     uint *offsets;
     uint *corners;
-    // Three vertex indices per triangle, counted from the mesh's first
-    // vertex, as the draws read them.
+    // Counted from the mesh's first vertex.
     uint *indices;
     uint *tangents;
-    // The vertices this dispatch writes.
     uint first;
     uint count;
-    // The threads dispatched.
     uint stride;
 };
 
@@ -53,7 +41,6 @@ float2 texcoord(uint vertex)
     return float2(push.texcoord[2 * t], push.texcoord[2 * t + 1]);
 }
 
-// A unit vector orthogonal to `n`.
 float3 orthogonal(float3 n)
 {
     float3 axis = abs(n.y) < 0.9 ? float3(0, 1, 0) : float3(1, 0, 0);
@@ -79,8 +66,6 @@ void cs(uint3 thread : SV_DispatchThreadID)
             float2 uv = texcoord(v);
             for (uint e = push.offsets[v]; e < push.offsets[v + 1]; e++)
             {
-                // The corner's triangle, and the mesh's first vertex from
-                // the corner's own index, which is v.
                 uint c = push.corners[e];
                 uint k = c % 3;
                 uint tri = c - k;

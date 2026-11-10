@@ -1,13 +1,8 @@
 // Modified from MaterialX 1.39.5's libraries/stdlib/genslang/lib/mx_texture.slang
 // (Academy Software Foundation, Apache License 2.0: bake/libraries/NOTICE).
 //
-// Pika's textures are 2D arrays: one layer for a plain image, and for a
-// UDIM set one layer per tile the set has, found through `tiles`, which
-// maps tile 1001 + i to its layer, or past the layers for a tile the set
-// lacks (bake/texture.cpp writes the table into the baked file). This file
-// shadows the MaterialX library's, which samples a Texture2D, under the
-// same struct and function names so that the library's image nodes need no
-// change.
+// Samples a 2D array (one layer per UDIM tile) under the library's own names, so its
+// image nodes need no change.
 struct SamplerTexture2D
 {
     Texture2DArray tex;
@@ -35,14 +30,8 @@ struct SamplerTexture2D
         return levels;
     }
 
-    // The layer and the coordinate within it, the layer past the texture's
-    // for a tile the set lacks. A plain image, whose table has the one
-    // entry, leaves the wrapping to the sampler; a UDIM set holds tile
-    // 1001 + u + 10 v at its own layer, the rows ten tiles wide, as USD
-    // numbers them. USD and MaterialX put st (0, 0) at an image's
-    // bottom-left corner, and a baked texture keeps the image's rows top
-    // first, so v is flipped here, inside the tile
-    // (hydra/images/textured.usda, hydra/images/udim.usda).
+    // A UDIM set holds tile 1001 + u + 10 v at layer `tiles[u + 10 v]`, past the layers if
+    // missing. v is flipped inside the tile: USD's st (0, 0) is bottom-left, baked rows top first.
     float3 locate(float2 uv)
     {
         uint count, stride;
@@ -71,9 +60,7 @@ float4 textureLod(SamplerTexture2D tex, float2 uv, float lod)
     return tex.missing(at) ? float4(0.0) : texel;
 }
 
-// The coordinate within a tile jumps at the tile's edge, so the mip level
-// is chosen from the gradients of the uv itself, which are continuous
-// across the set, not from those of the coordinate sampled.
+// The mip level comes from the uv's gradients, continuous across tiles.
 float4 texture(SamplerTexture2D tex, float2 uv)
 {
     return textureGrad(tex, uv, ddx(uv), ddy(uv));

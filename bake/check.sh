@@ -1,21 +1,5 @@
 #!/usr/bin/env bash
 # The bake tools' check, run where Houdini 22 and slangc are (not in CI).
-#
-# Builds the tools, and generates bake/fixtures/network.mtlx, the document
-# src/material.rs writes for hydra/fixtures/network.usda. The manifest must
-# match bake/fixtures/network.manifest, the pixel stage must read the eye
-# and the lights from the view (shaders/frame.slang) rather than declare
-# them, run Pika's light loop with none of MaterialX's light code, and the
-# surface must compile as Pika compiles it. A document naming
-# a nodedef the libraries lack, or reading a primvar the renderer's vertices
-# lack, or UV0 beside another primvar, or a uniform the view does not
-# provide, must fail, naming it. A surface reading UV0 alone reads the
-# texcoord. generate libraries must list the manifest's MaterialX version
-# and the standard library's definitions with their size and time, and
-# texture libraries the OpenImageIO and OpenColorIO versions beneath the
-# texture tool.
-#
-#   bake/check.sh
 set -euo pipefail
 
 HFS=${HFS:-/opt/hfs22.0}
@@ -48,9 +32,8 @@ grep -qF "lights_at(" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not run Pika's light loop"
 ! grep -qE "LightData|sampleLightSource|numActiveLightSources" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage holds MaterialX's light code"
-# The flags are the renderer's (src/shader.rs: FLAGS and SURFACE_FLAGS). The
-# reflection must match bake/fixtures/network.reflection.json, the layout
-# test's input, as JSON: copy it over when slangc or the libraries change.
+# The renderer's flags (src/shader.rs). Copy reflection.json over the fixture
+# when slangc or the libraries change.
 slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-entrypoint-name \
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
@@ -75,8 +58,7 @@ if "$GENERATE" "$OUT/missing.mtlx" "$OUT/missing" 2> "$OUT/missing.err"; then
     fail "missing: a document with an unknown nodedef generated"
 fi
 grep -q "ND_missing" "$OUT/missing.err" || fail "missing: the error does not name the nodedef"
-# The vertices carry one float2 primvar; a surface reading a color3 one
-# has no vertex stage.
+# The vertices carry one float2 primvar; a color3 one must fail.
 sed -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="emissiveColor" nodename="n3" />|' \
     -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_geompropvalue_color3">\n    <input name="geomprop" type="string" value="displayColor" />\n  </node>\n  <surfacematerial|' \
     "$ROOT/bake/fixtures/network.mtlx" > "$OUT/primvar.mtlx"
@@ -124,9 +106,7 @@ cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_aut
 # A JPEG reads, and a space the config knows beyond sRGB is converted.
 texture greys.jpg auto color greys
 texture acescg.exr acescg color acescg
-# A UDIM set, its tiles listed as the renderer lists them, is one array, a
-# layer per tile, with a table from tile to layer; a tile numbered past the
-# hundred is refused.
+# A UDIM set is one array with a tile table; a tile past 1100 is refused.
 "$TEXTURE" raw float "" "$OUT/textures/udim.texture" 1001 "$FIXTURES/udim.1001.exr" 1012 "$FIXTURES/udim.1012.exr" ||
     fail "udim: texture failed"
 "$TEXTURE" raw float "" "$OUT/textures/mixed.texture" 1001 "$FIXTURES/mixed.1001.exr" 1002 "$FIXTURES/mixed.1002.exr" ||

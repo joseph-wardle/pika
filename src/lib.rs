@@ -1,6 +1,4 @@
-//! The Pika renderer. The Hydra delegate links it as a static library and
-//! calls it through `abi`; the `pika` binary uses `gpu`, `shader`, `commands`
-//! and `target` directly.
+//! The Pika renderer. The Hydra delegate links it as a static library and calls it through `abi`.
 
 mod abi;
 mod bake;

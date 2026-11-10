@@ -1,8 +1,4 @@
-//! Pika's cache directory, where generated shaders and their SPIR-V live
-//! between runs: `PIKA_CACHE`, else `$XDG_CACHE_HOME/pika`, else
-//! `~/.cache/pika`. Each entry is keyed by a hash of everything that
-//! determines it, so nothing in it is ever stale, only unused; one a crash
-//! left unreadable is rebuilt as if it were absent (`discard`).
+//! The cache directory. Entries are keyed on all that determines them, so none goes stale.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,15 +14,12 @@ pub fn root() -> Result<PathBuf, String> {
     Ok(Path::new(&home).join(".cache/pika"))
 }
 
-/// Whether `path`, which exists, lies on NFS by `mounts`, the contents of
-/// `/proc/self/mounts`: the render thread reads textures' levels from the
-/// cache as they upload, which a network file system stalls.
+/// The render thread reads texture levels from the cache as they upload, which NFS stalls.
 pub fn on_nfs(mounts: &str, path: &Path) -> bool {
     let Ok(path) = std::fs::canonicalize(path) else {
         return false;
     };
-    // The deepest mount holding `path`, the last of equals: an automounter
-    // lists its trigger before the file system mounted over it.
+    // The deepest mount, the last of equals: an automounter lists its trigger first.
     let mut kind = "";
     let mut depth = 0;
     for line in mounts.lines() {
@@ -41,8 +34,7 @@ pub fn on_nfs(mounts: &str, path: &Path) -> bool {
     kind.starts_with("nfs")
 }
 
-/// FNV-1a over `parts` in order. It keys the cache, so it must not change
-/// with the Rust version as `DefaultHasher` may.
+/// Keys the cache, so it must not change with the Rust version as `DefaultHasher` may.
 pub fn fnv1a(parts: &[&[u8]]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     for &byte in parts.iter().copied().flatten() {
@@ -52,8 +44,7 @@ pub fn fnv1a(parts: &[&[u8]]) -> u64 {
     hash
 }
 
-/// A temporary name's suffix no other process or thread writing the cache
-/// uses, so an entry is written whole under it and renamed into place.
+/// A temporary name's suffix unique across processes and threads.
 pub fn unique() -> String {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -63,8 +54,6 @@ pub fn unique() -> String {
     )
 }
 
-/// Removes the entry `path`, a file or a directory, that cannot be read
-/// (`why`), so its owner rebuilds it as if it were absent.
 pub fn discard(path: &Path, why: &str) -> Result<(), String> {
     eprintln!(
         "pika: warning: the cache entry {} is unreadable ({why}); rebuilding it",

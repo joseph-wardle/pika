@@ -1,9 +1,5 @@
-//! `pika`: checks that this machine can run the renderer.
-//!
-//! Loads Vulkan, lists every device, chooses one and opens it, then draws the
-//! first-frame check and its shifted negative control.
-//! Exits 0 only if the check matched exactly, the control failed by exactly
-//! its predicted count, and the validation layer, when found, reported nothing.
+//! `pika`: checks that this machine can run the renderer. Exits 0 only if the first-frame check
+//! matched, its shifted control failed by its predicted count, and validation reported nothing.
 
 mod check;
 

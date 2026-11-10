@@ -1,12 +1,5 @@
-//! The material pass: each surface's pipelines, built from the generate tool's
-//! pixel stage and the vertex stage written for it, each material's
-//! uniform block, textures and descriptor set, bound to its surface, and
-//! the draw of each material's meshes after the prepass, lit by the view's
-//! lights (`shaders/frame.slang`). A material is built off the render
-//! thread (`bake`) and drawn clay until its first build lands, and as it
-//! was until an edit's does; a value edit writes its block in place and
-//! rebinds its samplers, and a texture swapped for the levels that fit
-//! (`Textures::swap`) rebinds the views of the materials reading it.
+//! The material pass: each surface's pipelines and each material's block, textures and
+//! descriptor set, drawn after the prepass; a material is drawn clay until its build lands.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -32,37 +25,22 @@ pub struct Shade {
     device: ash::Device,
     pub builder: Builder,
     textures: Textures,
-    /// By document hash.
     surfaces: BTreeMap<u64, Surface>,
-    /// By the store's material id; a material whose first build is out,
-    /// or that has no surface, has no entry and is drawn clay, and one
-    /// whose edit's build is out keeps the look it had until the build
-    /// lands.
+    /// By the store's material id; no entry means drawn clay.
     looks: BTreeMap<u64, Look>,
-    /// Whether a look changed since the textures no look binds were last
-    /// dropped.
+    /// A look changed since unbound textures were last dropped.
     prune: bool,
-    /// Whether the textures the cap shrinks, those fitting the memory
-    /// blurs, and the textures past the memory at their floors are still to
-    /// be warned of since the cap last changed: in a line each, the first
-    /// time every build and swap is done with any to count, a scene's worth
-    /// at once rather than a line per texture, thousands on a production
-    /// asset. Once, since every camera cut swaps hundreds of textures on
-    /// ALab.
+    /// Warn once per cap change, a line per kind, not per texture (thousands on production assets).
     warn_cap: bool,
     warn_blur: bool,
     warn_short: bool,
-    /// `material::clay`, drawn where `looks` has no entry.
     clay: Material,
-    /// `material::pink`, drawn for `Look::Failed`.
     pink: Material,
 }
 
-/// How a material is drawn.
 enum Look {
     Built(Box<Material>),
-    /// Its build failed, warned of once when it did; `update` tries it
-    /// again only when its network moves.
+    /// Warned of once; retried only when its network moves.
     Failed,
 }
 
@@ -86,39 +64,26 @@ pub struct Surface {
     pipelines: Vec<vk::Pipeline>,
 }
 
-/// One material as drawn: its uniform block, written in place when its
-/// values change, and the descriptor set binding it with its textures to
-/// its surface.
 struct Material {
     device: ash::Device,
     hash: u64,
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-    /// What the textures were baked from, in the surface's order: a
-    /// material edit that keeps them and the document only rewrites the
-    /// block.
+    /// While unchanged, with the document, a material edit only rewrites the block.
     sources: Vec<Source>,
-    /// The baked textures bound, by key, in the surface's order.
     textures: Vec<String>,
 }
 
-/// What one frame's `update` did.
 #[derive(Default)]
 pub struct Update {
     /// Surfaces slangc compiled; the cache answered for the rest.
     pub compiled: usize,
-    /// Textures the texture tool baked, likewise.
     pub baked: usize,
-    /// The baked bytes the textures loaded and swapped uploaded.
     pub loaded: u64,
-    /// Reading those textures' levels from their files.
     pub read: Duration,
-    /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
-    /// Textures whose image does not hold the levels that fit yet.
     pub pending_textures: usize,
-    /// Textures lowered past the cap's levels to fit the device's memory.
     pub lowered_textures: usize,
     pub needs: Needs,
 }
@@ -131,7 +96,6 @@ impl Shade {
         let mut builtin = |network: Network| -> Result<Material, String> {
             let document = material::document(&network)?.expect("Pika's networks have a surface");
             let built = Built::now(&bake, document, network);
-            // No textures, so nothing is recorded or counted.
             let (cb, mut update) = (vk::CommandBuffer::null(), Update::default());
             Shade::install(device, &mut surfaces, &mut textures, built, cb, &mut update)
         };
@@ -152,17 +116,8 @@ impl Shade {
         })
     }
 
-    /// Rewrites the block of each material whose network changed its
-    /// values alone, and submits a build of each whose structure or
-    /// textures did, drawn as it was until it lands; installs the builds
-    /// that landed, and swaps textures for the levels within the texture
-    /// cap `cap` (0 for none) that fit the device's memory
-    /// (`Textures::refit`), loads and swaps uploading `texture::UPLOAD`
-    /// bytes a frame. A material that cannot be built or installed is
-    /// warned of and drawn pink, and a texture whose file is missing is
-    /// warned of and drawn as its node's fallback; the frame goes on.
-    /// Records into `cb`, outside rendering, the uploads. No GPU work may
-    /// be pending.
+    /// A material that fails is warned of and drawn pink; a missing texture file, as its
+    /// fallback. `cap` 0 is none. Records uploads into `cb`; no GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -178,11 +133,8 @@ impl Shade {
             .retain(|id, _| store.materials().contains_key(id));
         self.prune |= self.looks.len() != before;
         (self.builder).retain(|id| store.materials().contains_key(id));
-        // Before any load: a material whose install fails this frame
-        // keeps the textures it loaded until the next, when the uploads
-        // recorded into `cb` have run. Collecting the used paths costs
-        // milliseconds on a large scene, so only a look changing asks for
-        // it.
+        // Before any load: a failed install keeps its textures until its uploads have run.
+        // Collecting used paths costs milliseconds, so only a look change asks for it.
         if self.prune {
             let used: BTreeSet<String> = (self.looks.values().filter_map(Look::built))
                 .flat_map(|m| m.textures.iter().cloned())
@@ -202,7 +154,6 @@ impl Shade {
             let Some(network) = &material.network else {
                 continue;
             };
-            // A failed material is tried again, drawn clay meanwhile.
             if let Some(Look::Failed) = self.looks.get(&id) {
                 self.looks.remove(&id);
             }
@@ -251,10 +202,8 @@ impl Shade {
             }
         }
         self.textures.weigh();
-        // Once the scene's builds have landed, so its first textures are
-        // not raised past what the whole fits, then lowered again: a
-        // 34-tile set at 4K uploads 750 MB in a frame. Loads meanwhile draw
-        // their floors.
+        // Only once the builds land, so first textures are not raised past what fits then
+        // lowered again. Loads meanwhile draw their floors.
         let heaps = device.heaps();
         if self.builder.is_empty() {
             self.textures.refit(&heaps);
@@ -312,16 +261,12 @@ impl Shade {
         Ok(update)
     }
 
-    /// Whether every build has landed and every texture holds the levels
-    /// that fit, which a host rendering until converged waits for.
+    /// Every build landed and every texture fits, which a converging host waits for.
     pub fn settled(&self) -> bool {
         self.builder.is_empty() && self.textures.pending() == 0
     }
 
-    /// Rewrites material `id`'s block from `network` when it keeps its
-    /// document and its textures, else submits its build,
-    /// leaving the material as it was, clay before its first, until the
-    /// build lands. A network with no surface leaves the material drawn clay.
+    /// A value-only edit rewrites the block in place; anything else submits a build.
     fn material(
         &mut self,
         id: u64,
@@ -353,10 +298,6 @@ impl Shade {
         (self.builder).submit(id, document.clone(), network.clone())
     }
 
-    /// Installs a build that landed: its surface into `surfaces` unless
-    /// another material's build put it there, its uniforms, and its
-    /// textures, loaded now into `textures` at their floors with their
-    /// uploads recorded into `cb`; counts into `update` what the build did.
     fn install(
         device: &gpu::Device,
         surfaces: &mut BTreeMap<u64, Surface>,
@@ -398,9 +339,7 @@ impl Shade {
         Ok(drawn)
     }
 
-    /// Records the draws of `view`'s `groups`, after the prepass, into `cb`,
-    /// inside the same rendering: each group with its material's surface,
-    /// pink where the material failed and clay where it has no surface.
+    /// Records after the prepass, inside the same rendering.
     pub fn draw(
         &self,
         cb: vk::CommandBuffer,
@@ -423,10 +362,8 @@ impl Shade {
         };
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
-        // SAFETY: `cb` is recording inside rendering of the formats the
-        // pipelines were built for, and every handle was created on `d`.
-        // The view's constants address live buffers, as large as the draws
-        // read, and each group's records lie within the view's.
+        // SAFETY: `cb` is recording inside rendering of the pipelines' formats, handles are
+        // from `d`, and the view's constants address live buffers as large as the draws read.
         unsafe {
             d.cmd_set_viewport(cb, 0, &[viewport]);
             d.cmd_set_scissor(cb, 0, &[area]);
@@ -508,9 +445,8 @@ impl Surface {
             pipelines: Vec::new(),
         };
         let set_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY (this and every call below): `d` is live, each info struct
-        // outlives its call, and each handle passed in was created on `d`
-        // just above. `drop` destroys what was made before an error.
+        // SAFETY (this and every call below): `d` is live, infos outlive their calls, handles
+        // are from `d`. `drop` destroys what was made before an error.
         s.set_layout = unsafe { d.create_descriptor_set_layout(&set_info, None) }
             .map_err(|e| format!("vkCreateDescriptorSetLayout failed: {e}"))?;
         let push = [vk::PushConstantRange::default()
@@ -525,9 +461,7 @@ impl Surface {
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
-        // The prepass writes depth; the material pass shades the surface
-        // it left at each pixel, into the color AOV only, inside the same
-        // rendering, so it declares the prepass's attachments.
+        // Shades what the prepass left, inside its rendering, so it declares its attachments.
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(false)
@@ -577,7 +511,6 @@ impl Drop for Surface {
 }
 
 impl Material {
-    /// A block and a set for `surface`, with nothing bound yet.
     fn new(device: &gpu::Device, surface: &Surface, hash: u64) -> Result<Self, String> {
         let d = &device.raw;
         let layout = &surface.layout;
@@ -611,8 +544,8 @@ impl Material {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&sizes);
-        // SAFETY (this and every call below): `d` is live, each info struct
-        // outlives its call, and each handle passed in was created on `d`.
+        // SAFETY (this and every call below): `d` is live, infos outlive their calls, and
+        // handles are from `d`.
         let pool = unsafe { d.create_descriptor_pool(&pool_info, None) }
             .map_err(|e| format!("vkCreateDescriptorPool failed: {e}"))?;
         let mut u = Self {
@@ -633,10 +566,8 @@ impl Material {
         Ok(u)
     }
 
-    /// Writes the set: the block, and each of `self.textures`, in the
-    /// surface's order, through a sampler of the address modes its node
-    /// in `network`, by `document`'s node order, and its file say
-    /// (`material::address_modes`). The GPU must not be reading the set.
+    /// Samplers follow each node's address modes (`material::address_modes`).
+    /// The GPU must not be reading the set.
     fn bind(
         &self,
         textures: &mut Textures,
@@ -698,17 +629,14 @@ impl Material {
                     .buffer_info(table),
             );
         }
-        // SAFETY: the set, buffers, views and samplers were created on
-        // `device`, which is live, and the infos outlive the call.
+        // SAFETY: the set, buffers, views and samplers are from live `device`; infos outlive it.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }
 }
 
 impl Material {
-    /// Rewrites the set's views, each of `self.textures` as it is loaded
-    /// now, after a swap replaced its image; the samplers and tile tables
-    /// stay. The GPU must not be reading the set.
+    /// After a swap replaced images; samplers stay. The GPU must not be reading the set.
     fn bind_views(&self, textures: &Textures, surface: &Surface) -> Result<(), String> {
         let mut views = Vec::new();
         for key in &self.textures {
@@ -725,8 +653,7 @@ impl Material {
                     .image_info(info)
             })
             .collect();
-        // SAFETY: the set and views were created on `device`, which is
-        // live, and the infos outlive the call.
+        // SAFETY: the set and views are from live `device`; infos outlive the call.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }
@@ -735,8 +662,7 @@ impl Material {
 impl Drop for Material {
     fn drop(&mut self) {
         // Destroying the pool frees its set; the buffer drops after.
-        // SAFETY: the pool was created on `device`, and the owner's target
-        // waited for idle before this drops (field order).
+        // SAFETY: the pool is from `device`; the owner's target waited for idle (field order).
         unsafe { self.device.destroy_descriptor_pool(self.pool, None) };
     }
 }
