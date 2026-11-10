@@ -39,7 +39,6 @@ uint2 tile(float3 P)
     return view->tiles[xy.y * grid.x + xy.x];
 }
 
-
 // The illuminance vector at P of a rect, disk or cylinder of radiance 1: a
 // surface there with normal N gets dot(N, it), exactly while the light is
 // wholly above the surface's horizon. It is Lambert's formula over the
@@ -129,10 +128,9 @@ float3 far_illuminance_vector(Light light, float3 c)
 }
 
 // The lights that light P, on a mesh in the light-link collections of mask
-// `link`, one by one: the loop's whole view of which lights there are, so
-// that how they are found changes this file alone. Its tile lists those that
-// may reach P's pixel anywhere in depth; the rest are skipped here, before
-// the BSDF runs, where they give exactly 0.
+// `link`, one by one, as the surface's loop walks them (bake/generate.cpp).
+// Its tile lists those that may reach P's pixel anywhere in depth; the rest
+// are skipped here, before the BSDF runs, where they give exactly 0.
 struct Lights
 {
     float3 P;

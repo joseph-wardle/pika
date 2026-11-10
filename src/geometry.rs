@@ -293,7 +293,7 @@ impl Geometry {
     /// and barriers making them visible to the mesh pass, which draws the
     /// meshes of render `tags` (all of them when there are none), marking
     /// each step every frame, run or not. No GPU work may be pending:
-    /// buffers are replaced and the staging buffer rewritten.
+    /// buffers are replaced and the staging buffers rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -507,7 +507,7 @@ impl Geometry {
         footprints
     }
 
-    /// The bytes of every buffer, the staging buffer on the host side.
+    /// The bytes of every buffer, the staging buffers on the host side.
     pub fn memory(&self) -> gpu::Memory {
         let layout = self.layout.iter().flat_map(|l| {
             [
@@ -614,8 +614,8 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
 }
 
 /// The largest staging buffer: the least `maxMemoryAllocationSize` Vulkan
-/// allows, so every driver grants it. A scene's first upload is its whole
-/// layout, 4.86 GB on ALab, past the 4.29 GB NVIDIA reports.
+/// requires, so no driver rejects the size. A scene's first upload is its
+/// whole layout, which can pass the 4 GiB NVIDIA reports.
 const STAGING: u64 = 1 << 30;
 
 /// Writes `copies` into the staging buffers, more added when they do not

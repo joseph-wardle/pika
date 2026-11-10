@@ -130,10 +130,8 @@ std::string vertex(mx::ShaderStage const &stage) {
 // MaterialX's surface with Pika's light loop in place of its own. The
 // generator is told of no lights (hwMaxActiveLightSources 0), so the pixel
 // stage holds no LightData, light shaders or sampleLightSource; the loop
-// asks shaders/frame.slang for the lights that light P instead, so a light
-// it skips costs no BSDF. The vertex stage hands the mesh's light-link
-// collections over as an int, which MaterialX lacks a uint for, and which
-// Slang does not interpolate. The loop walks frame.slang's Lights rather
+// asks shaders/frame.slang for the lights that light P instead. The loop
+// walks frame.slang's Lights rather
 // than the view so that the lights' kinds, lists and culling change
 // frame.slang alone: a change to the text emitted here changes the tool,
 // which re-bakes every texture (src/bake.rs keys both on the tool's bytes).
@@ -144,8 +142,11 @@ class Surface : public mx::HwSurfaceNode {
     void createVariables(mx::ShaderNode const &node, mx::GenContext &context,
                          mx::Shader &shader) const override {
         mx::HwSurfaceNode::createVariables(node, context, shader);
-        // Only the loop reads it, and Slang drops an input nothing reads,
-        // which leaves the vertex stage's output unmatched.
+        // The mesh's light-link mask, an int because MaterialX has no uint
+        // (Slang does not interpolate ints): the vertex stage writes asint of
+        // it and frame.slang's lights_at reads the bits back. Only the loop
+        // reads it, and Slang drops an input nothing reads, which leaves the
+        // vertex stage's output unmatched.
         if (bsdf(node))
             mx::addStageInput(mx::HW::VERTEX_DATA, mx::Type::INTEGER, "link",
                               shader.getStage(mx::Stage::PIXEL));

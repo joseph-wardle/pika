@@ -16,7 +16,8 @@ pub const TILE: u32 = 16;
 
 /// The illuminance at which a light's reach ends. A facing white Lambert
 /// surface shows illuminance / π, so a pixel loses at most this / π of
-/// each light (`Light::sphere`, `Light::area`).
+/// each light (`Light::sphere`, `Light::area`), and of an area light read
+/// as a point past its `far`, up to as much again.
 pub const THRESHOLD: f32 = 0.01;
 
 /// A light's shape, `shaders/view.slang`'s constants.
@@ -107,14 +108,16 @@ impl Light {
     /// it.
     ///
     /// Past `far` the loop reads it as a point at its centre showing its
-    /// projected area. Over random rects, disks and cylinders, that point's
-    /// illuminance vector misses Lambert's polygon's by under 0.65 ×
-    /// area × bound² / (d² (d - bound)²) for a rect or disk, and 0.4 ×
-    /// area × bound / (d (d - bound)²) for a cylinder, whose outline's
-    /// arcs converge more slowly; `far` is where the larger
-    /// area × bound² / (d - bound)⁴ or 0.5 × area × bound / (d - bound)³
-    /// falls to `THRESHOLD` / radiance. Nearer than twice the bound, where
-    /// the fit was not measured, it is never a point.
+    /// projected area. That point's illuminance vector misses Lambert's
+    /// polygon's by a share falling as area × bound² / d⁴ for a rect or
+    /// disk, and area × bound / d³ for a cylinder, whose outline's arcs
+    /// converge more slowly. `far` is where area × bound² / (d - bound)⁴,
+    /// or 0.5 × area × bound / (d - bound)³, falls to `THRESHOLD` /
+    /// radiance, constants chosen so that the miss
+    /// `area_lights_read_as_points_past_their_far` samples stays under
+    /// `THRESHOLD`. That bounds the illuminance vector, so a diffuse
+    /// surface's error, not a sharp specular lobe's. Nearer than twice the
+    /// bound, which was not sampled, it is never a point.
     #[allow(clippy::too_many_arguments)]
     fn area(
         shape: u32,
@@ -1048,10 +1051,10 @@ mod tests {
             .collect()
     }
 
-    /// Over random area lights and points between `far` × `shrink` and
-    /// their reach, the most the point the loop reads them as there misses
-    /// Lambert's polygon's illuminance by, as a share of `THRESHOLD`; and
-    /// how many lights are points before their reach.
+    /// Over random area lights, the worst miss between the point's and
+    /// Lambert's polygon's illuminance vectors, as a share of `THRESHOLD`,
+    /// from `far` × `shrink` to the reach; and how many lights become
+    /// points before their reach.
     fn far_error(shrink: f32) -> (f32, usize) {
         let mut random = Random(0x9e37_79b9_7f4a_7c15);
         let lights = random_area_lights(&mut random);
