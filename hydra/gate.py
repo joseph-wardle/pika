@@ -20,9 +20,7 @@ PATIENCE = 600
 def testUsdviewInputFunction(appController):
     app = QtWidgets.QApplication.instance()
     view = appController._stageView
-    # ALab's textures are 145 GB at their own size (design.md), which Pika
-    # fits to the device; GATE_CAP=512 is the run to compare with, as the
-    # gate ran before it did.
+    # ALab's textures are 145 GB at their own size; GATE_CAP=512 is the run to compare with.
     cap = int(os.environ.get("GATE_CAP", "0"))
     if cap:
         view.SetRendererSetting("pika:textureCap", cap)

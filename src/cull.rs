@@ -1,6 +1,4 @@
-//! The cull pass: a compute pipeline that, for one view, keeps each mesh
-//! instance whose box may be inside the view's frustum, counting it into
-//! the view's draw records.
+//! The cull pass: keeps each mesh instance whose box may meet a view's frustum.
 
 use ash::vk;
 
@@ -9,12 +7,11 @@ use crate::gpu;
 use crate::view::View;
 
 pub struct Cull {
-    // A copy of the owner's device table, which outlives this (field order).
+    // The owner's device table, which outlives this (field order).
     device: ash::Device,
     compute: gpu::Compute,
 }
 
-/// `shaders/cull.slang`'s push constants.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -34,10 +31,7 @@ impl Cull {
         })
     }
 
-    /// Records into `cb`, outside rendering and after `view` began its
-    /// frame, the pass over `geometry`'s instances into `view`'s records and
-    /// visible instances, and barriers making them visible to the mesh pass
-    /// and the host.
+    /// Call after `view` began its frame.
     pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View) {
         if geometry.count == 0 {
             return;

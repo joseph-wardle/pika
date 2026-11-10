@@ -25,12 +25,9 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
-    // Fetches the float2 primvar the mesh's materials read, which Pika
-    // names from the networks, and hands it over when it is not the one
-    // handed over last. Sync calls it; so does a material's, when its
-    // network reads another primvar (PikaMaterial::Sync).
+    // Hands over the float2 primvar the mesh's materials read when it is not the one handed over
+    // last. A material's Sync calls it too, when its network reads another primvar.
     void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer);
-    // Whether the mesh or one of its GeomSubsets is bound to the material.
     bool Binds(SdfPath const &material) const;
 
 protected:
@@ -43,18 +40,14 @@ private:
     void _SyncTopology(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncPoints(HdSceneDelegate *delegate, pika_renderer *renderer);
     void _SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer);
-    // The interpolation of the mesh's primvar `name`, if it has one.
     bool _FindPrimvar(HdSceneDelegate *delegate, TfToken const &name,
                       HdInterpolation &interpolation) const;
     void _SyncInstancing(HdSceneDelegate *delegate, pika_renderer *renderer);
 
     Pika &_pika;
-    // The materials the GeomSubsets bind, from the last topology.
     std::vector<SdfPath> _subset_materials;
-    // The texcoord handed over last, as fetched (an empty name: none), so
-    // a primvar change that left it as it was, an animated primvar no
-    // material reads, neither refines it again nor hands it over. Reset
-    // with the topology, which the refinement follows.
+    // The texcoord handed over last (an empty name: none), so an animated primvar no material
+    // reads is neither refined again nor handed over. Reset with the topology.
     struct Texcoord {
         std::string name;
         HdInterpolation interpolation = HdInterpolationConstant;
@@ -97,8 +90,6 @@ private:
     uint64_t _id = 0;
 };
 
-// A distant, sphere, rect, disk or cylinder light copies its transform and UsdLux inputs into the
-// store.
 class PikaLight final : public HdLight {
 public:
     // Hydra's fallback light has no path and stands for nothing in the
@@ -138,7 +129,6 @@ private:
     uint64_t _id = 0;
 };
 
-// An entry in the store's count of a prim type, for as long as it lives.
 class PikaCount {
 public:
     PikaCount(TfToken const &type, SdfPath const &id, Pika &pika);
@@ -178,7 +168,6 @@ private:
     PikaCount _count;
 };
 
-// An sprim of a type Pika only counts, such as a light or a material.
 class PikaCountedSprim final : public HdSprim {
 public:
     PikaCountedSprim(TfToken const &type, SdfPath const &id, Pika &pika)

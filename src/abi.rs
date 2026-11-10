@@ -1,10 +1,4 @@
-//! The C ABI the Hydra delegate calls, declared in `hydra/pika.h`.
-//!
-//! Calls go one way: C++ calls Rust and Rust never calls back. Every entry
-//! returns a status and catches panics, so a Rust bug cannot take down the
-//! host. A panic while the renderer is locked poisons it, and every later
-//! call on it fails, so the delegate stops calling and renders nothing rather
-//! than a frame from half-updated state.
+//! The C ABI the Hydra delegate calls; `hydra/pika.h` states its contract.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -23,11 +17,9 @@ pub const OK: i32 = 0;
 pub const ERROR: i32 = 1;
 pub const PANIC: i32 = 2;
 
-/// The opaque `pika_renderer` C++ holds. The mutex serializes calls from
-/// Hydra's parallel sync and is what a panic poisons.
+/// The mutex serializes Hydra's parallel sync and is what a panic poisons.
 pub type Handle = Mutex<Renderer>;
 
-/// `pika_light`.
 #[repr(C)]
 pub struct CLight {
     light_type: *const c_char,
@@ -43,7 +35,6 @@ pub struct CLight {
     visible: bool,
 }
 
-/// `pika_subset`.
 #[repr(C)]
 pub struct CSubset {
     material: *const c_char,
@@ -51,7 +42,6 @@ pub struct CSubset {
     face_count: usize,
 }
 
-/// `pika_topology`.
 #[repr(C)]
 pub struct CTopology {
     scheme: *const c_char,
@@ -67,7 +57,6 @@ pub struct CTopology {
     refined: *const CRefined,
 }
 
-/// `pika_refined`.
 #[repr(C)]
 pub struct CRefined {
     face_vertex_counts: *const i32,
@@ -79,7 +68,6 @@ pub struct CRefined {
     stencils: CStencils,
 }
 
-/// `pika_stencils`.
 #[repr(C)]
 pub struct CStencils {
     offsets: *const u32,
@@ -89,7 +77,6 @@ pub struct CStencils {
     entry_count: usize,
 }
 
-/// `pika_refined_texcoord`.
 #[repr(C)]
 pub struct CRefinedTexcoord {
     face_vertex_indices: *const i32,
@@ -110,7 +97,6 @@ unsafe fn stencils(s: &CStencils) -> Stencils {
     }
 }
 
-/// `pika_instance_primvars`.
 #[repr(C)]
 pub struct CInstancePrimvars {
     transforms: *const [f64; 16],
@@ -123,7 +109,6 @@ pub struct CInstancePrimvars {
     scale_count: usize,
 }
 
-/// `pika_param`.
 #[repr(C)]
 pub struct CParam {
     name: *const c_char,
@@ -134,7 +119,6 @@ pub struct CParam {
     text: *const c_char,
 }
 
-/// `pika_node`.
 #[repr(C)]
 pub struct CNode {
     path: *const c_char,
@@ -143,7 +127,6 @@ pub struct CNode {
     param_count: usize,
 }
 
-/// `pika_connection`.
 #[repr(C)]
 pub struct CConnection {
     from: *const c_char,
@@ -152,7 +135,6 @@ pub struct CConnection {
     input: *const c_char,
 }
 
-/// `pika_network`.
 #[repr(C)]
 pub struct CNetwork {
     nodes: *const CNode,
@@ -162,7 +144,6 @@ pub struct CNetwork {
     surface: *const c_char,
 }
 
-/// `pika_aov`.
 #[repr(C)]
 pub struct CAov {
     format: *const c_char,
@@ -170,14 +151,12 @@ pub struct CAov {
     len: usize,
 }
 
-/// `pika_stat`.
 #[repr(C)]
 pub struct CStat {
     key: [c_char; 48],
     value: f64,
 }
 
-/// `pika_frame`.
 #[repr(C)]
 pub struct CFrame {
     world_to_view: [f64; 16],
@@ -198,8 +177,6 @@ thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
 }
 
-/// Runs `f` as one ABI call: its error or panic becomes a status and this
-/// thread's last error.
 fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
     let (status, message) = match panic::catch_unwind(AssertUnwindSafe(f)) {
         Ok(Ok(())) => return OK,
@@ -212,13 +189,12 @@ fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
             ),
         ),
     };
-    // Messages are Rust strings, which may hold a NUL; C would cut them there.
+    // C would cut a message at a NUL.
     let message = CString::new(message.replace('\0', " ")).unwrap_or_default();
     LAST_ERROR.with(|e| *e.borrow_mut() = message);
     status
 }
 
-/// What a caught panic said: its payload as text.
 fn panic_message(payload: &(dyn Any + Send)) -> String {
     payload
         .downcast_ref::<&str>()
@@ -227,8 +203,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "unknown payload".into())
 }
 
-/// Borrows `len` values at `ptr`. Empty Hydra arrays may pass a null pointer,
-/// which `slice::from_raw_parts` does not allow.
+/// Empty Hydra arrays may pass null, which `slice::from_raw_parts` forbids.
 ///
 /// # Safety
 /// Unless `len` is 0, `ptr` must be valid for `len` reads for `'a`.
@@ -240,8 +215,6 @@ unsafe fn slice<'a, T>(ptr: *const T, len: usize) -> &'a [T] {
     unsafe { std::slice::from_raw_parts(ptr, len) }
 }
 
-/// A primvar the delegate passes as null when it is absent.
-///
 /// # Safety
 /// As for `slice`.
 unsafe fn primvar<T: Clone>(ptr: *const T, len: usize) -> Option<Vec<T>> {
@@ -249,8 +222,6 @@ unsafe fn primvar<T: Clone>(ptr: *const T, len: usize) -> Option<Vec<T>> {
     (!ptr.is_null()).then(|| unsafe { slice(ptr, len) }.to_vec())
 }
 
-/// A path the delegate passes as "" when there is none.
-///
 /// # Safety
 /// As for `string`.
 unsafe fn path(ptr: *const c_char) -> Result<Option<String>, String> {
@@ -346,15 +317,11 @@ fn lock(handle: &Handle) -> Result<MutexGuard<'_, Renderer>, String> {
         .map_err(|_| "the renderer was poisoned by an earlier panic (reported above)".into())
 }
 
-/// The message for the last call on this thread that did not return `OK`.
-/// Valid until the next failing call on this thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn pika_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
-/// Opens a Vulkan device and writes the new renderer to `*out`.
-///
 /// # Safety
 /// `out` must be valid for one pointer write.
 #[unsafe(no_mangle)]
@@ -369,8 +336,6 @@ pub unsafe extern "C" fn pika_renderer_new(out: *mut *mut Handle) -> i32 {
     })
 }
 
-/// Prints the renderer's frame timings and destroys it, poisoned or not.
-///
 /// # Safety
 /// `renderer` must come from `pika_renderer_new` and not be used again.
 #[unsafe(no_mangle)]
@@ -384,14 +349,8 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
     })
 }
 
-/// Renders one frame into the render buffers it binds, and writes to
-/// `*converged` whether they now hold this frame rather than the one
-/// before, with no material build still out.
-///
 /// # Safety
-/// `renderer` must be live, `frame` valid for reads, each bound AOV's
-/// `pixels` valid for `len` byte writes for the duration of the call, and
-/// `converged` valid for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_render(
     renderer: *const Handle,
@@ -440,11 +399,8 @@ pub unsafe extern "C" fn pika_render(
     })
 }
 
-/// Adds a mesh to the store and writes its id, never reused, to `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
-/// for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_new(
     renderer: *const Handle,
@@ -470,8 +426,7 @@ pub unsafe extern "C" fn pika_mesh_free(renderer: *const Handle, id: u64) -> i32
 }
 
 /// # Safety
-/// `renderer` must be live, and `topology` and the arrays it points to valid
-/// for reads for the duration of the call.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_topology(
     renderer: *const Handle,
@@ -531,8 +486,7 @@ pub unsafe extern "C" fn pika_mesh_points(
 }
 
 /// # Safety
-/// `renderer` must be live, `interpolation` a NUL-terminated string and
-/// `normals` valid for `count` reads.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_normals(
     renderer: *const Handle,
@@ -562,9 +516,6 @@ pub unsafe extern "C" fn pika_mesh_no_normals(renderer: *const Handle, id: u64) 
     call(|| lock(unsafe { &*renderer })?.store.set_normals(id, None))
 }
 
-/// Writes the name of the float2 primvar the mesh's material reads, the
-/// texcoord to fetch, to `out`, or "" when it reads none.
-///
 /// # Safety
 /// `renderer` must be live and `out` valid for `capacity` writes.
 #[unsafe(no_mangle)]
@@ -595,11 +546,8 @@ pub unsafe extern "C" fn pika_mesh_texcoord_name(
     })
 }
 
-/// The float2 primvar `name` of the mesh, the texcoord its material reads.
-///
 /// # Safety
-/// `renderer` must be live, `name` and `interpolation` NUL-terminated
-/// strings and `values` valid for `count` reads.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_texcoord(
     renderer: *const Handle,
@@ -677,8 +625,6 @@ pub unsafe extern "C" fn pika_mesh_render_tag(
     })
 }
 
-/// Sets the material bound to the whole mesh ("" when none).
-///
 /// # Safety
 /// `renderer` must be live, and `material` a NUL-terminated string.
 #[unsafe(no_mangle)]
@@ -694,12 +640,8 @@ pub unsafe extern "C" fn pika_mesh_material(
     })
 }
 
-/// Sets the instancer a mesh is a prototype of ("" when none) and the
-/// instance indices it is drawn at.
-///
 /// # Safety
-/// `renderer` must be live, `instancer` a NUL-terminated string and
-/// `indices` valid for `count` reads.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_instancer(
     renderer: *const Handle,
@@ -720,11 +662,8 @@ pub unsafe extern "C" fn pika_mesh_instancer(
     })
 }
 
-/// Sets the light-link collections the mesh is in, by Hydra's tokens.
-///
 /// # Safety
-/// `renderer` must be live, and `categories` valid for `count` reads of
-/// NUL-terminated strings.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_categories(
     renderer: *const Handle,
@@ -743,11 +682,8 @@ pub unsafe extern "C" fn pika_mesh_categories(
     })
 }
 
-/// Adds an instancer to the store and writes its id, never reused, to `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
-/// for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_new(
     renderer: *const Handle,
@@ -772,12 +708,8 @@ pub unsafe extern "C" fn pika_instancer_free(renderer: *const Handle, id: u64) -
     call(|| lock(unsafe { &*renderer })?.store.remove_instancer(id))
 }
 
-/// Sets the instancer this one is nested in ("" when none) and the
-/// instance indices of the parent it is repeated at.
-///
 /// # Safety
-/// `renderer` must be live, `parent` a NUL-terminated string and `indices`
-/// valid for `count` reads.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_parent(
     renderer: *const Handle,
@@ -814,8 +746,7 @@ pub unsafe extern "C" fn pika_instancer_transform(
 }
 
 /// # Safety
-/// `renderer` must be live, and `primvars` and the arrays it points to valid
-/// for reads for the duration of the call.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_primvars(
     renderer: *const Handle,
@@ -838,11 +769,8 @@ pub unsafe extern "C" fn pika_instancer_primvars(
     })
 }
 
-/// Adds a material to the store and writes its id, never reused, to `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
-/// for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_new(
     renderer: *const Handle,
@@ -867,12 +795,8 @@ pub unsafe extern "C" fn pika_material_free(renderer: *const Handle, id: u64) ->
     call(|| lock(unsafe { &*renderer })?.store.remove_material(id))
 }
 
-/// Replaces a material's network, and writes to `*dirty` whether its
-/// meshes must sync again, because it reads a primvar it did not before.
-///
 /// # Safety
-/// `renderer` must be live, `network` and everything it points to valid
-/// for reads for the duration of the call, and `dirty` for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_network(
     renderer: *const Handle,
@@ -890,11 +814,8 @@ pub unsafe extern "C" fn pika_material_network(
     })
 }
 
-/// Adds basis curves to the store and writes their id, never reused, to `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
-/// for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_curves_new(
     renderer: *const Handle,
@@ -927,12 +848,8 @@ pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, by
     call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
 }
 
-/// Adds a light to the store and writes its id, never reused, to
-/// `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `path` a NUL-terminated string and `out` valid
-/// for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_new(
     renderer: *const Handle,
@@ -958,8 +875,7 @@ pub unsafe extern "C" fn pika_light_free(renderer: *const Handle, id: u64) -> i3
 }
 
 /// # Safety
-/// `renderer` must be live, and `params` valid for one read, its type a
-/// NUL-terminated string.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_params(
     renderer: *const Handle,
@@ -1011,9 +927,6 @@ pub unsafe extern "C" fn pika_light_transform(
     })
 }
 
-/// Sets the token of the light's lightLink collection, "" when it includes
-/// everything.
-///
 /// # Safety
 /// `renderer` must be live, and `link` a NUL-terminated string.
 #[unsafe(no_mangle)]
@@ -1029,12 +942,8 @@ pub unsafe extern "C" fn pika_light_link(
     })
 }
 
-/// Adds a prim that is only counted and writes its id, never reused, to
-/// `*out`.
-///
 /// # Safety
-/// `renderer` must be live, `prim_type` and `path` NUL-terminated strings and
-/// `out` valid for one write.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_counted_new(
     renderer: *const Handle,
@@ -1060,8 +969,6 @@ pub unsafe extern "C" fn pika_counted_free(renderer: *const Handle, id: u64) -> 
     call(|| lock(unsafe { &*renderer })?.store.remove_counted(id))
 }
 
-/// Marks the start of a Hydra sync, for its timing.
-///
 /// # Safety
 /// `renderer` must be live.
 #[unsafe(no_mangle)]
@@ -1073,8 +980,6 @@ pub unsafe extern "C" fn pika_sync_begin(renderer: *const Handle) -> i32 {
     })
 }
 
-/// Ends a Hydra sync: records its stats and writes `PIKA_STORE_DUMP`.
-///
 /// # Safety
 /// `renderer` must be live.
 #[unsafe(no_mangle)]
@@ -1083,12 +988,8 @@ pub unsafe extern "C" fn pika_sync_end(renderer: *const Handle) -> i32 {
     call(|| lock(unsafe { &*renderer })?.end_sync())
 }
 
-/// Writes the stats the host shows, up to `capacity` of them, to `out`, and
-/// how many to `*count`.
-///
 /// # Safety
-/// `renderer` must be live, `out` valid for `capacity` writes and `count`
-/// for one.
+/// `renderer` must be live and every pointer valid for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_stats(
     renderer: *const Handle,
@@ -1179,8 +1080,7 @@ mod tests {
             panic!("bug");
         };
         assert_eq!(call(panic_while_locked), PANIC);
-        // The control above passed with the same lock, so this fails only
-        // because of the panic.
+        // The same lock passed above, so this fails only because of the panic.
         assert_eq!(call(use_lock), ERROR);
         assert_eq!(last_error(), "poisoned");
     }

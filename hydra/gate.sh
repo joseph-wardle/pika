@@ -1,11 +1,7 @@
 #!/usr/bin/env bash
-# The gate run, on your own display: ALab in usdview, its trailer camera
-# fitted into 1080p, the render purpose, fur off (hydra/scenes/alab_nofur.usda),
-# frames 1004-1057 played twice as the Play button does (hydra/gate.py).
-# Pika writes PIKA_STATS, nvidia-smi logs the clocks beside it, and the
-# second loop is summarised with hydra/stats.py: its period p95 and misses
-# are the gate's numbers, and each budget line's p95 is shown against its
-# budget. The validation layer stays off: it would be timed too.
+# The gate run, on your own display: ALab in usdview at 1080p, frames 1004-1057 played twice
+# (hydra/gate.py); the second loop's period p95 and misses are the gate's numbers. The
+# validation layer stays off: it would be timed too.
 #
 #   hydra/gate.sh /path/to/ALab/entry.usda <out dir>
 set -euo pipefail

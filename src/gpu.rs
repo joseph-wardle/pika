@@ -1,5 +1,4 @@
-//! Vulkan instance, validation, device choice and logical device, and the
-//! buffers and compute pipelines created on it.
+//! Vulkan instance, device, buffers and pipelines.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -11,7 +10,6 @@ pub const REQUIRED_API: u32 = vk::API_VERSION_1_3;
 
 const VALIDATION_LAYER: &std::ffi::CStr = c"VK_LAYER_KHRONOS_validation";
 
-/// What Pika needs to know about a physical device to choose one.
 pub struct DeviceInfo {
     pub handle: vk::PhysicalDevice,
     pub name: String,
@@ -19,19 +17,15 @@ pub struct DeviceInfo {
     pub api_version: u32,
     pub vram_bytes: u64,
     pub ray_query: bool,
-    /// `VK_EXT_memory_budget`, which says how much of the VRAM this process
-    /// uses and may use.
     pub memory_budget: bool,
-    /// First queue family that supports graphics, compute and timestamps.
+    /// First family with graphics, compute and timestamps.
     pub queue_family: Option<u32>,
-    /// That family's valid timestamp bits.
     pub timestamp_bits: u32,
     /// Nanoseconds per timestamp tick.
     pub timestamp_period: f32,
 }
 
 impl DeviceInfo {
-    /// Why Pika cannot use this device, or `None` if it can.
     pub fn unsuitable_reason(&self) -> Option<&'static str> {
         if self.kind == vk::PhysicalDeviceType::CPU {
             Some("CPU device")
@@ -45,8 +39,6 @@ impl DeviceInfo {
     }
 }
 
-/// Picks the suitable device most likely to be the artist's GPU:
-/// discrete before integrated before virtual, then the most VRAM.
 pub fn choose(devices: &[DeviceInfo]) -> Option<usize> {
     let rank = |kind| match kind {
         vk::PhysicalDeviceType::DISCRETE_GPU => 0,
@@ -62,8 +54,6 @@ pub fn choose(devices: &[DeviceInfo]) -> Option<usize> {
         .map(|(i, _)| i)
 }
 
-/// The first memory type allowed by `type_bits` (from `vkGet*MemoryRequirements`)
-/// that has every flag in `flags`.
 pub fn memory_type(
     types: &[vk::MemoryType],
     type_bits: u32,
@@ -83,13 +73,11 @@ pub fn version_string(v: u32) -> String {
     )
 }
 
-/// A Vulkan instance with every physical device it reports.
 pub struct Instance {
     // `entry` keeps libvulkan loaded; it must outlive `raw`.
     _entry: ash::Entry,
     raw: ash::Instance,
-    // The messenger's callback writes through a pointer to this counter, so it
-    // is boxed and outlives the messenger.
+    // Boxed: the messenger's callback holds a pointer to it.
     messages: Box<AtomicU32>,
     messenger: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     pub loader_version: u32,
@@ -177,8 +165,7 @@ impl Instance {
         };
         if validation {
             let loader = ash::ext::debug_utils::Instance::new(&instance._entry, &instance.raw);
-            // SAFETY: the instance enabled VK_EXT_debug_utils, and `user_data`
-            // points to `instance.messages`, which outlives the messenger.
+            // SAFETY: debug_utils is enabled; `user_data` outlives the messenger.
             let messenger = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
                 .map_err(|e| format!("vkCreateDebugUtilsMessengerEXT failed: {e}"))?;
             instance.messenger = Some((loader, messenger));
@@ -193,8 +180,7 @@ impl Instance {
         Ok(instance)
     }
 
-    /// Warnings and errors the validation layer has reported so far, or `None`
-    /// if the layer was not found.
+    /// `None` if the validation layer was not found.
     pub fn validation_messages(&self) -> Option<u32> {
         self.messenger
             .as_ref()
@@ -249,8 +235,6 @@ impl Instance {
         })
     }
 
-    /// Opens a logical device with one graphics+compute queue on `devices[index]`,
-    /// with dynamic rendering and synchronization2 enabled.
     pub fn open(&self, index: usize) -> Result<Device<'_>, String> {
         let info = &self.devices[index];
         let queue_family = info.queue_family.ok_or_else(|| {
@@ -263,13 +247,8 @@ impl Instance {
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        // Dynamic rendering, synchronization2 and buffer device addresses are
-        // mandatory in Vulkan 1.3. The rest are optional, but every desktop
-        // GPU has them. Scalar block layout is how slangc lays out what a
-        // pointer reads, and how `repr(C)` lays out the structs written for
-        // it: a float3 after a float3 sits at offset 12. Independent blend lets the prepass and the material
-        // pass each write some of the same attachments; the textures are
-        // block compressed.
+        // Scalar block layout is slangc's pointer layout and `repr(C)`'s: a float3
+        // after a float3 sits at offset 12.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -289,8 +268,7 @@ impl Instance {
             .enabled_extension_names(extensions)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
-        // SAFETY: the physical device belongs to this live instance and
-        // `create_info` outlives the call.
+        // SAFETY: the physical device is this instance's; `create_info` outlives the call.
         let raw =
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
@@ -337,8 +315,6 @@ impl Drop for Instance {
     }
 }
 
-/// Whether the validation layer is installed. It must also provide
-/// VK_EXT_layer_settings, which Pika uses to turn on sync validation.
 fn validation_found(entry: &ash::Entry) -> Result<bool, String> {
     // SAFETY: `entry` is a loaded Vulkan library.
     let layers = unsafe { entry.enumerate_instance_layer_properties() }
@@ -366,15 +342,13 @@ fn validation_found(entry: &ash::Entry) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Counts and prints each message the validation layer reports.
 unsafe extern "system" fn count_message(
     _severity: vk::DebugUtilsMessageSeverityFlagsEXT,
     _types: vk::DebugUtilsMessageTypeFlagsEXT,
     data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     messages: *mut c_void,
 ) -> vk::Bool32 {
-    // SAFETY: the layer passes valid callback data, and `messages` is the
-    // instance's boxed counter, which outlives the messenger.
+    // SAFETY: the layer passes valid data; `messages` outlives the messenger.
     let (text, messages) = unsafe { ((*data).message_as_c_str(), &*messages.cast::<AtomicU32>()) };
     messages.fetch_add(1, Ordering::Relaxed);
     let text = text.map_or("<no message>".into(), |t| t.to_string_lossy());
@@ -382,7 +356,6 @@ unsafe extern "system" fn count_message(
     vk::FALSE
 }
 
-/// A logical device. It borrows its `Instance` so it cannot outlive it.
 pub struct Device<'a> {
     instance: &'a Instance,
     physical: vk::PhysicalDevice,
@@ -393,25 +366,20 @@ pub struct Device<'a> {
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
-    /// `PIKA_BUDGET`, bytes standing in for the driver's budget of each
-    /// device-local heap, so a check can see textures lowered without
-    /// filling the device.
+    /// `PIKA_BUDGET` bytes, replacing each device-local heap's budget.
     ceiling: Option<u64>,
 }
 
 impl Device<'_> {
-    /// Each memory heap's use and budget, by heap index. A memory type's
-    /// allocations come from its heap alone, so each is checked on its
-    /// own: a GPU's second device-local heap, the small window the CPU
-    /// writes through, holds no textures however much of it is free.
+    /// Use and budget by heap index. Each heap is checked alone: the small
+    /// CPU-writable device-local heap holds no textures however free it is.
     pub fn heaps(&self) -> Vec<Heap> {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut properties = vk::PhysicalDeviceMemoryProperties2::default();
         if self.memory_budget {
             properties = properties.push_next(&mut budget);
         }
-        // SAFETY: the physical device belongs to the live instance, and the
-        // extension that fills `budget` is enabled when it is chained.
+        // SAFETY: the device is the live instance's; `budget` is chained only if enabled.
         unsafe {
             (self.instance.raw)
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
@@ -431,25 +399,20 @@ impl Device<'_> {
             .collect()
     }
 
-    /// The heap that `allocate` takes memory of `type_bits` and `flags` from.
     pub fn heap(&self, type_bits: u32, flags: vk::MemoryPropertyFlags) -> Result<usize, String> {
         let i = memory_type(&self.memory_types, type_bits, flags)?;
         Ok(self.memory_types[i as usize].heap_index as usize)
     }
 }
 
-/// The bytes of a memory heap this process uses, and the bytes the driver
-/// lets it use before allocations fail or spill to host memory. Both are 0
-/// on a driver without `VK_EXT_memory_budget`, where `PIKA_BUDGET` still
-/// sets the device-local heaps' budget.
+/// Bytes used and allowed; both 0 without `VK_EXT_memory_budget`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Heap {
     pub used: u64,
     pub allowed: u64,
 }
 
-/// The first heap that allocating `needs`, bytes by heap index, would take
-/// past its budget. A heap whose budget is unknown takes anything.
+/// The first heap `needs` (bytes per heap) would overflow; an unknown budget takes anything.
 pub fn overflow(heaps: &[Heap], needs: &[u64]) -> Option<usize> {
     (0..heaps.len()).find(|&i| {
         let h = heaps[i];
@@ -459,13 +422,11 @@ pub fn overflow(heaps: &[Heap], needs: &[u64]) -> Option<usize> {
 
 impl Drop for Device<'_> {
     fn drop(&mut self) {
-        // SAFETY: every object created on this device borrows it, so all have
-        // been destroyed, and their owners waited for idle first.
+        // SAFETY: every object on this device borrows it, so all are destroyed and idle.
         unsafe { self.raw.destroy_device(None) };
     }
 }
 
-/// Allocates memory of the first type allowed by `needs` that has `flags`.
 pub fn allocate(
     device: &Device,
     needs: vk::MemoryRequirements,
@@ -490,7 +451,6 @@ pub fn allocate(
     })
 }
 
-/// Bytes allocated in device-local and in host-visible memory, for the stats.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Memory {
     pub device: u64,
@@ -504,13 +464,9 @@ impl std::ops::AddAssign for Memory {
     }
 }
 
-/// A buffer and the memory only it uses. Device-local buffers have a device
-/// address, through which shaders read them; host buffers stay mapped, and
-/// have one when their usage asks for it.
-/// Every handle starts null, so a failed `new` can drop a partly built value.
+/// Handles start null so a failed `new` can drop a partly built buffer.
 pub struct Buffer {
-    // A copy of the owner's device table. Every owner keeps the `Device`
-    // alive longer than its buffers (field order), which `drop` relies on.
+    // Owners keep the `Device` alive longer than their buffers (field order).
     device: ash::Device,
     pub raw: vk::Buffer,
     memory: vk::DeviceMemory,
@@ -520,12 +476,10 @@ pub struct Buffer {
     mapped: *mut u8,
 }
 
-// SAFETY: `mapped` points into memory this buffer owns, and it is only
-// dereferenced through `&mut self`, so moving the buffer to another thread is sound.
+// SAFETY: `mapped` is memory this buffer owns, dereferenced only through `&mut self`.
 unsafe impl Send for Buffer {}
 
 impl Buffer {
-    /// A device-local buffer of `size` bytes, with a device address.
     pub fn device_local(
         device: &Device,
         size: u64,
@@ -550,8 +504,7 @@ impl Buffer {
         Ok(b)
     }
 
-    /// A mapped host buffer of `size` bytes in memory with `flags`, which
-    /// must include HOST_VISIBLE and HOST_COHERENT.
+    /// `flags` must include HOST_VISIBLE and HOST_COHERENT.
     pub fn host(
         device: &Device,
         size: u64,
@@ -611,16 +564,13 @@ impl Buffer {
         Ok(b)
     }
 
-    /// A host buffer's bytes. The owner must have waited for any GPU work
-    /// that uses the buffer.
+    /// The caller must have waited for GPU work using the buffer.
     pub fn bytes(&mut self) -> &mut [u8] {
         assert!(!self.mapped.is_null(), "a device-local buffer has no bytes");
-        // SAFETY: `mapped` is the whole of the buffer's memory, at least
-        // `size` bytes long.
+        // SAFETY: `mapped` covers the whole memory, at least `size` bytes.
         unsafe { std::slice::from_raw_parts_mut(self.mapped, self.size as usize) }
     }
 
-    /// The bytes this buffer holds, on the side it was allocated on.
     pub fn memory(&self) -> Memory {
         match self.mapped.is_null() {
             true => Memory {
@@ -637,8 +587,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        // SAFETY: both handles were created on `device` or are null, which
-        // destroy calls accept, and the owner waited for any work using them.
+        // SAFETY: handles are from `device` or null, and the owner waited for idle.
         unsafe {
             self.device.destroy_buffer(self.raw, None);
             self.device.free_memory(self.memory, None);
@@ -646,10 +595,6 @@ impl Drop for Buffer {
     }
 }
 
-/// A graphics pipeline of `module`'s vertex and fragment entry points,
-/// `entries`, rendering triangles into `colors` (each attachment's format
-/// and the channels it writes) and a `depth_format` attachment with
-/// `depth`'s test, viewport and scissor dynamic.
 pub fn graphics(
     d: &ash::Device,
     layout: vk::PipelineLayout,
@@ -675,10 +620,8 @@ pub fn graphics(
     let viewport = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
-    // Nothing is culled. USD's front faces wind counter-clockwise in a
-    // right-handed frame, and the camera's y is not flipped (rows go bottom
-    // up), so they wind clockwise in Vulkan's framebuffer coordinates.
-    // hydra/images/behind.usda fails if this is reversed.
+    // USD's counter-clockwise front faces wind clockwise here, as y is not
+    // flipped. hydra/images/behind.usda fails if this is reversed.
     let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
@@ -708,31 +651,26 @@ pub fn graphics(
         .dynamic_state(&dynamic)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: `d` is live, `module` and `layout` were created on it, and
-    // `info` and what it points to outlive the call.
+    // SAFETY: `module` and `layout` are from the live `d`; `info` outlives the call.
     unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
         .map(|p| p[0])
         .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({colors:?}) failed: {e}"))
 }
 
-/// A compute pipeline whose only input is its push constants: buffer
-/// addresses and a range of items, which its shader walks in a grid-stride
-/// loop of `numthreads(64, 1, 1)` groups.
+/// Shaders read only push constants and walk their items in a grid-stride loop.
 pub struct Compute {
-    // A copy of the owner's device table, which outlives this (field order).
+    // The owner's device table, which outlives this (field order).
     device: ash::Device,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
 }
 
 impl Compute {
-    /// The threads in a group, as the shaders declare.
+    /// Must match the shaders' `numthreads(64, 1, 1)`.
     const GROUP_SIZE: u64 = 64;
     /// Vulkan's guaranteed minimum of groups in one dispatch dimension.
     const MAX_GROUPS: u64 = 65535;
 
-    /// The pipeline of `spirv`'s entry point `cs`, with `push_size` bytes of
-    /// push constants.
     pub fn new(device: &Device, spirv: &[u32], push_size: usize) -> Result<Self, String> {
         let d = &device.raw;
         let push = [vk::PushConstantRange::default()
@@ -758,8 +696,7 @@ impl Compute {
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(c.layout);
-        // SAFETY: `d` is live, `module` and the layout were created on it,
-        // and `info` outlives the call.
+        // SAFETY: `module` and the layout are from the live `d`; `info` outlives the call.
         let built = unsafe { d.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) };
         // SAFETY: pipeline creation is complete, so the module is no longer used.
         unsafe { d.destroy_shader_module(module, None) };
@@ -769,10 +706,8 @@ impl Compute {
         Ok(c)
     }
 
-    /// Records into `cb`, outside rendering, one dispatch per range of
-    /// items. `push` is called with each range's first item, count and
-    /// stride, the threads dispatched, and returns the push constants: a
-    /// plain `repr(C)` struct without padding.
+    /// One dispatch per range, outside rendering. `push(first, count, stride)`
+    /// returns a `repr(C)` struct without padding.
     pub fn record<P: Copy>(
         &self,
         cb: vk::CommandBuffer,
@@ -780,8 +715,7 @@ impl Compute {
         push: impl Fn(u32, u32, u32) -> P,
     ) {
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, and the pipeline was
-        // created on `d`.
+        // SAFETY: `cb` records outside rendering; the pipeline is from `d`.
         unsafe { d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline) };
         for r in ranges.iter().filter(|r| !r.is_empty()) {
             let count = r.end - r.start;
@@ -789,8 +723,7 @@ impl Compute {
                 .div_ceil(Self::GROUP_SIZE)
                 .min(Self::MAX_GROUPS);
             let constants = push(r.start, count, (groups * Self::GROUP_SIZE) as u32);
-            // SAFETY: `P` is plain data without padding, so all its bytes are
-            // initialized.
+            // SAFETY: `P` has no padding, so all its bytes are initialized.
             let bytes = unsafe {
                 std::slice::from_raw_parts((&raw const constants).cast::<u8>(), size_of::<P>())
             };
@@ -805,8 +738,7 @@ impl Compute {
 
 impl Drop for Compute {
     fn drop(&mut self) {
-        // SAFETY: both handles were created on `device` or are null, and the
-        // owner's target waited for idle before this drops (field order).
+        // SAFETY: handles are from `device` or null; the owner waited for idle first.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -850,21 +782,19 @@ mod tests {
             memory(host | vk::MemoryPropertyFlags::HOST_CACHED),
         ];
         assert_eq!(memory_type(&types, 0b1111, host), Ok(2));
-        // Type 2 matches but is not allowed, so the next match is chosen.
+        // Type 2 matches but is not allowed.
         assert_eq!(memory_type(&types, 0b1011, host), Ok(3));
         assert!(memory_type(&types, 0b0011, host).is_err());
     }
 
     #[test]
     fn each_heap_holds_only_its_own_allocations() {
-        // VRAM, host memory, and the small device-local window the CPU
-        // writes through, as an NVIDIA GPU lays them out.
+        // VRAM, host, and NVIDIA's small CPU-writable VRAM window.
         let heap = |used, allowed| Heap { used, allowed };
         let heaps = [heap(10, 12), heap(0, 100), heap(1, 4)];
         assert_eq!(overflow(&heaps, &[2, 50, 3]), None);
         assert_eq!(overflow(&heaps, &[0, 0, 0]), None);
-        // The control: 3 bytes fit the device-local heaps' 5 free bytes
-        // summed, but not the 2 free in the heap they come from.
+        // Negative control: fits the summed free bytes, not heap 0's.
         assert_eq!(overflow(&heaps, &[3, 0, 0]), Some(0));
         assert_eq!(overflow(&heaps, &[0, 101, 0]), Some(1));
         assert_eq!(overflow(&heaps, &[0, 0, 4]), Some(2));

@@ -1,9 +1,5 @@
-//! One view of the scene: what its passes read, the camera, the lights and
-//! their tiles and every buffer address, written once per frame into a buffer whose address
-//! is each pass's push constant; and the draw records and visible instances
-//! the cull pass fills for it. Every view (the camera now; shadow views and
-//! probe faces later) is culled against its own frustum into its own
-//! `View`, never reusing another's.
+//! One view's constants, lights, tiles and cull outputs. Every view is culled against
+//! its own frustum into its own `View`, never reusing another's.
 
 use ash::vk;
 
@@ -39,19 +35,15 @@ pub struct View {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
     constants: Buffer,
-    /// The lights, then the tiles, then the tiles' lights, written from
-    /// `staging`.
+    /// The lights, then the tiles, then the tiles' lights.
     lights: Buffer,
     staging: Buffer,
     records: Buffer,
     visible: Buffer,
-    /// The instances and triangles drawn, written by the cull pass.
     drawn: Buffer,
 }
 
 impl View {
-    /// A view's buffers for `geometry`'s records and instances, and for
-    /// `lights` bytes of lights and tiles (`light::capacity`).
     pub fn new(device: &gpu::Device, geometry: &Bound, lights: u64) -> Result<Self, String> {
         let records = geometry.count as u64 * size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -89,8 +81,6 @@ impl View {
         })
     }
 
-    /// Whether the buffers hold `geometry`'s records and instances and
-    /// `lights` bytes of lights and tiles.
     pub fn fits(&self, geometry: &Bound, lights: u64) -> bool {
         let records = geometry.count as u64 * size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         self.records.size >= records
@@ -98,12 +88,7 @@ impl View {
             && self.lights.size >= lights
     }
 
-    /// Records into `cb`, outside rendering, the start of the view's frame
-    /// into a target of `extent` pixels: its constants from `camera` and
-    /// `geometry`, its lights and their tiles, its records copied from
-    /// `geometry`'s with no instances, and a barrier making all of them
-    /// visible to its passes. `geometry` and the lights must fit, and no
-    /// GPU work may be pending.
+    /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
     pub fn begin(
         &mut self,
         cb: vk::CommandBuffer,
@@ -114,8 +99,7 @@ impl View {
         extent: [u32; 2],
     ) {
         self.drawn.bytes().fill(0);
-        // SAFETY: `Light` is plain `repr(C)` data without padding, as are
-        // the tiles' integers.
+        // SAFETY: `Light` and the tiles' integers are plain `repr(C)` data without padding.
         let parts = unsafe {
             [
                 std::slice::from_raw_parts(lights.as_ptr().cast::<u8>(), size_of_val(lights)),
@@ -182,10 +166,8 @@ impl View {
                 vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             );
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, every buffer was
-        // created on `d`, and the regions lie inside the light and record
-        // buffers, as `fits` checked. Vulkan has no empty copies; the tiles
-        // are never empty.
+        // SAFETY: `cb` is recording outside rendering, buffers are from `d`, and the regions
+        // lie inside them, as `fits` checked. Vulkan has no empty copies; tiles are never empty.
         unsafe {
             d.cmd_update_buffer(cb, self.constants.raw, 0, bytes);
             d.cmd_copy_buffer(cb, self.staging.raw, self.lights.raw, &[light_region]);
@@ -199,7 +181,6 @@ impl View {
         }
     }
 
-    /// The address of the view's constants, for its passes.
     pub fn constants(&self) -> vk::DeviceAddress {
         self.constants.address
     }
@@ -218,8 +199,7 @@ impl View {
         memory
     }
 
-    /// The instances and triangles the last frame drew. No GPU work may be
-    /// pending.
+    /// The instances and triangles the last frame drew. No GPU work may be pending.
     pub fn drawn(&mut self) -> [u32; 2] {
         let b = self.drawn.bytes();
         [0, 1].map(|i| u32::from_ne_bytes(b[4 * i..4 * i + 4].try_into().unwrap()))

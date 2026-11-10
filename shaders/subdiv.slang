@@ -1,22 +1,13 @@
-// The stencil pass: each refined value of a subdivision surface, a point's
-// xyz or a texcoord's xy, as the weighted sum of the cage values its stencil
-// names. The delegate's OpenSubdiv built the stencils; src/geometry.rs lays
-// them out, with refined value p's stencil at offsets[p].
-
 struct Push
 {
     float *cage;
-    // Value p's stencil is entries offsets[p] to offsets[p + 1].
     uint *offsets;
     uint *indices;
     float *weights;
     float *refined;
-    // The values this dispatch writes.
     uint first;
     uint count;
-    // The threads dispatched.
     uint stride;
-    // The floats per value.
     uint width;
 };
 

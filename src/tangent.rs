@@ -1,5 +1,4 @@
-//! The tangent pass: a compute pipeline writing each vertex's tangent and
-//! handedness from the triangles around it, for normal maps.
+//! The tangent pass: each vertex's tangent and handedness, for normal maps.
 
 use std::ops::Range;
 
@@ -11,7 +10,6 @@ pub struct Tangent {
     compute: gpu::Compute,
 }
 
-/// The addresses of the buffers `shaders/tangent.slang` reads and writes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Addresses {
@@ -27,7 +25,6 @@ pub struct Addresses {
     pub tangents: vk::DeviceAddress,
 }
 
-/// `shaders/tangent.slang`'s push constants.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -44,9 +41,7 @@ impl Tangent {
         Ok(Self { compute })
     }
 
-    /// Records into `cb`, outside rendering, the tangents of the vertices
-    /// in `ranges`. The buffers must be live and as large as their table
-    /// says, and the points, normals and texcoords read written already.
+    /// The points, normals and texcoords it reads must be written already.
     pub fn record(&self, cb: vk::CommandBuffer, addresses: Addresses, ranges: &[Range<u32>]) {
         (self.compute).record(cb, ranges, |first, count, stride| Push {
             addresses,

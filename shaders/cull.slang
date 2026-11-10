@@ -1,17 +1,10 @@
-// The cull pass: for one view, each mesh instance whose box is inside the
-// view's frustum is added to its draw record's visible instances.
-// src/view.rs starts the records with no instances; this pass counts them,
-// and shaders/mesh.slang reads each instance through the visible list.
-
 #include "view.slang"
 
 struct Push
 {
     View *view;
-    // The instances this dispatch tests.
     uint first;
     uint count;
-    // The threads dispatched.
     uint stride;
     uint unused;
 };
@@ -25,14 +18,10 @@ float4 clip(float4 *m, float3 p)
     return project(push.view, world);
 }
 
-// Whether the box may be seen: false only when all 8 corners are outside
-// one plane of -w <= x, y <= w and 0 <= z <= w. A box crossing the eye
-// plane has corners with w < 0, for which the planes still hold, so it is
-// kept unless a plane has every corner outside. Testing the centre, or
-// corners against different planes, would drop boxes that are partly seen.
+// False only when all 8 corners are outside one clip plane; this stays right for
+// boxes crossing the eye plane (w < 0), unlike testing the centre.
 bool seen(float4 *m, float3 lo, float3 hi)
 {
-    // Bit k: some corner is inside plane k.
     uint inside = 0;
     for (uint c = 0; c < 8; c++)
     {

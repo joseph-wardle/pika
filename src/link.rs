@@ -1,20 +1,13 @@
-//! Light linking: which lights light which meshes. Hydra hands each light
-//! the token of its lightLink collection, empty when it lights everything,
-//! and each mesh the tokens of the collections it is in. Each distinct
-//! collection gets one bit of a mask: a light carries its collection's bit
-//! (`light::Light::link`), each instance its mesh's bits
-//! (`transform::Instance`), and the light loop skips a light whose bit the
-//! mesh lacks (`shaders/frame.slang`).
+//! Light linking: each distinct lightLink collection gets one bit of a mask, and the
+//! light loop skips a light whose bit the mesh lacks.
 
 use std::collections::BTreeMap;
 use std::sync::Once;
 
 use crate::store::{Light, Mesh, Store};
 
-/// The collections a mask holds bits for.
 const BITS: usize = 32;
 
-/// Each linked light's collection by its bit.
 pub struct Links {
     bits: BTreeMap<String, u32>,
 }
@@ -50,7 +43,6 @@ impl Links {
         self.bits.get(link).copied().unwrap_or(0)
     }
 
-    /// The bits of the collections the mesh is in.
     pub fn mesh(&self, mesh: &Mesh) -> u32 {
         (mesh.categories.iter().flatten())
             .filter_map(|c| self.bits.get(c))
@@ -62,8 +54,7 @@ impl Links {
 mod tests {
     use super::*;
 
-    /// Whether a light of mask `light` lights a mesh of mask `mesh`, as the
-    /// light loop decides it.
+    /// As the light loop decides it.
     fn reaches(light: u32, mesh: u32) -> bool {
         light & mesh == light
     }
@@ -88,7 +79,6 @@ mod tests {
         (store, lights, meshes)
     }
 
-    /// Which lights light which meshes, row by mesh.
     fn lit(store: &Store, lights: &[u64], meshes: &[u64]) -> Vec<Vec<bool>> {
         let links = Links::new(store);
         (meshes.iter())
@@ -103,7 +93,6 @@ mod tests {
 
     #[test]
     fn lights_light_the_meshes_of_their_collection() {
-        // Two lights share one collection; one lights everything.
         let (store, lights, meshes) = store(
             &["group_1", "", "group_0", "group_1"],
             &[&["group_0"], &["group_1"], &[], &["group_0", "group_1"]],

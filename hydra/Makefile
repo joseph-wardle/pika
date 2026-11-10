@@ -1,5 +1,4 @@
-# Builds the Pika Hydra delegate against Houdini's USD (the HDK) into
-# target/hydra/, ready for PXR_PLUGINPATH_NAME.
+# Builds the Pika Hydra delegate against Houdini's HDK into target/hydra/.
 
 HFS ?= /opt/hfs21.0
 ROOT := $(abspath ..)

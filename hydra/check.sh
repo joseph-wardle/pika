@@ -1,20 +1,8 @@
 #!/usr/bin/env bash
-# The delegate's check, run on a GPU host with Houdini (not in CI).
-#
-# Builds the delegate for HFS into target/hydra/check/<houdini>/, where
-# everything the run writes goes, so the two Houdinis' checks run side by
-# side and neither touches target/hydra. Then, in order: hydra/image.py
-# (husk and usdrecord renders against the ray cast), the store-dump
-# fixtures in hydra/fixtures/ (two frames each, the scene's .py edit between
-# them, RENDERS at a time; see fixture() for the header keys; a run's
-# <name>.store is its dump in the reference's form), and
-# hydra/engine.py (UsdImagingGL in hython, as usdview renders). usdrecord
-# and hython draw on a private Xvnc display started here. The validation
-# layer must be on and report nothing from Pika.
-#
-# Materials need the bake tools, built against Houdini 22 whichever Houdini
-# hosts the delegate (BAKE_HFS); the shaders they generate go to a cache of
-# this run's own.
+# The delegate's check, run on a GPU host with Houdini (not in CI): hydra/image.py, the
+# store-dump fixtures in hydra/fixtures/ and hydra/engine.py, the validation layer on and silent.
+# Everything goes to target/hydra/check/<houdini>/, so both Houdinis' checks run side by side.
+# The bake tools are built against Houdini 22 whichever Houdini hosts the delegate (BAKE_HFS).
 #
 #   VULKAN_SDK=/path/to/vulkan_sdk/1.4.328.1/x86_64 hydra/check.sh
 #   HFS=/opt/hfs22.0 VULKAN_SDK=... hydra/check.sh   # the other Houdini, at the same time
@@ -65,8 +53,7 @@ store_after() {
     awk -v header="sync $1" '/^sync /{ on = ($0 == header); next } on' "$2"
 }
 
-# counts <stats> <edit>: the surfaces compiled and textures baked for frame
-# 1, then for frame 2: the frames from the edit's sync on.
+# counts <stats> <edit>: surfaces compiled and textures baked for frame 1, then from the edit on.
 counts() {
     awk -v edit="$2" '/^sync /{ f = ($2 < edit) ? 1 : 2; next }
         /^frame /{ for (i = 3; i < NF; i += 2) {
@@ -75,23 +62,20 @@ counts() {
         END { print c[1] + 0, b[1] + 0, c[2] + 0, b[2] + 0 }' "$1"
 }
 
-# keys <name>: the scene's "# key: value" lines: the header's last
-# paragraph, after a bare "#".
+# keys <name>: the scene header's last paragraph, its "# key: value" lines.
 keys() {
     awk '/^#$/{ n = 0; after = 1; next } /^#/{ if (after) line[++n] = $0; next }
         /^def /{ for (i = 1; i <= n; i++) print line[i]; exit }' "$ROOT/hydra/fixtures/$1.usda"
 }
 
-# expected <name> <key> <default>: what the scene's header expects of the
-# key, or the default.
+# expected <name> <key> <default>: the header's value for the key, or the default.
 expected() {
     local line
     line=$(keys "$1" | sed -n "s/^# $2: //p" | head -n 1)
     echo "${line:-$3}"
 }
 
-# redundant <stats> <edit>: the mesh bytes the edit's sync handed over that
-# the store held already.
+# redundant <stats> <edit>: mesh bytes the edit's sync handed over that the store held already.
 redundant() {
     awk -v edit="$2" '$1 == "sync" && $2 == edit { for (i = 3; i < NF; i += 2)
         if ($i == "mesh_redundant_bytes") print $(i + 1) }' "$1"
@@ -104,30 +88,25 @@ pending() {
         END { print first + 0, last + 0 }' "$1"
 }
 
-# fixture <scene.usda>: frame 1 and the edit must each match their expected
-# store. The edit must differ from frame 1's store, so a store left stale by
-# the edit would fail.
+# fixture <scene.usda>: frame 1 and the edit must each match their expected store and differ,
+# so a store the edit left stale fails.
 fixture() {
     local name dir=$ROOT/hydra/fixtures script=()
     name=$(basename "$1" .usda)
     [ -f "$dir/$name.py" ] && script=(--postframe-script "$dir/$name.py")
-    # A cache of its own, so the compile and bake counts below are its own
-    # misses, not what the image scenes left behind.
+    # A cache of its own, so the compile and bake counts are its own misses.
     PIKA_CACHE=$OUT/fixtures/$name.cache PIKA_BUDGET=$(expected "$name" budget "") \
         PIKA_STORE_DUMP=$OUT/fixtures/$name.dump PIKA_STATS=$OUT/fixtures/$name.stats \
         husk -V 1 -R Pika --headlight none -f 1 -n 2 --res 16 16 \
         "${script[@]}" -o "$OUT/fixtures/$name.\$F4.exr" "$1" >"$OUT/fixtures/$name.log" 2>&1 ||
         fail "$name: husk exited $? (see $OUT/fixtures/$name.log)"
     clean "$name" "$OUT/fixtures/$name.log"
-    # UsdImaging names native instance prototypes after hashes that change
-    # from run to run and after the primvars it propagated, which changed
-    # between USD 25 and 26; and assets resolve under this checkout.
+    # UsdImaging names native instance prototypes after per-run hashes and propagated primvars,
+    # which changed between USD 25 and 26; and assets resolve under this checkout.
     sed -i -E -e 's|/UsdNiPropagatedPrototypes/[^/]+/|/UsdNiPropagatedPrototypes/#/|g' \
         -e 's/ForInstancer[0-9a-f]+/ForInstancer#/g' -e "s|$ROOT/||g" "$OUT/fixtures/$name.dump"
-    # husk syncs and renders a frame again until Pika reports it delivered,
-    # which waits for its materials' builds, so the edit is the first sync
-    # whose store differs from sync 1's; the syncs before and after it must
-    # change nothing.
+    # husk syncs and renders again until Pika reports a frame delivered, so the edit is the first
+    # sync whose store differs from sync 1's; the syncs around it must change nothing.
     local n edit= syncs
     syncs=$(grep -c '^sync ' "$OUT/fixtures/$name.dump")
     for n in $(seq 2 "$syncs"); do
@@ -154,26 +133,14 @@ fixture() {
         fail "$name: the summary has no GPU readback time, so a pass went untimed"
     grep -q "vram [1-9].* used of [1-9]" "$OUT/fixtures/$name.summary" ||
         fail "$name: the summary has no memory budget"
-    # An edit to a value, a wrap mode or an asset path among them, compiles
-    # nothing; one to the network's structure, the primvar a reader names
-    # included, compiles its surface; a texture is baked once per file. The
-    # scene's header ends with what the run must count, "# key: value" lines
-    # in a paragraph of their own (the default, when absent, in brackets):
+    # The scene's header ends with "# key: value" lines in a paragraph of their own (default in
+    # brackets). The material-editing scenes are each other's control.
     #   compiles: A then B   surfaces compiled for frame 1, then for the edit (0 then 0)
     #   bakes: A then B      textures baked, likewise (0 then 0)
-    #   warnings: N          material warnings, each once though husk renders a
-    #                        frame more than once, and none for a repair (0)
-    #   warned: M            the start of one warning's text after "pika: warning: ",
-    #                        which must name what to fix and say what is drawn
-    #                        (unchecked)
-    #   redundant bytes: R   mesh bytes the edit handed over that the store held;
-    #                        0 for an edit touching no primvar the materials read
-    #                        (unchecked: Hydra resends what a changed topology covers)
-    #   budget: B            bytes standing in for the device's memory budget,
-    #                        PIKA_BUDGET (none)
-    # The scenes that edit a material are each other's control. Every material
-    # with a surface in frame 1's expected store must be pending on the first
-    # frame and none on the last; a scene without one is the control.
+    #   warnings: N          material warnings, each once though husk renders a frame twice (0)
+    #   warned: M            the start of one warning's text after "pika: warning: " (unchecked)
+    #   redundant bytes: R   mesh bytes the edit handed over that the store held (unchecked)
+    #   budget: B            PIKA_BUDGET, standing in for the device's memory budget (none)
     local key
     while IFS= read -r key; do
         case $key in
@@ -204,9 +171,8 @@ fixture() {
 }
 
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
-# Xvnc writes the display it chose to fd 3. It listens on no port, only on
-# a socket in a directory of this run's own under the runtime directory: a
-# socket's path holds 108 bytes, which $OUT exceeds from a deep checkout.
+# Xvnc writes its display to fd 3 and listens only on a socket in this run's own runtime
+# directory: a socket path holds 108 bytes, which $OUT exceeds from a deep checkout.
 RUN=$(mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/pika-check.XXXXXX")
 rm -f "$OUT/display"
 Xvnc -displayfd 3 -rfbport -1 -rfbunixpath "$RUN/vnc" -nolisten tcp -SecurityTypes None \
@@ -223,8 +189,6 @@ for log in "$OUT"/images/*.log; do
     clean "$(basename "$log" .log)" "$log"
 done
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
-# Each fixture's check reports to a file of its own; one that stops short of
-# the end exits nonzero.
 export -f fixture clean store_after counts keys expected pending redundant fail
 export OUT ROOT
 printf '%s\n' "${fixtures[@]}" | xargs -P "$RENDERS" -I{} bash -c \

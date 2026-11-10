@@ -1,15 +1,11 @@
-//! A material's uniform block, what its surface shader asks of the
-//! renderer: its byte layout and its textures' bindings, read from the bake
-//! tool's manifest and slangc's reflection, and each material's values
-//! packed into the block.
+//! A material's uniform block: its byte layout and textures' bindings, and each material's
+//! values packed into it.
 
 use std::collections::BTreeMap;
 
 use crate::json::{self, Json};
 use crate::material::{Document, Network, Value};
 
-/// What the pixel stage expects of the renderer, as the tool lists it:
-/// its public uniforms and textures.
 #[derive(Debug, Default, PartialEq)]
 pub struct Manifest {
     pub materialx: String,
@@ -17,8 +13,7 @@ pub struct Manifest {
     pub textures: Vec<String>,
 }
 
-/// A public uniform: its variable, its MaterialX type and the initial
-/// value the generator gave it, as MaterialX writes values ("0, 0, 1").
+/// `initial` is as MaterialX writes values ("0, 0, 1").
 #[derive(Debug, PartialEq)]
 pub struct Uniform {
     pub name: String,
@@ -59,19 +54,16 @@ pub fn manifest(text: &str) -> Result<Manifest, String> {
     Ok(m)
 }
 
-/// The uniform block's byte layout and its textures' bindings, in
-/// descriptor set 0, as slangc laid them out.
+/// In descriptor set 0, as slangc laid them out.
 #[derive(Debug, Default, PartialEq)]
 pub struct Layout {
     pub size: usize,
-    /// The block's binding.
     pub block: u32,
-    /// Each uniform's byte offset, nested ones as `backsurfaceshader.color`.
+    /// Nested ones as `backsurfaceshader.color`.
     pub offsets: BTreeMap<String, usize>,
     pub textures: Vec<Bindings>,
 }
 
-/// A texture's bindings: its image, sampler and tile table.
 #[derive(Debug, PartialEq)]
 pub struct Bindings {
     pub name: String,
@@ -80,7 +72,6 @@ pub struct Bindings {
     pub tiles: u32,
 }
 
-/// Reads `slangc -reflection-json`'s output for a surface.
 pub fn layout(reflection: &str) -> Result<Layout, String> {
     let root = json::parse(reflection)?;
     let block = (root.get("parameters").map_or(&[][..], Json::list).iter())
@@ -140,8 +131,6 @@ fn index(value: &Json, member: &str, key: &str) -> Result<u32, String> {
         })
 }
 
-/// Records the offset of `name` and, for a struct or an array, of each
-/// member inside it.
 fn walk(
     name: &str,
     kind: Option<&Json>,
@@ -183,9 +172,8 @@ fn walk(
     Ok(())
 }
 
-/// Writes `network`'s values for `manifest`'s uniforms into `bytes`, a
-/// block of `layout`: each from the store's value of the input, by
-/// `document`'s node order, else from the generator's initial value.
+/// Each uniform from the store's value of its input, by `document`'s node order, else from
+/// the generator's initial value.
 pub fn pack(
     manifest: &Manifest,
     layout: &Layout,
@@ -200,25 +188,21 @@ pub fn pack(
         };
         let offset = *(layout.offsets.get(&uniform.name))
             .ok_or_else(|| format!("the reflection has no uniform {}", uniform.name))?;
-        // The generator's own node for a geomprop read by default (UV0's
-        // texcoord index) is in no document: its value is the initial one.
+        // The generator's node for a default geomprop is in no document: its value is the initial.
         let words = if uniform.name.starts_with("geomprop_") {
             shape.initial(&uniform.initial)?
         } else {
             let (mut path, mut node, mut input) = document.reader(network, &uniform.name)?;
-            // The generator folds a constant node away, moving its value
-            // onto the input it feeds, so the variable names that input
-            // (`n1_color` for a constant into node 1's `color`).
+            // The generator folds a constant node onto the input it feeds, so the variable names
+            // that input (`n1_color` for a constant into node 1's `color`).
             while let Some(c) = node.connections.get(input)
                 && network.nodes[&c.node].node_type.starts_with("ND_constant_")
             {
                 (path, node, input) = (&c.node, &network.nodes[&c.node], "value");
             }
             match node.params.get(input) {
-                // A text value went into the document, and the generator
-                // resolved it into the initial (a geomprop name), or is an
-                // address mode, which only the sampler reads
-                // (`material::address_modes`).
+                // A text value was resolved by the generator into the initial, or is an address
+                // mode, which only the sampler reads.
                 Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
                 Some(value) => shape
                     .words(value)
@@ -232,7 +216,6 @@ pub fn pack(
     Ok(())
 }
 
-/// A packable MaterialX type: how many 4-byte words, of what.
 enum Shape {
     Floats(usize),
     Int,
@@ -297,11 +280,9 @@ pub mod tests {
     use super::*;
     use crate::material::{self, tests::fixture};
 
-    /// The generate tool wrote this for bake/fixtures/network.mtlx.
     pub const MANIFEST: &str = include_str!("../bake/fixtures/network.manifest");
 
-    // slangc's reflection of the tool's output for bake/fixtures/network.mtlx,
-    // copied from bake/check.sh's run when slangc or the libraries change.
+    // Copied from bake/check.sh's run when slangc or the libraries change.
     const REFLECTION: &str = include_str!("../bake/fixtures/network.reflection.json");
 
     pub fn fixture_manifest() -> Manifest {
@@ -364,7 +345,6 @@ pub mod tests {
         let document = material::document(&network).unwrap().unwrap();
         let mut bytes = vec![0; l.size];
         pack(&manifest, &l, &document, &network, &mut bytes).unwrap();
-        // Authored in the store.
         assert_eq!(f32_at(&bytes, l.offsets["n0_roughness"]), 0.25);
         assert_eq!(bytes[l.offsets["n0_useSpecularWorkflow"]], 1);
         // Not authored: the generator's initial values.
@@ -376,12 +356,10 @@ pub mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // An address mode is the sampler's alone: its uniform, which the
-        // generated code never reads, keeps the initial value.
+        // An address mode is the sampler's alone: its uniform keeps the initial value.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 2);
 
-        // The generator's node for a default geomprop keeps its initial
-        // value; any other uniform is a node's input.
+        // A default geomprop's node keeps its initial value; any other uniform is a node's input.
         let mut extra = fixture_manifest();
         let mut extended = layout(REFLECTION).unwrap();
         extended
@@ -450,9 +428,8 @@ pub mod tests {
             f32_at(&bytes, l.offsets["n0_roughness"])
         };
         assert_eq!(roughness("ND_constant_float", Some(0.75)), 0.75);
-        // The generator keeps any other node, so the input's uniform is not
-        // the one it reads, and neither is an unauthored constant's value:
-        // each keeps the initial value.
+        // The generator keeps any other node, so neither it nor an unauthored constant moves the
+        // uniform off its initial value.
         assert_eq!(roughness("ND_dot_float", Some(0.75)), 0.5);
         assert_eq!(roughness("ND_constant_float", None), 0.5);
     }

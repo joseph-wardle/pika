@@ -15,11 +15,10 @@ summarises with 54.
 
 import sys
 
-# Over 1080p at 24 fps: the gate's frame period.
+# 24 fps: the gate's frame period.
 BUDGET_MS = 41.67
-# Mesh drawing's budget lines, each the sum of the frame keys named: the
-# warm p95 on ALab in usdview at 1080p. They are measured lines, not limits;
-# a line over its budget moves work up the order (design.md).
+# Mesh drawing's budget lines, each the sum of the frame keys named: measured warm p95 on
+# ALab in usdview at 1080p, not limits.
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
     ("shade", ("gpu_shade_ms",), 8.0),

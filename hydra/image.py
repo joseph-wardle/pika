@@ -125,22 +125,17 @@ SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
 # The layers the scenes sublayer, which are not scenes themselves.
 LAYERS = ("settings.usda", "light.usda")
-# The delegate's default texture cap (hydra/plugin.cpp): none.
+# The delegate's default texture cap: none.
 CAP = float("inf")
-# The scenes whose texture the cap shrinks, which husk must warn of in one
-# line.
+# Scenes whose texture the cap shrinks; husk must warn of it in one line.
 CAPPED = {"capped": 1}
-# The scenes rendered under PIKA_BUDGET, bytes standing in for the device's
-# memory budget: at one byte no texture fits, so each is lowered to its
-# floor, its first level within TAIL texels a side (src/texture.rs), which
-# both hosts must warn of in one line, and of the blur in another once a
-# frame draws it coarser than the camera needs (BLURRED).
+# Scenes under PIKA_BUDGET: at one byte no texture fits, so each is lowered to its floor, which
+# both hosts must warn of in one line, and of the blur in another (BLURRED).
 BUDGET = {"lowered": 1}
 TAIL = 4
-# The scenes whose texture husk draws coarser than the camera needs, on the
-# first frame rendered and the last (src/need.rs), (0, 0) for the rest: at
-# frame 1 a pixel of the lowered scene covers 2√2 texels of its 8×8, level
-# 1, which its 4×4 floor holds; at frame 2 √2, level 0, which it does not.
+# Scenes husk draws coarser than the camera needs, first frame and last, (0, 0) for the rest:
+# at frame 1 a pixel of the lowered scene covers 2√2 texels of its 8×8, level 1, which its 4×4
+# floor holds; at frame 2 √2, level 0, which it does not.
 BLURRED = {"lowered": (0, 1)}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
@@ -172,35 +167,28 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
-# ACEScg to linear Rec.709 (see the module's doc).
+# ACEScg to linear Rec.709.
 ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
                              [-0.130256, 1.140805, -0.010548],
                              [-0.024003, -0.128969, 1.152972]])
-# A material's closed form: its albedo under π lux, its emission, the
-# image (file, address modes, primvar, colour space) whose sample it emits, if any, the
-# image whose sample perturbs its normal, if any, and the angle from facing
+# A material's closed form: albedo under π lux, emission, the image (file, address modes,
+# primvar, colour space) it emits, the image perturbing its normal, and the angle from facing
 # the eye within which the form holds (None: all).
 Look = collections.namedtuple("Look", "albedo emission image normal facing")
 CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None, None)
 PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None, None)
-# Each lit surface's inputs the reference reads: the albedo's weight and
-# colour, the emission's weight and colour, the specular weight, the
-# normal, and the facing angle. OpenPBR's specular weight only modulates the IOR, and
-# MaterialX's dielectric layer attenuates its base by a directional albedo
-# fitted with F90 = 1 at any IOR, so grazing angles darken at weight 0 (see
-# the module's doc); Standard Surface's weight is the layer's own, which 0
-# switches off.
+# Each lit surface's inputs: albedo weight and colour, emission weight and colour, specular
+# weight, normal, and facing angle. OpenPBR's specular weight only modulates the IOR, and
+# MaterialX's dielectric layer attenuates its base by a directional albedo fitted with F90 = 1,
+# so grazing angles darken at weight 0; Standard Surface's weight is the layer's own.
 LIT = {
     "ND_open_pbr_surface_surfaceshader": ("base_weight", "base_color", "emission_luminance",
                                           "emission_color", "specular_weight", "geometry_normal", 35),
     "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
                                           "specular", "normal", None),
 }
-# What a host hands Pika: the purposes it draws, whether a material whose
-# surface shader the shader registry does not know arrives with its network,
-# whether the render settings prim's Pika settings arrive, the intensity of
-# its camera light and whether it holds the light still while the camera
-# moves (see the module's doc).
+# What a host hands Pika. `delivers_unknown`: a material whose surface shader the registry
+# does not know still arrives with its network.
 Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
 # husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and
 # husk holds it where the camera was at the first frame it renders.
@@ -1304,7 +1292,6 @@ def cast(to_clip, width, height, shift, tris):
     v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
     unproject = np.linalg.inv(np.array(to_clip))
     columns = np.arange(width)
-    # A row at a time: every (pixel, triangle) pair.
     for y in range(height):
         o, d = rays(unproject, width, height, columns + 0.5 + shift, np.full(width, y + 0.5))
         o, d = o[:, None], d[:, None]

@@ -1,3 +1,2 @@
-# A wrap mode is a value: the edit rewrites the material's block and rebinds
-# its sampler, compiling and baking nothing.
+# A wrap mode is a value: the edit compiles and bakes nothing.
 stage.GetAttributeAtPath("/world/mtl/paint/tex.inputs:wrapS").Set("repeat")

@@ -1,7 +1,5 @@
-//! The stencil pass: a compute pipeline writing each refined value of a
-//! subdivision surface, a point's xyz or a texcoord's xy, as the weighted
-//! sum of the cage values its stencil names. OpenSubdiv built the stencils,
-//! in the delegate.
+//! The stencil pass: each refined subdivision value as the weighted sum of
+//! the cage values its OpenSubdiv stencil names.
 
 use std::ops::Range;
 
@@ -13,7 +11,6 @@ pub struct Subdiv {
     compute: gpu::Compute,
 }
 
-/// The addresses of the buffers `shaders/subdiv.slang` reads and writes.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Addresses {
@@ -24,7 +21,6 @@ pub struct Addresses {
     pub refined: vk::DeviceAddress,
 }
 
-/// `shaders/subdiv.slang`'s push constants.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -41,9 +37,7 @@ impl Subdiv {
         Ok(Self { compute })
     }
 
-    /// Records into `cb`, outside rendering, the refined values in `ranges`,
-    /// each `width` floats (3 for points, 2 for texcoords). The buffers
-    /// must be live and as large as their table says.
+    /// `width` is floats per value: 3 for points, 2 for texcoords.
     pub fn record(
         &self,
         cb: vk::CommandBuffer,

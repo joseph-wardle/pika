@@ -1,9 +1,4 @@
-// Vertex pulling for every pass that draws mesh instances: each vertex from
-// src/geometry.rs's buffers by address, each instance through the view's
-// visible list (shaders/cull.slang), so only the index buffer and the
-// view's draw records are bound. mesh.slang uses it, and so does the vertex
-// stage the generate tool writes for each material (bake/generate.cpp), whose
-// pixel stage reads the view through it (frame.slang).
+// Vertex pulling for every pass that draws mesh instances.
 
 #pragma once
 
@@ -16,17 +11,15 @@ struct Vertex
 {
     float4 position;
     float3 world;
-    // In world space, not normalized; zero for a degenerate normal.
+    // World space, not normalized; zero for a degenerate normal.
     float3 normal;
-    // The float2 primvar the mesh's material reads; zero where the mesh has none.
+    // Zero where the mesh has none.
     float2 texcoord;
-    // In world space, not normalized: the directions the texcoord's u and v
-    // increase in (shaders/tangent.slang), for normal maps.
+    // World space, not normalized.
     float3 tangent;
     float3 bitangent;
-    // Whether the mesh's winding is reversed (src/transform.rs Instance).
     uint flip;
-    // The bits of the light-link collections the mesh is in (src/link.rs).
+    // One bit per light-link collection the mesh is in.
     uint link;
 };
 
@@ -35,8 +28,7 @@ float3 load3(float *values, uint i)
     return float3(values[3 * i], values[3 * i + 1], values[3 * i + 2]);
 }
 
-// SV_VulkanVertexID and SV_VulkanInstanceID include the draw's vertex offset
-// and first instance, which select the mesh's vertices and its visible slot.
+// The Vulkan IDs include the draw's vertex offset and first instance.
 Vertex pull(uint vertex, uint slot)
 {
     uint2 v = view->vertices[vertex];

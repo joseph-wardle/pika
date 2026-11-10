@@ -1,6 +1,4 @@
-//! What one Hydra render delegate owns on the Rust side: its scene store,
-//! the GPU copy of its meshes and materials, its Vulkan device, the target
-//! it reads frames back from and the stats it measures.
+//! What one Hydra render delegate owns on the Rust side.
 
 use std::fs::File;
 use std::io::Write;
@@ -25,11 +23,7 @@ use crate::texture::Needs;
 use crate::transform::Camera;
 use crate::view::View;
 
-/// The render buffer formats Pika writes, as Hydra names them. Color is
-/// half or full float, as the host asks: husk asks for `HdFormatFloat32Vec4`,
-/// and hosts that take the delegate's default get `HdFormatFloat16Vec4`,
-/// which halves the bytes read back. Depth is `HdFormatFloat32` and normals
-/// `HdFormatFloat32Vec3`.
+/// Color is half or full float, as the host asks; the delegate's default, half, halves readback.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
     Float16Vec4,
@@ -39,7 +33,6 @@ pub enum Format {
 }
 
 impl Format {
-    /// The format Hydra names `name`.
     pub fn from_name(name: &str) -> Result<Self, String> {
         match name {
             "HdFormatFloat16Vec4" => Ok(Self::Float16Vec4),
@@ -60,23 +53,19 @@ impl Format {
     }
 }
 
-/// A render buffer Hydra bound to one AOV: `width` × `height` pixels of
-/// `format`, bottom row first.
+/// A render buffer Hydra bound to one AOV, bottom row first.
 pub struct Aov<'a> {
     pub format: Format,
     pub pixels: &'a mut [u8],
 }
 
-/// One frame of a render pass, as Hydra's render pass state gives it.
 pub struct Frame<'a> {
     pub world_to_view: [f64; 16],
     /// Conformed to the framing: it maps the data window to clip space.
     pub projection: [f64; 16],
-    /// Every bound render buffer's size.
     pub width: u32,
     pub height: u32,
-    /// The data window, the pixels Pika writes: x, y, width, height, with y
-    /// counted down from the top row, as CameraUtilFraming counts it.
+    /// x, y, width, height, with y counted down from the top row, as CameraUtilFraming counts it.
     pub window: [u32; 4],
     pub clear_color: [f32; 4],
     pub color: Option<Aov<'a>>,
@@ -84,31 +73,25 @@ pub struct Frame<'a> {
     pub normal: Option<Aov<'a>>,
     /// The render tags the pass draws; none means every tag.
     pub render_tags: Vec<String>,
-    /// The texels a texture's longest side is capped at (`pika:textureCap`),
-    /// 0 for none.
+    /// `pika:textureCap`, 0 for none.
     pub texture_cap: u32,
 }
 
-/// The depth AOV's clear value: OpenGL's far plane.
+/// OpenGL's far plane.
 const FAR: f32 = 1.0;
 
-/// How long a call with nothing else to draw waits for a material build to
-/// land: a host rendering until converged draws the clay frames at most
-/// this often, and usdview stays responsive while paused.
+/// How long a call with nothing else to draw waits for a material build; keeps usdview responsive.
 const WAIT: Duration = Duration::from_millis(16);
 
-// One instance per process: plugins are never unloaded, and each render
-// delegate's device borrows it.
+// One instance per process: plugins are never unloaded, and each delegate's device borrows it.
 static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
 
 pub struct Renderer {
     pub store: Store,
     pub stats: Stats,
-    // Field order is drop order: the commands and target wait for idle, then
-    // the pipelines and buffers are destroyed before their device.
+    // Field order is drop order: the commands and target wait for idle before the device goes.
     commands: Commands,
     target: Option<Target>,
-    /// The camera's view: its constants, records and visible instances.
     view: Option<View>,
     raster: Raster,
     shade: Shade,
@@ -116,13 +99,10 @@ pub struct Renderer {
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
-    /// `PIKA_STORE_DUMP`: the file each sync's store is appended to, for the
-    /// fixture checks. Writing it changes nothing about rendering.
+    /// `PIKA_STORE_DUMP`, for the fixture checks; writing it changes nothing about rendering.
     dump: Option<(String, File)>,
     syncs: usize,
-    /// The frame on the GPU, waiting to be placed.
     pending: Option<Pending>,
-    /// The buffers the last frame was placed into, and what it was drawn from.
     placed: Option<(Buffers, Inputs)>,
 }
 
@@ -136,9 +116,7 @@ struct Inputs {
     texture_cap: u32,
 }
 
-/// The render buffers a frame is placed into, known only by size, data
-/// window and, for each AOV, format, address and length. The host's
-/// buffers are taken to hold the last frame placed into ones that match.
+/// The host's buffers are taken to hold the last frame placed into ones that match.
 #[derive(Clone, Copy, PartialEq)]
 struct Buffers {
     width: u32,
@@ -161,19 +139,16 @@ impl Buffers {
     }
 }
 
-/// A frame submitted to the GPU, with what placing it and its stats need.
 struct Pending {
     buffers: Buffers,
     inputs: Inputs,
-    /// Each attachment's format and bytes per pixel, and whether it was read.
     formats: [(vk::Format, usize); 3],
     read: [bool; 3],
     period: Option<Duration>,
     record: Duration,
     update: geometry::Update,
-    /// Whether the camera's view was culled, so its counts are this frame's.
+    /// Whether the view was culled, so its counts are this frame's.
     culled: bool,
-    /// The lights the view drew.
     lights: usize,
     moved: usize,
     transforms: usize,
@@ -235,7 +210,6 @@ impl Renderer {
         self.stats.begin_sync();
     }
 
-    /// Records the sync's time and stats, and appends the store to its file.
     pub fn end_sync(&mut self) -> Result<(), String> {
         let pulled = self.store.end_sync();
         let census = self.store.census()?;
@@ -249,18 +223,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws the store's meshes into the frame's data window, and copies
-    /// each bound AOV into its render buffer. Returns whether the buffers
-    /// now hold this frame, with no material build still out.
-    ///
-    /// While frames change, each call hands back the frame before and leaves
-    /// this one on the GPU, so its work overlaps the host's until the next
-    /// call: drawing and waiting in one call would put every GPU pass in
-    /// series with the host's own frame time. A call that changes nothing
-    /// waits for the frame on the GPU and returns true. A frame drawn into
-    /// buffers that do not hold the last frame is drawn and waited for at
-    /// once. While a build is out, a call that changes nothing else waits
-    /// `WAIT` for it, draws if it landed and returns false.
+    /// Returns whether the buffers now hold this frame, with no material build still out.
+    /// While frames change, each call returns the frame before and leaves this one on the GPU,
+    /// so GPU work overlaps the host's own frame time instead of running in series with it.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
@@ -365,8 +330,7 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
-        // A headlight is the host's to send (hydra/plugin.cpp), so a store
-        // holding no light draws black.
+        // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
         let lights: Vec<_> = (self.store.lights().values())
             .filter_map(|l| {
@@ -447,8 +411,7 @@ impl Renderer {
         Ok(self.shade.settled())
     }
 
-    /// Waits for the pending frame and copies it into `aovs`, if they are
-    /// the buffers it was drawn for, then records its stats.
+    /// Places the pending frame only if `aovs` are the buffers it was drawn for.
     fn collect(
         &mut self,
         pending: Pending,
@@ -528,10 +491,8 @@ impl Renderer {
     }
 }
 
-/// Copies a target attachment's rows, read back bottom row first with
-/// `stride` bytes per pixel, into an AOV's render buffer of `width` ×
-/// `height`, at the data window. Each pixel keeps the buffer's bytes per
-/// pixel of its value, dropping the attachment's extra channel.
+/// Copies attachment rows, read back bottom row first, into the AOV's data window, dropping
+/// the attachment's extra channel.
 fn place(src: &[u8], stride: usize, aov: &mut Aov, width: u32, height: u32, window: [u32; 4]) {
     let [x, y, w, h] = window.map(|v| v as usize);
     let size = aov.format.bytes_per_pixel();
@@ -551,8 +512,6 @@ fn place(src: &[u8], stride: usize, aov: &mut Aov, width: u32, height: u32, wind
     }
 }
 
-/// The file an environment variable names, created empty; `None` when the
-/// variable is unset.
 fn output(variable: &str) -> Result<Option<(String, File)>, String> {
     let Ok(path) = std::env::var(variable) else {
         return Ok(None);

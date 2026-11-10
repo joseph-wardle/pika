@@ -1,9 +1,5 @@
-//! The scene as Hydra last synced it. One store per render delegate: the
-//! delegate's prim syncs write it, field by field, and the renderer reads it.
-//!
-//! Each field is stored in Hydra's representation (world transforms, flattened
-//! primvars, untriangulated faces), so a dump of the store can be checked
-//! against what Hydra is known to hand over.
+//! The scene as Hydra last synced it, in Hydra's representation (world
+//! transforms, flattened primvars, untriangulated faces).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -11,24 +7,18 @@ use std::fmt;
 use crate::material::{self, Document, Network, Value};
 
 pub struct Store {
-    /// Ids are never reused, so a stale id is an error rather than a write to
-    /// a newer prim; the exception is a material inserted again at its path
-    /// within a frame, the same prim resynced (`freed`).
+    /// Never reused, so a stale id is an error; the exception is a material
+    /// reinserted at its path within a frame (`freed`).
     next_id: u64,
     meshes: BTreeMap<u64, Mesh>,
     instancers: BTreeMap<u64, Instancer>,
     materials: BTreeMap<u64, Material>,
-    /// Material ids by path, which is how a mesh's bindings name them.
     material_ids: BTreeMap<String, u64>,
-    /// The materials removed since the last frame, by path: one inserted
-    /// again at its path before the frame keeps its id (`insert_material`).
     freed: BTreeMap<String, u64>,
     curves: BTreeMap<u64, Curves>,
     lights: BTreeMap<u64, Light>,
     counted: BTreeMap<u64, Counted>,
-    /// Each mesh's triangles, its cage's then as drawn, counted when its
-    /// topology is set: the census runs every sync, and counting ALab's
-    /// refined faces there cost more than the sync itself.
+    /// Cage's, then as drawn; counted when topology is set, since the census runs every sync.
     triangles: HashMap<u64, [usize; 2]>,
     stats: Stats,
     moved: Moved,
@@ -41,40 +31,32 @@ pub struct Mesh {
     pub points: Option<Vec<[f32; 3]>>,
     /// `Some(None)` when the mesh has no normals primvar.
     pub normals: Option<Option<Normals>>,
-    /// The texture coordinates: the float2 primvar the mesh's material
-    /// reads, by name. `Some(None)` when the material reads none or the
-    /// mesh lacks it.
+    /// The float2 primvar the material reads; `Some(None)` when none or the mesh lacks it.
     pub texcoord: Option<Option<Texcoord>>,
     /// Hydra's `GfMatrix4d`: row-major, translation in the last row.
     pub transform: Option<[f64; 16]>,
     pub visible: Option<bool>,
     /// `Some(None)` when the mesh is not instanced.
     pub instancing: Option<Option<Instancing>>,
-    /// The whole mesh's material, for the full binding purpose; empty when
-    /// none is bound. Subsets override it for their faces.
+    /// Empty when none is bound; subsets override it for their faces.
     pub material: Option<String>,
-    /// Hydra syncs only the prims whose render tag a render pass draws, and
-    /// leaves the rest in the store with stale data: a proxy mesh is inserted
-    /// but never synced, and a mesh retagged as proxy keeps its old fields.
-    /// Drawing must filter by the pass's tags.
+    /// Hydra syncs only prims of the tags a pass draws, leaving the rest stale (a proxy
+    /// is inserted but never synced), so drawing must filter by tag.
     pub render_tag: Option<String>,
-    /// The light-link collections the mesh is in, by Hydra's tokens: the
-    /// lights linked to one of them, or to everything, light it.
+    /// Light-link collection tokens; lights linked to one of them, or to all, light it.
     pub categories: Option<Vec<String>>,
 }
 
-/// A prototype's place in an instancer: it is drawn once per index, at that
-/// index of the instancer's primvars. The prototype is a mesh, or an
-/// instancer nested in another, whose instances are all repeated per index.
+/// Drawn once per index, at that index of the instancer's primvars. The prototype
+/// is a mesh, or a nested instancer whose instances all repeat per index.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Instancing {
     pub instancer: String,
     pub indices: Vec<i32>,
 }
 
-/// An instancer, as Hydra hands it over. Each instance's transform is the
-/// prototype's own, then the instance's primvars, then the instancer's
-/// transform, then the parent instancer's, if any.
+/// Each instance's transform is the prototype's, then the instance primvars, then
+/// the instancer's transform, then the parent instancer's.
 pub struct Instancer {
     pub path: String,
     /// `Some(None)` when the instancer is not nested in another.
@@ -83,8 +65,7 @@ pub struct Instancer {
     pub primvars: Option<InstancePrimvars>,
 }
 
-/// Hydra's per-instance transform primvars, each `None` when absent: native
-/// instances arrive as matrices, point instancers as their separate parts.
+/// Each `None` when absent: native instances arrive as matrices, point instancers as parts.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct InstancePrimvars {
     pub transforms: Option<Vec<[f64; 16]>>,
@@ -94,20 +75,16 @@ pub struct InstancePrimvars {
     pub scales: Option<Vec<[f32; 3]>>,
 }
 
-/// A material sprim: its shading network as Hydra hands it over, node by
-/// node in USD's or MaterialX's vocabulary. Pika turns it into a MaterialX
-/// document itself, so the host's view of it is kept whole.
+/// A material's network as Hydra hands it over; Pika builds the MaterialX document itself.
 pub struct Material {
     pub path: String,
     pub network: Option<Network>,
-    /// The network's document, derived as the network is set: none without
-    /// a surface; an error is warned of when its build is tried (`shade`).
+    /// None without a surface; an error is warned of when its build is tried.
     pub document: Result<Option<Document>, String>,
 }
 
 impl Material {
-    /// The float2 primvar its surface reads, the texcoord its meshes carry:
-    /// none without a surface, or when the network cannot be built.
+    /// None without a surface, or when the network cannot be built.
     pub fn texcoord(&self) -> Option<&str> {
         match &self.document {
             Ok(Some(document)) => Some(&document.texcoord),
@@ -116,27 +93,21 @@ impl Material {
     }
 }
 
-/// Basis curves are fetched to measure what they cost, then dropped: Pika
-/// does not draw them yet.
+/// Fetched only to measure their cost; Pika does not draw them yet.
 pub struct Curves {
     pub path: String,
-    /// Every byte pulled since the curves were inserted.
     pub bytes: usize,
 }
 
-/// A distant, sphere, rect, disk or cylinder light. Each field is `None` until Hydra first hands
-/// it over.
 #[derive(PartialEq, Debug)]
 pub struct Light {
     pub path: String,
     pub params: Option<LightParams>,
     pub transform: Option<[f64; 16]>,
-    /// The token of its lightLink collection, the category of the meshes it
-    /// lights; empty when it lights every mesh.
+    /// Its lightLink collection token; empty when it lights every mesh.
     pub link: Option<String>,
 }
 
-/// The UsdLux inputs Pika reads, as Hydra hands them over.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct LightParams {
     pub intensity: f32,
@@ -144,11 +115,10 @@ pub struct LightParams {
     pub color: [f32; 3],
     pub normalize: bool,
     pub shape: Shape,
-    /// Hydra's visibility, which a light's params dirty bit covers too.
+    /// Hydra's visibility, which the params dirty bit covers too.
     pub visible: bool,
 }
 
-/// A light's type and the inputs only it has.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Shape {
     /// The angular diameter in degrees.
@@ -173,14 +143,12 @@ pub enum Shape {
     },
 }
 
-/// A prim Pika accepts only to count it: Hydra inserts no prim of a type the
-/// delegate does not support, so the census could not see it.
+/// Counted only: Hydra inserts no prim of a type the delegate does not support.
 pub struct Counted {
     pub prim_type: String,
     pub path: String,
 }
 
-/// What changes only when a mesh is remodelled.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Topology {
     pub scheme: Scheme,
@@ -190,25 +158,21 @@ pub struct Topology {
     /// Faces that are not drawn. They still shape their points' normals.
     pub holes: Vec<i32>,
     pub subsets: Vec<Subset>,
-    /// `None` when the scheme is none or OpenSubdiv refused the mesh: its
-    /// cage is drawn.
+    /// `None` when the scheme is none or OpenSubdiv refused the mesh: its cage is drawn.
     pub refined: Option<Refined>,
 }
 
-/// A subdivision surface as the delegate's OpenSubdiv refined it, one
-/// uniform level. The refined faces are drawn in place of the cage's, and
-/// each refined point is a stencil over the cage points.
+/// One uniform level of the delegate's OpenSubdiv; each refined point is a stencil
+/// over the cage points.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Refined {
     pub face_vertex_counts: Vec<i32>,
     pub face_vertex_indices: Vec<i32>,
-    /// The refined faces of the cage's holes.
     pub holes: Vec<i32>,
     pub stencils: Stencils,
 }
 
 impl Refined {
-    /// The refined points.
     pub fn point_count(&self) -> usize {
         self.stencils.count()
     }
@@ -219,9 +183,7 @@ impl Refined {
     }
 }
 
-/// Refined values as weighted sums of the values they are refined from:
-/// value i's stencil is entries `offsets[i]` to `offsets[i + 1]` of the
-/// indices and weights.
+/// Value i's stencil is entries `offsets[i]..offsets[i + 1]` of the indices and weights.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Stencils {
     pub offsets: Vec<u32>,
@@ -230,7 +192,6 @@ pub struct Stencils {
 }
 
 impl Stencils {
-    /// The refined values.
     pub fn count(&self) -> usize {
         self.offsets.len().saturating_sub(1)
     }
@@ -240,8 +201,7 @@ impl Stencils {
     }
 }
 
-/// USD's subdivision schemes. Every scheme but `None` is a subdivision
-/// surface, whose normals come from its points, not from a primvar.
+/// Every scheme but `None` is a subdivision surface, whose normals come from its points.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scheme {
     CatmullClark,
@@ -251,7 +211,6 @@ pub enum Scheme {
 }
 
 impl Scheme {
-    /// The scheme USD names `token`.
     pub fn from_token(token: &str) -> Result<Self, String> {
         match token {
             "catmullClark" => Ok(Self::CatmullClark),
@@ -272,7 +231,6 @@ impl Scheme {
     }
 }
 
-/// A GeomSubset: the faces bound to one material.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Subset {
     /// Empty when the subset has no material bound.
@@ -291,16 +249,12 @@ pub struct Texcoord {
     pub name: String,
     pub interpolation: Interpolation,
     pub values: Vec<[f32; 2]>,
-    /// How a subdivided mesh's refined faces read it; `None` when the mesh
-    /// is drawn as its cage.
+    /// `None` when the mesh is drawn as its cage.
     pub refined: Option<RefinedTexcoord>,
 }
 
-/// A texcoord refined with its mesh by the delegate's OpenSubdiv: per
-/// corner of the refined faces, in `Refined`'s order, the refined value it
-/// reads, each a stencil over the values handed over. A faceVarying
-/// texcoord's values are welded first (see the delegate), so they are the
-/// distinct ones.
+/// Per refined corner, in `Refined`'s order, the refined value it reads. A
+/// faceVarying texcoord's values are welded first, so they are distinct.
 #[derive(Clone, PartialEq, Debug)]
 pub struct RefinedTexcoord {
     pub face_vertex_indices: Vec<i32>,
@@ -313,7 +267,6 @@ impl RefinedTexcoord {
     }
 }
 
-/// Hydra's primvar interpolations, as USD names them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Interpolation {
     Constant,
@@ -324,7 +277,6 @@ pub enum Interpolation {
 }
 
 impl Interpolation {
-    /// The interpolation USD names `token`.
     pub fn from_token(token: &str) -> Result<Self, String> {
         match token {
             "constant" => Ok(Self::Constant),
@@ -347,33 +299,22 @@ impl Interpolation {
     }
 }
 
-/// What changed since the renderer last took it, so a frame uploads only
-/// that. Only changed values count: a redundant pull moves nothing.
+/// Only changed values count: a redundant pull moves nothing.
 #[derive(PartialEq, Debug, Default)]
 pub struct Moved {
-    /// A mesh was added, removed or remodelled, its points, normals or
-    /// texcoord changed size or kind, or a cage's faceVarying texcoord its
-    /// values: the layout of every mesh's data is rebuilt.
+    /// A mesh added, removed or remodelled, a primvar resized or reinterpolated, or a
+    /// cage's faceVarying texcoord values changed: the whole layout is rebuilt.
     pub layout: bool,
-    /// Meshes whose points changed, keeping their count.
     pub points: BTreeSet<u64>,
-    /// Meshes whose normals changed, keeping their interpolation and count.
     pub normals: BTreeSet<u64>,
-    /// Meshes whose texcoord changed, keeping its interpolation and count.
     pub texcoord: BTreeSet<u64>,
-    /// Meshes whose transform changed: only their instances are rewritten.
     pub transforms: BTreeSet<u64>,
-    /// A visibility, render tag, instancing or light link changed: the
-    /// instances, which carry their meshes' links, and draw records are
-    /// rewritten.
+    /// A visibility, render tag, instancing or light link (instances carry links) changed.
     pub draws: bool,
-    /// Materials whose network changed.
     pub materials: BTreeSet<u64>,
-    /// A light was added, removed or changed.
     pub lights: bool,
 }
 
-/// What one Hydra sync did to the store.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Stats {
     pub inserted: usize,
@@ -382,45 +323,35 @@ pub struct Stats {
     pub instancer: Bytes,
     pub material: Bytes,
     pub light: Bytes,
-    /// Bytes of basis curves, which are not stored, so are never known to be
-    /// redundant.
+    /// Curves are not stored, so their bytes are never known to be redundant.
     pub curve_bytes: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Bytes {
     pub pulled: usize,
-    /// Bytes of pulls that matched what the store already held: data Hydra
-    /// marked dirty that did not change, such as constants authored as time
-    /// samples.
+    /// Pulls matching what the store held: marked dirty but unchanged, such as
+    /// constants authored as time samples.
     pub redundant: usize,
 }
 
-/// What the store holds that a final-look pass will draw: meshes Hydra
-/// synced as visible, with the geometry or render tag. An invisible or
-/// retagged mesh keeps its old fields.
+/// What a final-look pass will draw: meshes synced as visible, of the geometry or render tag.
 #[derive(PartialEq, Debug, Default)]
 pub struct Census {
     pub meshes: usize,
-    /// Each mesh once per instance it is drawn at.
     pub mesh_instances: usize,
     /// Triangles as faces fan into them, before any subdivision.
     pub triangles: usize,
-    /// Triangles counting each mesh once, as its data would be stored.
     pub prototype_triangles: usize,
     /// The same two counts as drawn: a refined mesh's refined faces.
     pub refined_triangles: usize,
     pub refined_prototype_triangles: usize,
-    /// Points, normals, texcoord and face indices, counting each mesh once.
     pub geometry_bytes: usize,
-    /// The refined faces and stencils, counting each mesh once.
     pub refined_bytes: usize,
-    /// Materials bound to the meshes or their subsets.
     pub materials: usize,
     pub instancers: usize,
     pub curves: usize,
     pub lights: usize,
-    /// Counted prims by Hydra type.
     pub counted: BTreeMap<String, usize>,
 }
 
@@ -458,7 +389,6 @@ impl Store {
         &self.lights
     }
 
-    /// What changed since the last call.
     pub fn take_moved(&mut self) -> Moved {
         self.freed.clear();
         std::mem::take(&mut self.moved)
@@ -471,7 +401,6 @@ impl Store {
         id
     }
 
-    /// Adds a mesh with nothing synced yet.
     pub fn insert_mesh(&mut self, path: String) -> u64 {
         let id = self.new_id();
         self.meshes.insert(
@@ -541,7 +470,6 @@ impl Store {
         Ok(())
     }
 
-    /// `None` when the mesh has no normals primvar.
     pub fn set_normals(&mut self, id: u64, normals: Option<Normals>) -> Result<(), String> {
         let bytes = normals
             .as_ref()
@@ -559,16 +487,13 @@ impl Store {
         Ok(())
     }
 
-    /// `None` when the mesh's material reads no primvar or the mesh lacks
-    /// the one it reads.
     pub fn set_texcoord(&mut self, id: u64, texcoord: Option<Texcoord>) -> Result<(), String> {
         let bytes = (texcoord.as_ref()).map_or(0, |t| {
             size_of_val(t.values.as_slice()) + t.refined.as_ref().map_or(0, RefinedTexcoord::bytes)
         });
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        // Values alone may change in place: the interpolation, the count and
-        // the refinement are the layout's, as are a cage's faceVarying
-        // values, which its vertices weld by value (`geometry`).
+        // Values alone may change in place; interpolation, count, refinement and a
+        // cage's faceVarying values (welded by value) belong to the layout.
         let reshaped = match (&mesh.texcoord, &texcoord) {
             (Some(Some(old)), Some(new)) => {
                 old.interpolation != new.interpolation
@@ -589,11 +514,8 @@ impl Store {
         Ok(())
     }
 
-    /// The float2 primvar mesh `id`'s materials read, the subsets'
-    /// included, the texcoord the delegate fetches for it: none when no
-    /// material is bound, or none bound is in the store with a network
-    /// whose surface reads one. The materials must agree on it, since the
-    /// mesh is drawn with one texcoord.
+    /// The float2 primvar mesh `id`'s materials read, subsets' included. They must
+    /// agree, since a mesh is drawn with one texcoord.
     pub fn texcoord_name(&self, id: u64) -> Result<Option<String>, String> {
         let mesh = self.meshes.get(&id).ok_or_else(|| stale("mesh", id))?;
         let subsets = (mesh.topology.iter()).flat_map(|t| t.subsets.iter().map(|s| &s.material));
@@ -630,7 +552,6 @@ impl Store {
         Ok(())
     }
 
-    /// `None` when the mesh is not instanced.
     pub fn set_instancing(
         &mut self,
         id: u64,
@@ -649,8 +570,7 @@ impl Store {
         Ok(())
     }
 
-    /// `material` is empty when none is bound. The draw records are grouped
-    /// by material, so a binding rewrites them.
+    /// Empty when none is bound. Records are grouped by material, so a binding rewrites them.
     pub fn set_material(&mut self, id: u64, material: String) -> Result<(), String> {
         let bytes = material.len();
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
@@ -677,7 +597,6 @@ impl Store {
         Ok(())
     }
 
-    /// Adds an instancer with nothing synced yet.
     pub fn insert_instancer(&mut self, path: String) -> u64 {
         let id = self.new_id();
         let instancer = Instancer {
@@ -700,7 +619,6 @@ impl Store {
         Ok(())
     }
 
-    /// `None` when the instancer is not nested in another.
     pub fn set_instancer_parent(
         &mut self,
         id: u64,
@@ -761,13 +679,9 @@ impl Store {
         Ok(())
     }
 
-    /// A material's meshes may be in the store before it: both rewrite the
-    /// draw records.
     pub fn insert_material(&mut self, path: String) -> u64 {
-        // Houdini 21's UsdImagingGL resyncs a material whose connections
-        // change, removing it and inserting it again at its path before
-        // the next frame: it keeps its id, the one exception to `next_id`,
-        // so `shade` keeps drawing its look until its new build lands.
+        // Houdini 21's UsdImagingGL resyncs a material whose connections change by removing
+        // and reinserting it before the next frame: it keeps its id, so its look stays drawn.
         let id = match self.freed.remove(&path) {
             Some(id) => {
                 self.stats.inserted += 1;
@@ -800,10 +714,8 @@ impl Store {
         Ok(())
     }
 
-    /// Replaces the material's network and its document, and says whether
-    /// its meshes must sync again: the surface reads a primvar the one before
-    /// did not, so their texcoord is stale. A first network is not a change:
-    /// its meshes sync after it anyway.
+    /// Whether its meshes must sync again: the surface reads a primvar the one before
+    /// did not. A first network is not a change.
     pub fn set_network(&mut self, id: u64, network: Network) -> Result<bool, String> {
         let bytes = network.bytes();
         let material = self
@@ -836,7 +748,6 @@ impl Store {
         Ok(())
     }
 
-    /// Records `bytes` the delegate fetched for basis curves and dropped.
     pub fn pulled_curves(&mut self, id: u64, bytes: usize) -> Result<(), String> {
         let curves = self
             .curves
@@ -847,7 +758,6 @@ impl Store {
         Ok(())
     }
 
-    /// Adds a light with nothing synced yet.
     pub fn insert_light(&mut self, path: String) -> u64 {
         let id = self.new_id();
         let light = Light {
@@ -882,8 +792,7 @@ impl Store {
         Ok(())
     }
 
-    /// A link moves the meshes too: each collection's bit is assigned over
-    /// every light's link (`link::Links`).
+    /// A link moves the meshes too: collection bits are assigned over every light's link.
     pub fn set_light_link(&mut self, id: u64, link: String) -> Result<(), String> {
         let bytes = link.len();
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
@@ -893,7 +802,6 @@ impl Store {
         Ok(())
     }
 
-    /// Adds a prim that is only counted, of Hydra's `prim_type`.
     pub fn insert_counted(&mut self, prim_type: String, path: String) -> u64 {
         let id = self.new_id();
         self.counted.insert(id, Counted { prim_type, path });
@@ -908,13 +816,11 @@ impl Store {
         Ok(())
     }
 
-    /// Ends one Hydra sync: returns what it did and starts counting the next.
     pub fn end_sync(&mut self) -> Stats {
         std::mem::take(&mut self.stats)
     }
 
-    /// What drawing the store would cost. Fails when a prototype names an
-    /// instancer the store does not hold, which Hydra's sync order rules out.
+    /// Fails when a prototype names an instancer the store lacks; Hydra's sync order rules it out.
     pub fn census(&self) -> Result<Census, String> {
         let instancers: HashMap<&str, &Instancer> = (self.instancers.values())
             .map(|i| (i.path.as_str(), i))
@@ -973,9 +879,8 @@ impl Store {
         Ok(census)
     }
 
-    /// The whole store as canonical text: meshes sorted by path, floats in
-    /// their shortest exact form. Ids are left out because they depend on
-    /// the order Hydra inserted prims in.
+    /// Canonical text: floats in shortest exact form; ids left out, as they depend
+    /// on Hydra's insert order.
     pub fn dump(&self) -> String {
         let mut prims: Vec<(&str, String)> = (self.meshes.values())
             .map(|m| (m.path.as_str(), m.to_string()))
@@ -1055,8 +960,8 @@ impl fmt::Display for Mesh {
                 for s in &t.subsets {
                     writeln!(f, "    subset {:?} faces{}", s.material, List(&s.faces))?;
                 }
-                // The refined faces' order is OpenSubdiv's, and the image
-                // check covers their shape, so only their sizes are dumped.
+                // Their order is OpenSubdiv's and the image check covers their shape,
+                // so only sizes are dumped.
                 if let Some(r) = &t.refined {
                     let (faces, points) = (r.face_vertex_counts.len(), r.point_count());
                     write!(f, "    refined faces {faces} points {points}")?;
@@ -1208,7 +1113,6 @@ impl fmt::Display for Counted {
     }
 }
 
-/// A `GfMatrix4d`, one row per line.
 fn transform(f: &mut fmt::Formatter, transform: Option<&[f64; 16]>) -> fmt::Result {
     let Some(transform) = transform else {
         return writeln!(f, "  transform {UNSYNCED}");
@@ -1220,7 +1124,6 @@ fn transform(f: &mut fmt::Formatter, transform: Option<&[f64; 16]>) -> fmt::Resu
     Ok(())
 }
 
-/// A per-instance primvar, one value per line; nothing when it is absent.
 fn values<T: fmt::Display, const N: usize>(
     f: &mut fmt::Formatter,
     name: &str,
@@ -1245,8 +1148,6 @@ impl<T: fmt::Display> fmt::Display for List<'_, T> {
     }
 }
 
-/// How many times each instance of the instancer at `path` is drawn: once
-/// per index its parent has for it, and so on up.
 fn repeats<'a>(
     instancers: &HashMap<&'a str, &'a Instancer>,
     mut path: &'a str,
@@ -1269,8 +1170,7 @@ fn stale(kind: &str, id: u64) -> String {
     format!("no {kind} with id {id} in the store: it was removed, or never inserted")
 }
 
-/// Stores one pulled field, counting its bytes as redundant when Hydra handed
-/// over the same value before. Returns whether the value changed.
+/// Counts the bytes as redundant when the value is unchanged; returns whether it changed.
 fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) -> bool {
     stats.pulled += bytes;
     if slot.as_ref() == Some(&value) {
@@ -1304,8 +1204,7 @@ mod tests {
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
         assert!(store.take_moved().lights);
-        // Hydra resends a light's fields unchanged, as usdview does its
-        // camera light each frame: they move nothing.
+        // Hydra resends a light's fields unchanged, as usdview does its camera light: no move.
         store.end_sync();
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
@@ -1353,7 +1252,7 @@ mod tests {
     fn stale_id_is_an_error() {
         let mut store = Store::new();
         let a = store.insert_mesh("/a".into());
-        // The control: the same write succeeds while the mesh exists.
+        // Control: the same write succeeds while the mesh exists.
         store.set_visible(a, false).unwrap();
         store.remove_mesh(a).unwrap();
         let error = store.set_visible(a, false).unwrap_err();
@@ -1374,7 +1273,6 @@ mod tests {
         store.pulled_curves(c, 68).unwrap();
         store.pulled_curves(c, 68).unwrap();
         let stats = store.end_sync();
-        // Curves are not stored, so their bytes can never be found redundant.
         assert_eq!((stats.curve_bytes, stats.mesh), (136, Bytes::default()));
     }
 
@@ -1408,7 +1306,7 @@ mod tests {
             (stats.material.pulled, stats.material.redundant),
             (2 * bytes, bytes)
         );
-        // The control: a value edit is a pull the store had to keep.
+        // Control: a value edit is a pull the store had to keep.
         let node = network.nodes.get_mut("/m/s").unwrap();
         node.params
             .insert("roughness".into(), Value::Float(vec![0.25]));
@@ -1430,31 +1328,26 @@ mod tests {
         let a = store.insert_mesh("/a".into());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         store.set_material(a, "/mtl/paint".into()).unwrap();
-        // Bound before the material is in the store, or has a network.
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         let m = store.insert_material("/mtl/paint".into());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         let network = material::tests::fixture();
         let st = Some("st".to_owned());
-        // A first network is not a change.
         assert!(!store.set_network(m, network.clone()).unwrap());
         assert_eq!(store.texcoord_name(a).unwrap(), st);
-        // A value edit keeps what it reads; a new name is a change.
         let mut edited = network.clone();
         (edited.nodes.get_mut("surface").unwrap().params)
             .insert("roughness".into(), Value::Float(vec![0.75]));
         assert!(!store.set_network(m, edited).unwrap());
         assert!(store.set_network(m, reading("perfuv")).unwrap());
         assert_eq!(store.texcoord_name(a).unwrap(), Some("perfuv".to_owned()));
-        // A network that cannot be built gives its meshes none, and keeps
-        // the error for its build; the control is a stale mesh.
+        // An unbuildable network gives its meshes none; the control is a stale mesh.
         let mut broken = network.clone();
         broken.nodes.get_mut("surface").unwrap().node_type = "bogus".into();
         assert!(store.set_network(m, broken).unwrap());
         assert_eq!(store.texcoord_name(a).unwrap(), None);
         assert!(store.materials()[&m].document.is_err());
         assert!(store.texcoord_name(a + 1).is_err());
-        // A material removed is unbound; one of the same path is bound again.
         store.set_network(m, network.clone()).unwrap();
         store.remove_material(m).unwrap();
         assert_eq!(store.texcoord_name(a).unwrap(), None);
@@ -1463,7 +1356,6 @@ mod tests {
         assert_eq!(store.texcoord_name(a).unwrap(), st);
     }
 
-    /// The fixture network, its texture read at the float2 primvar `name`.
     fn reading(name: &str) -> Network {
         let mut network = material::tests::fixture();
         (network.nodes.get_mut("st").unwrap().params)
@@ -1493,7 +1385,6 @@ mod tests {
                 .collect(),
             refined: None,
         };
-        // Unbound as a whole, the mesh reads what its subsets' materials do.
         store.set_topology(a, subsets(&["/mtl/paint", ""])).unwrap();
         assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
         store.set_material(a, "/mtl/paint".into()).unwrap();
@@ -1501,7 +1392,7 @@ mod tests {
             .set_topology(a, subsets(&["/mtl/paint", "/mtl/paint"]))
             .unwrap();
         assert_eq!(store.texcoord_name(a).unwrap(), Some("st".to_owned()));
-        // The control: materials reading different primvars name the two.
+        // Control: materials reading different primvars name the two.
         store
             .set_topology(a, subsets(&["/mtl/paint", "/mtl/fur"]))
             .unwrap();
@@ -1514,8 +1405,7 @@ mod tests {
         let mut store = Store::new();
         let a = store.insert_mesh("/a".into());
         store.end_sync();
-        // A first pull is never redundant, even of a value like Hydra's
-        // default visibility.
+        // A first pull is never redundant, even of Hydra's default visibility.
         let points = vec![[0.0, 1.0, 2.0]; 4];
         store.set_points(a, points.clone()).unwrap();
         store.set_visible(a, true).unwrap();
@@ -1528,7 +1418,6 @@ mod tests {
         assert_eq!((same.mesh.pulled, same.mesh.redundant), (49, 49));
         assert_eq!(same.instancer, Bytes::default());
 
-        // A changed value is not redundant, and is stored.
         store.set_points(a, vec![[0.0, 1.0, 3.0]; 4]).unwrap();
         assert_eq!(store.end_sync().mesh.redundant, 0);
         assert_eq!(
@@ -1544,12 +1433,10 @@ mod tests {
         assert!(store.take_moved().layout);
         assert_eq!(store.take_moved(), Moved::default());
 
-        // A redundant pull moves nothing; a changed one moves only its kind.
         store.set_points(a, vec![[0.0; 3]; 4]).unwrap();
         store.set_visible(a, true).unwrap();
         store.set_render_tag(a, "geometry".into()).unwrap();
         assert_eq!(store.take_moved(), Moved::default());
-        // A retagged mesh keeps its data, but the passes drawing it change.
         store.set_render_tag(a, "proxy".into()).unwrap();
         assert!(store.take_moved().draws);
         store.set_points(a, vec![[1.0; 3]; 4]).unwrap();
@@ -1561,7 +1448,6 @@ mod tests {
             .set_normals(a, Some(normals(vec![[0.0; 3]; 4])))
             .unwrap();
         let moved = store.take_moved();
-        // Normals arriving for the first time change the layout.
         assert_eq!((moved.layout, &moved.points), (true, &BTreeSet::from([a])));
         store
             .set_normals(a, Some(normals(vec![[1.0; 3]; 4])))
@@ -1585,8 +1471,6 @@ mod tests {
             .set_texcoord(a, Some(st(vec![[0.0; 2]; 7], None)))
             .unwrap();
         assert_eq!(store.take_moved(), Moved::default());
-        // A cage's faceVarying values are welded into its vertices, so new
-        // ones move the layout; vertex values move the texcoord alone.
         store
             .set_texcoord(a, Some(st(vec![[1.0; 2]; 7], None)))
             .unwrap();
@@ -1608,8 +1492,6 @@ mod tests {
             (moved.layout, &moved.texcoord),
             (false, &BTreeSet::from([a]))
         );
-        // Refining it moves the layout, as does refining it differently;
-        // new values under the same refinement move the texcoord.
         let refined = |weight| {
             Some(RefinedTexcoord {
                 face_vertex_indices: vec![0; 3],
@@ -1639,7 +1521,6 @@ mod tests {
         store.set_texcoord(a, None).unwrap();
         assert!(store.take_moved().layout);
 
-        // Changing the point count moves the layout, not the points.
         store.set_points(a, vec![[1.0; 3]; 5]).unwrap();
         let moved = store.take_moved();
         assert!(moved.layout && moved.points.is_empty());
@@ -1658,7 +1539,6 @@ mod tests {
         assert_eq!(store.end_sync(), Stats::default());
     }
 
-    /// A mesh with one triangle and one quad: 3 triangles.
     fn drawn(store: &mut Store, path: &str, instancing: Option<Instancing>) -> u64 {
         let id = store.insert_mesh(path.into());
         let topology = Topology {
@@ -1690,8 +1570,6 @@ mod tests {
             let instancer = instancer.into();
             Some(Instancing { instancer, indices })
         };
-        // Three instances of an outer instancer, two of them its inner one,
-        // which draws its prototype at four instances: eight in all.
         let outer = store.insert_instancer("/outer".into());
         store.set_instancer_parent(outer, None).unwrap();
         let inner = store.insert_instancer("/inner".into());
@@ -1713,12 +1591,10 @@ mod tests {
             (3 * 9, 3 * 2)
         );
         assert_eq!(census.geometry_bytes, 2 * (7 * 4 + 4 * 12));
-        // Nothing is refined, so every triangle is drawn as it is.
         assert_eq!(
             (census.refined_triangles, census.refined_prototype_triangles),
             (3 * 9, 3 * 2)
         );
-        // Refined into three quads, /plain draws six triangles, not three.
         let mut topology = store.meshes()[&plain].topology.clone().unwrap();
         topology.scheme = Scheme::CatmullClark;
         topology.refined = Some(Refined {
@@ -1742,14 +1618,12 @@ mod tests {
         assert_eq!((census.materials, census.instancers), (2, 2));
         assert_eq!(census.counted["sphereLight"], 2);
 
-        // Hidden and proxy meshes are not drawn.
         let hidden = drawn(&mut store, "/hidden", None);
         store.set_visible(hidden, false).unwrap();
         let proxy = drawn(&mut store, "/proxy", None);
         store.set_render_tag(proxy, "proxy".into()).unwrap();
         assert_eq!(store.census().unwrap().mesh_instances, 9);
 
-        // A prototype of an instancer the store does not hold is an error.
         drawn(&mut store, "/lost", at("/missing", vec![0]));
         let error = store.census().unwrap_err();
         assert!(error.contains("/missing"), "{error}");
@@ -1773,8 +1647,6 @@ mod tests {
                         material: "/mtl/red".into(),
                         faces: vec![0],
                     }],
-                    // The triangle split in four, its corners kept and its
-                    // edges halved.
                     refined: Some(Refined {
                         face_vertex_counts: vec![3; 4],
                         face_vertex_indices: vec![0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
@@ -1807,7 +1679,6 @@ mod tests {
                     name: "st".into(),
                     interpolation: Interpolation::Vertex,
                     values: vec![[0.0, 0.0], [0.5, 0.0], [0.0, 1.0]],
-                    // Refined with the points: the same stencils.
                     refined: Some(RefinedTexcoord {
                         face_vertex_indices: vec![0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5],
                         stencils: Stencils {
@@ -1850,7 +1721,6 @@ mod tests {
         store.set_instance_primvars(i, primvars).unwrap();
         let c = store.insert_curves("/world/c".into());
         store.pulled_curves(c, 68).unwrap();
-        // Prims of every kind are sorted together.
         store.insert_counted("sphereLight".into(), "/world/aa".into());
 
         let expected = "\

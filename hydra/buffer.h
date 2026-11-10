@@ -1,4 +1,3 @@
-// The render buffer Pika writes each frame into.
 #pragma once
 
 #include <pxr/base/gf/vec3i.h>
@@ -12,7 +11,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// The pixels live here, in host memory; Pika copies each frame in.
+// Host memory; Pika copies each frame in.
 class PikaRenderBuffer final : public HdRenderBuffer {
 public:
     explicit PikaRenderBuffer(SdfPath const &id) : HdRenderBuffer(id) {}
@@ -35,7 +34,6 @@ public:
     unsigned int GetHeight() const override { return _height; }
     unsigned int GetDepth() const override { return 1; }
     HdFormat GetFormat() const override { return _format; }
-    // Hydra's name for the format, as pika_aov takes it.
     const char *FormatName() const { return _name.c_str(); }
     bool IsMultiSampled() const override { return _multiSampled; }
 

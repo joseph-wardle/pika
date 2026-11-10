@@ -1,7 +1,5 @@
-//! One frame's commands: the command buffer every pass records into, the
-//! fence that says the GPU finished it, and the timestamps that say where
-//! its GPU time went. One frame is in flight at a time: `begin` after
-//! `submit` fails until `wait` returns.
+//! One frame's command buffer, fence and timestamps. One frame is in flight at a time:
+//! `begin` after `submit` fails until `wait` returns.
 
 use std::time::{Duration, Instant};
 
@@ -9,33 +7,27 @@ use ash::vk;
 
 use crate::gpu;
 
-/// Timestamps a frame may write: the one `begin` writes and the marks.
 const QUERIES: u32 = 16;
 
 pub struct Commands {
-    // A copy of the owner's device table. The owner keeps the `gpu::Device`
-    // alive longer than this (field order), which `drop` relies on.
+    // A copy of the owner's device table; the owner outlives this (field order), as `drop` needs.
     device: ash::Device,
     queue: vk::Queue,
     pool: vk::CommandPool,
     buffer: vk::CommandBuffer,
     fence: vk::Fence,
     timestamps: vk::QueryPool,
-    /// The label of each mark written this frame, in query order after
-    /// `begin`'s.
+    /// In query order, after `begin`'s.
     marks: Vec<&'static str>,
-    /// When the frame was submitted; `None` once `wait` returns.
+    /// `None` once `wait` returns.
     submitted: Option<Instant>,
     timestamp_bits: u32,
     timestamp_period: f32,
 }
 
-/// Where one frame's time went after recording.
 pub struct Times {
-    /// How long `wait` blocked on the fence.
     pub wait: Duration,
-    /// On the GPU, each mark's span: the work recorded between the previous
-    /// timestamp and it, in the order the marks were made.
+    /// GPU time from the timestamp before each mark to it.
     pub spans: Vec<(&'static str, Duration)>,
 }
 
@@ -56,10 +48,8 @@ impl Commands {
         };
         let pool_info =
             vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family);
-        // SAFETY (this and every call below in `new`): `d` is a live device,
-        // each info struct outlives its call, and each handle passed in was
-        // created on `d` just above. Every handle starts null, so a failed
-        // `new` drops a partly built value.
+        // SAFETY (all of `new`): `d` is live, each info outlives its call, each handle was made on
+        // `d` above. Handles start null, so a failed `new` drops a partly built value.
         c.pool = unsafe { d.create_command_pool(&pool_info, None) }
             .map_err(|e| format!("vkCreateCommandPool failed: {e}"))?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -78,7 +68,6 @@ impl Commands {
         Ok(c)
     }
 
-    /// Starts recording a frame and returns its command buffer.
     pub fn begin(&mut self) -> Result<vk::CommandBuffer, String> {
         if self.submitted.is_some() {
             return Err("a frame began before the last one's wait".into());
@@ -102,13 +91,11 @@ impl Commands {
         Ok(self.buffer)
     }
 
-    /// The buffer `begin` began recording.
     pub fn buffer(&self) -> vk::CommandBuffer {
         self.buffer
     }
 
-    /// Names the work recorded since the last mark (or `begin`) `label`,
-    /// timing it on the GPU, inside or outside rendering.
+    /// Times the work recorded since the last mark (or `begin`), inside or outside rendering.
     pub fn mark(&mut self, label: &'static str) -> Result<(), String> {
         if self.marks.len() + 1 >= QUERIES as usize {
             return Err(format!("a frame has more than {} marks", QUERIES - 1));
@@ -118,8 +105,7 @@ impl Commands {
         Ok(())
     }
 
-    /// Ends the recording and submits it. Call `wait` before touching
-    /// anything the frame uses.
+    /// Call `wait` before touching anything the frame uses.
     pub fn submit(&mut self) -> Result<(), String> {
         let d = &self.device;
         // SAFETY: the buffer is recording outside rendering, and the fence
@@ -138,7 +124,6 @@ impl Commands {
         Ok(())
     }
 
-    /// Waits for the submitted frame and returns where its time went.
     pub fn wait(&mut self) -> Result<Times, String> {
         if self.submitted.is_none() {
             return Err("waited for a frame that was never submitted".into());
@@ -171,7 +156,6 @@ impl Commands {
         Ok(Times { wait, spans })
     }
 
-    /// Writes timestamp `index` once all earlier commands finish.
     fn timestamp(&mut self, index: u32) {
         // SAFETY: the buffer is recording, the pool was created on this
         // device and reset in `begin`, and `index` is below `QUERIES`.
@@ -200,8 +184,7 @@ impl Drop for Commands {
     }
 }
 
-/// The time from timestamp `start` to `end` of a counter with `bits` valid
-/// bits, ticking every `period` nanoseconds. The counter may wrap between.
+/// The counter has `bits` valid bits, ticks every `period` ns, and may wrap between.
 fn elapsed(start: u64, end: u64, bits: u32, period: f32) -> Duration {
     let ticks = end.wrapping_sub(start) & (u64::MAX >> (64 - bits));
     Duration::from_nanos((ticks as f64 * period as f64) as u64)

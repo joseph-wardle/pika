@@ -1,29 +1,19 @@
-//! A material's shading network, as Hydra hands it over and as the MaterialX
-//! document Pika compiles, and the key that says which materials share a shader.
-//!
-//! The document holds only what decides the generated code: the nodes
-//! upstream of the surface, named by their MaterialX nodedefs, their
-//! connections, and their text inputs (a geomprop name is compiled in).
-//! Numbers, assets and address modes are left out: they reach the shader
-//! as uniforms, textures and samplers, so a material whose values change
-//! keeps its shader, and materials of one structure share it.
+//! A material's network and its MaterialX document, which holds only what decides the
+//! generated code: values, assets and address modes reach the shader as uniforms and samplers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::cache;
 
-/// `HdMaterialNetwork2`: shader nodes by path, and the node whose output is
-/// the material's surface, when it has one.
+/// Hydra's `HdMaterialNetwork2`.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Network {
     pub nodes: BTreeMap<String, Node>,
     pub surface: Option<String>,
 }
 
-/// One shader node: its identifier ("UsdPreviewSurface",
-/// "ND_open_pbr_surface_surfaceshader"), its authored values by input name,
-/// and the upstream outputs connected to its inputs. An input may have both.
+/// An input may have both an authored value and a connection.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Node {
     pub node_type: String,
@@ -31,29 +21,24 @@ pub struct Node {
     pub connections: BTreeMap<String, Connection>,
 }
 
-/// An upstream node's output.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Connection {
     pub node: String,
     pub output: String,
 }
 
-/// A parameter value as the `VtValue` held it. Numbers keep their width (a
-/// `GfVec3f` is three floats) but not whether they are a colour or a
-/// vector, which the node's definition says.
+/// Numbers keep the `VtValue`'s width but not colour vs vector; the nodedef says which.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
     Float(Vec<f32>),
     Int(i32),
     Bool(bool),
-    /// A token or string.
     Text(String),
     /// An asset's resolved path.
     Asset(String),
 }
 
 impl Network {
-    /// The bytes Hydra handed over for the network, as counted for a pull.
     pub fn bytes(&self) -> usize {
         let mut bytes = self.surface.as_ref().map_or(0, String::len);
         for (path, node) in &self.nodes {
@@ -74,35 +59,22 @@ impl Network {
     }
 }
 
-/// A texture as a material asks the texture tool for it: the file, the colour
-/// space the file is in, the encoding it is stored with, and, when
-/// the file is missing, the value the node draws instead.
 #[derive(Debug, PartialEq)]
 pub struct Source {
-    /// The node reading it, by path.
     pub node: String,
-    /// The input it is read through, as the store names it.
     pub input: String,
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
-    /// A UsdUVTexture's `fallback` or an image node's `default`, its
-    /// nodedef's when unauthored, for a file that is empty; empty itself
-    /// for a file that resolves, so an edit to a drawn fallback, and no
-    /// other, makes a new source.
+    /// The fallback drawn for an empty file; empty when the file resolves, so only an
+    /// edit to a drawn fallback makes a new source.
     pub default: Vec<f32>,
-    /// It reads coordinates other than a primvar's as authored, so the
-    /// detail it needs is not estimated (`transformed`).
+    /// Reads coordinates other than a primvar's as authored, so its detail is not estimated.
     pub transformed: bool,
 }
 
-/// The texture `node`, at `path`, reads through its input `input`. The
-/// encoding follows the node's output type: colour compresses as BC7
-/// sRGB, or as plain BC7 when its space is raw; a float as BC4; a vector3
-/// or vector4 as BC7; a vector2 stays float, so a coordinate map stays
-/// exact (the oracles' uv ramp). The space is the asset's `colorSpace` metadata, else
-/// UsdUVTexture's `sourceColorSpace`, in OpenColorIO's names, else `auto`
-/// for a colour and raw for the rest.
+/// Colour is BC7 sRGB (plain BC7 when raw), float BC4, vector3/4 BC7; vector2 stays float so
+/// coordinate maps stay exact. Space: `colorSpace`, else `sourceColorSpace`, else auto or raw.
 pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result<Source, String> {
     let file = match node.params.get(input) {
         Some(Value::Asset(file)) => file.clone(),
@@ -122,8 +94,7 @@ pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result
     let space = match declared {
         Some(Value::Text(space)) if space == "sRGB" => "srgb_texture".to_owned(),
         Some(Value::Text(space)) => space.clone(),
-        // USD's auto, sRGB at 8 bits, is a rule for colour: a normal or
-        // roughness map at 8 bits is read as it is, as Karma reads it.
+        // USD's auto (sRGB at 8 bits) is for colour; other 8-bit maps read as is, as in Karma.
         _ if kind == "color3" || kind == "color4" => "auto".to_owned(),
         _ => "raw".to_owned(),
     };
@@ -140,9 +111,7 @@ pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result
             ));
         }
     };
-    // The delegate hands over the path as it resolved, so a file that does
-    // not exist arrives empty, as one never authored does, and the node's
-    // fallback is drawn, as Storm draws it.
+    // A missing file arrives as an empty path and draws the fallback, as Storm does.
     let usd = node.node_type == "UsdUVTexture";
     let default = match node.params.get(if usd { "fallback" } else { "default" }) {
         _ if !file.is_empty() => Vec::new(),
@@ -161,11 +130,7 @@ pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result
     })
 }
 
-/// Whether the texture node `node` of `network` reads coordinates other
-/// than a primvar's as authored: its UsdUVTexture `st` or image
-/// `texcoord` is connected to anything but a primvar reader, which
-/// transforms them, or it is another node, which may (a tiled image's
-/// tiling). Unconnected, it reads UV0 as authored.
+/// Its `st` or `texcoord` comes from anything but a primvar reader; unconnected is UV0.
 fn transformed(network: &Network, node: &Node) -> bool {
     let input = match node.node_type.as_str() {
         "UsdUVTexture" => "st",
@@ -184,8 +149,6 @@ fn transformed(network: &Network, node: &Node) -> bool {
     !upstream.is_some_and(|n| READERS.contains(&n.node_type.as_str()))
 }
 
-/// A network's MaterialX document, its key, and the texcoord its meshes
-/// carry.
 #[derive(Clone, Debug)]
 pub struct Document {
     pub text: String,
@@ -193,15 +156,11 @@ pub struct Document {
     pub hash: u64,
     /// The store's node paths in document order: node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
-    /// The float2 primvar the surface reads: the first its reader nodes
-    /// name, else `st`, which is UV0 (bake/generate.cpp says which inputs
-    /// read UV0 and refuses a surface reading two).
+    /// The float2 primvar the surface reads: the first its readers name, else `st` (UV0).
     pub texcoord: String,
 }
 
 impl Document {
-    /// The node of `network`, by path, and its input as the store names
-    /// it, that the generated variable `name` stands for.
     pub fn reader<'a>(
         &'a self,
         network: &'a Network,
@@ -215,8 +174,7 @@ impl Document {
     }
 }
 
-/// The node and input a generated variable stands for: `n1_file` is node
-/// 1's `file`.
+/// `n1_file` is node 1's `file`.
 fn node_input(name: &str) -> Result<(usize, &str), String> {
     (name.strip_prefix('n'))
         .and_then(|rest| rest.split_once('_'))
@@ -224,20 +182,12 @@ fn node_input(name: &str) -> Result<(usize, &str), String> {
         .ok_or_else(|| format!("{name} is not a node's input"))
 }
 
-/// The inputs that choose a texture's sampler, u then v: a UsdUVTexture's
-/// and an image node's. The generator compiles a text input in, but these
-/// land as integer uniforms the generated code never reads, since the
-/// sampler addresses the texture, so they are values: left out of the
-/// document and read into the sampler (`address_modes`), and an edit to
-/// one compiles nothing.
+/// Compiled as integer uniforms the generated code never reads, so they are values: left
+/// out of the document and read into the sampler.
 pub const ADDRESS_MODES: [&str; 4] = ["wrapS", "wrapT", "uaddressmode", "vaddressmode"];
 
-/// The address modes `node` samples its texture through, u then v, in the
-/// image nodedefs' enumeration: its UsdUVTexture `wrapS`/`wrapT` or image
-/// `uaddressmode`/`vaddressmode` tokens. A UsdUVTexture's `useMetadata`,
-/// USD's default when none is authored, asks for the `file`'s own, as the
-/// bake read them (`texture::Texture::wrap`); an image node authoring none
-/// is periodic, its nodedef's initial value.
+/// In the image nodedefs' enumeration. UsdUVTexture's `useMetadata`, USD's default, asks
+/// for the file's own; an image node authoring none is periodic.
 pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
     let usd = node.node_type == "UsdUVTexture";
     let mode = |names: [&str; 2], axis: usize| -> Result<u32, String> {
@@ -260,9 +210,7 @@ pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
     ])
 }
 
-/// The integer the image nodedefs' enumeration gives the address mode
-/// `token`, USD's names included (black is constant, repeat periodic), or
-/// none for `useMetadata`, which asks for the file's own.
+/// USD's names included (black is constant, repeat periodic); `None` for `useMetadata`.
 fn address_mode(token: &str) -> Result<Option<u32>, String> {
     Ok(Some(match token {
         "black" | "constant" => 0,
@@ -278,8 +226,6 @@ fn address_mode(token: &str) -> Result<Option<u32>, String> {
     }))
 }
 
-/// A USD shader id and the MaterialX nodedef that implements it, with the
-/// inputs and outputs whose names differ and the inputs the nodedef lacks.
 struct Rename {
     usd: &'static str,
     nodedef: &'static str,
@@ -320,7 +266,6 @@ const RENAMES: &[Rename] = &[
     },
 ];
 
-/// A MaterialX node: nothing to rename.
 const NONE: &Rename = &Rename {
     usd: "",
     nodedef: "",
@@ -329,8 +274,7 @@ const NONE: &Rename = &Rename {
     dropped: &[],
 };
 
-/// The network of meshes with no material bound: a clay surface, Lambert
-/// at 18 % grey, through the same path as any other material.
+/// Lambert at 18 % grey, through the same path as any other material.
 pub fn clay() -> Network {
     let mut surface = Node {
         node_type: "ND_surface".into(),
@@ -357,8 +301,7 @@ pub fn clay() -> Network {
     }
 }
 
-/// The network of a material Pika could not build: an unlit magenta
-/// emission, an error under any lighting.
+/// Unlit magenta emission, an error under any lighting.
 pub fn pink() -> Network {
     let mut surface = Node {
         node_type: "ND_surface".into(),
@@ -385,11 +328,8 @@ pub fn pink() -> Network {
     }
 }
 
-/// The document for a network, or none when the network has no surface.
-/// A mesh is drawn with one texcoord, the primvar its material reads:
-/// ALab's meshes carry `st` and `perfuv` both and each material reads one
-/// of them, so carrying every float2 primvar would double the texture
-/// coordinates for nothing.
+/// `None` without a surface. A mesh carries one texcoord, the one its material reads
+/// (ALab's meshes carry both `st` and `perfuv`).
 pub fn document(network: &Network) -> Result<Option<Document>, String> {
     let Some(surface) = &network.surface else {
         return Ok(None);
@@ -398,8 +338,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     visit(network, surface, &mut order)?;
     let index: BTreeMap<&str, usize> = order.iter().enumerate().map(|(i, p)| (*p, i)).collect();
 
-    // The library version the generator links. MaterialX upgrades older
-    // documents on reading.
+    // The generator's MaterialX version; it upgrades older documents on reading.
     let mut text = String::from("<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n");
     let mut primvars = BTreeSet::new();
     for (i, path) in order.iter().enumerate() {
@@ -410,17 +349,14 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
         {
             primvars.insert(name.clone());
         }
-        // The element's category and type are the nodedef's to say and Pika
-        // has no MaterialX library; the generator resolves the `nodedef`
-        // attribute without them.
+        // No MaterialX library here: the generator resolves `nodedef` without category or type.
         writeln!(text, "  <node name=\"n{i}\" nodedef=\"{nodedef}\">").unwrap();
         let mut inputs = BTreeMap::new();
         for (name, value) in &node.params {
             let Value::Text(value) = value else {
                 continue;
             };
-            // Hydra adds `typeName:` and `colorSpace:` entries beside the
-            // inputs; they describe the values this document leaves out.
+            // Hydra's `typeName:` and `colorSpace:` entries describe values left out here.
             if name.contains(':')
                 || rename.dropped.contains(&name.as_str())
                 || ADDRESS_MODES.contains(&name.as_str())
@@ -464,8 +400,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     }))
 }
 
-/// Lists the nodes upstream of `path` in document order: each node before
-/// what feeds it, inputs by name.
+/// Each node before what feeds it, inputs by name.
 fn visit<'a>(network: &'a Network, path: &'a str, order: &mut Vec<&'a str>) -> Result<(), String> {
     if order.contains(&path) {
         return Ok(());
@@ -495,8 +430,6 @@ fn resolve<'a>(path: &str, node: &'a Node) -> Result<(&'a str, &'static Rename),
     ))
 }
 
-/// The store's name for `node`'s MaterialX input: the USD name the rename
-/// table maps to it, else the same name.
 pub fn store_input<'a>(node: &Node, input: &'a str) -> &'a str {
     let Some(rename) = RENAMES.iter().find(|r| r.usd == node.node_type) else {
         return input;
@@ -524,8 +457,7 @@ fn escape(text: &str) -> String {
 pub mod tests {
     use super::*;
 
-    /// The `network` fixture as husk syncs it: a UsdPreviewSurface reading
-    /// a UsdUVTexture through a UsdPrimvarReader_float2.
+    /// The `network` fixture as husk syncs it.
     pub fn fixture() -> Network {
         let mut surface = Node {
             node_type: "UsdPreviewSurface".into(),
@@ -595,8 +527,7 @@ pub mod tests {
         document(network).map(|d| d.map(|d| d.texcoord))
     }
 
-    // Houdini 22's MaterialX 1.39.5 generates this document; bake/check.sh
-    // proves it against the manifest beside it.
+    // Houdini 22's MaterialX 1.39.5 generates this; bake/check.sh proves it.
     const FIXTURE: &str = include_str!("../bake/fixtures/network.mtlx");
 
     #[test]
@@ -647,16 +578,12 @@ pub mod tests {
     fn the_texcoord_is_the_one_primvar_read() {
         assert_eq!(texcoord(&fixture()).unwrap(), Some("st".to_owned()));
 
-        // A network naming no primvar reads UV0, which is st; one with no
-        // surface reads none.
         let mut uv0 = fixture();
         (uv0.nodes.get_mut("tex").unwrap().connections).remove("st");
         assert_eq!(texcoord(&uv0).unwrap(), Some("st".to_owned()));
         assert_eq!(texcoord(&clay()).unwrap(), Some("st".to_owned()));
         assert_eq!(texcoord(&Network::default()).unwrap(), None);
 
-        // A second reader of the same name is one texcoord; of another,
-        // the first by name, which the generate tool then refuses.
         let mut network = fixture();
         let mut reader = network.nodes["st"].clone();
         network.nodes.insert("uv".into(), reader.clone());
@@ -691,8 +618,7 @@ pub mod tests {
         (tex.params).insert("uaddressmode".into(), Value::Text("constant".into()));
         (tex.params).insert("vaddressmode".into(), Value::Text("mirror".into()));
         assert!(!text(&image).contains("addressmode"));
-        // The control: a text input that is not an address mode is
-        // compiled in, whatever the token.
+        // The control: a text input that is not an address mode is compiled in.
         let mut reader = fixture();
         let st = reader.nodes.get_mut("st").unwrap();
         st.params
@@ -818,7 +744,6 @@ pub mod tests {
                 transformed: false,
             }
         );
-        // A missing file carries the fallback the node draws instead.
         let mut missing = tex.clone();
         missing
             .params
@@ -856,7 +781,6 @@ pub mod tests {
             "auto"
         );
 
-        // Declaring nothing, a colour is sRGB when 8-bit, the rest raw.
         let image = |kind: &str| {
             let mut node = tex.clone();
             node.node_type = format!("ND_image_{kind}");
@@ -888,14 +812,10 @@ pub mod tests {
     fn address_modes_follow_the_node_then_the_file() {
         let network = fixture();
         let tex = &network.nodes["tex"];
-        // wrapT, unauthored, is useMetadata: the file's, as is a wrapS
-        // saying so.
         assert_eq!(address_modes(tex, [3, 0]).unwrap(), [1, 0]);
         let mut metadata = tex.clone();
         (metadata.params).insert("wrapS".into(), Value::Text("useMetadata".into()));
         assert_eq!(address_modes(&metadata, [3, 0]).unwrap(), [3, 0]);
-        // An image node authoring none is periodic; its tokens are the
-        // enumeration's own.
         let mut image = tex.clone();
         image.node_type = "ND_image_color3".into();
         image.params.remove("wrapS");
@@ -939,11 +859,9 @@ pub mod tests {
                 .transformed
         };
         assert!(!transformed(&network));
-        // Unconnected, it reads UV0 as authored.
         let tex = network.nodes.get_mut("tex").unwrap();
         tex.connections.remove("st");
         assert!(!transformed(&network));
-        // Through a UsdTransform2d, it is not.
         let tex = network.nodes.get_mut("tex").unwrap();
         tex.connections
             .insert("st".into(), connection("place", "result"));

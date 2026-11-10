@@ -1,6 +1,4 @@
-//! Slang shaders, compiled to SPIR-V by the `slangc` on `PATH`: the fixed
-//! ones in `shaders/` when a renderer or check starts, and each material's
-//! surface, whose SPIR-V the cache keeps.
+//! Slang shaders compiled by the `slangc` on `PATH`; material surfaces are cached.
 
 use std::io::{Cursor, ErrorKind};
 use std::path::Path;
@@ -21,13 +19,11 @@ const FLAGS: [&str; 5] = [
     "all",
 ];
 
-/// A compiled shader, with entry points named as in its source.
 pub struct Shader {
     pub slangc_version: String,
     pub spirv: Vec<u32>,
 }
 
-/// Compiles `shaders/<name>.slang`.
 pub fn compile(name: &str) -> Result<Shader, String> {
     let path = format!("{SHADERS}/{name}.slang");
     let output = slangc(&[&[path.as_str()], &FLAGS[..]].concat())?;
@@ -43,19 +39,14 @@ pub fn compile(name: &str) -> Result<Shader, String> {
     })
 }
 
-/// A material's surface as compiled: its SPIR-V and the layout slangc
-/// reflected.
 pub struct Compiled {
     pub shader: Shader,
     pub reflection: String,
-    /// Whether slangc ran now rather than the cache answering.
+    /// slangc ran rather than the cache answering.
     pub fresh: bool,
 }
 
-/// Compiles `<dir>/surface.slang`, the vertex stage the tool wrote beside
-/// the pixel stage it includes, unless `dir` holds the SPIR-V for these
-/// sources, flags and slangc: the key hashes everything the SPIR-V depends
-/// on, so a stale entry is impossible.
+/// Compiles `<dir>/surface.slang`, keyed on every input its SPIR-V depends on.
 pub fn surface(dir: &Path) -> Result<Compiled, String> {
     let read = |name: &str| {
         std::fs::read(dir.join(name))
@@ -80,9 +71,7 @@ pub fn surface(dir: &Path) -> Result<Compiled, String> {
     let (spirv, reflection) = match cached {
         Ok(pair) => pair,
         Err(why) => {
-            // Absent, or cut short by a write that never finished: either
-            // way slangc runs. The SPIR-V, renamed into place last, marks
-            // the pair, and the compile replaces whatever is left beside it.
+            // Absent, or cut short by a write that never finished.
             if spv.exists() {
                 cache::discard(&spv, &why)?;
             }
@@ -100,8 +89,6 @@ pub fn surface(dir: &Path) -> Result<Compiled, String> {
     })
 }
 
-/// The SPIR-V `spv` holds and the reflection `json` holds, if both are
-/// whole.
 fn compiled(spv: &Path, json: &Path) -> Result<(Vec<u32>, String), String> {
     let spirv = std::fs::read(spv).map_err(|e| format!("cannot read {}: {e}", spv.display()))?;
     let reflection = std::fs::read_to_string(json)
@@ -110,12 +97,9 @@ fn compiled(spv: &Path, json: &Path) -> Result<(Vec<u32>, String), String> {
     Ok((words(&spirv, &spv.display().to_string())?, reflection))
 }
 
-/// Compiles `<dir>/surface.slang` into `spv` and its reflection into
-/// `json`, under the cache key `key`.
 fn compile_surface(dir: &Path, key: &str, spv: &Path, json: &Path) -> Result<(), String> {
     let path = dir.join("surface.slang");
-    // Both land under temporary names and are renamed into place, the
-    // SPIR-V last, so another process sees a complete pair or none.
+    // Renamed into place, the SPIR-V last, so others see a whole pair or none.
     let unique = cache::unique();
     let tmp = |name: &str| dir.join(format!("{key}.{unique}.{name}"));
     let (out, reflected) = (tmp("spv"), tmp("json"));
@@ -144,22 +128,17 @@ fn compile_surface(dir: &Path, key: &str, spv: &Path, json: &Path) -> Result<(),
         .map_err(|e| format!("cannot write {}: {e}", spv.display()))
 }
 
-/// A fixed shader's source, which the surface includes.
 fn fixed(name: &str) -> Result<Vec<u8>, String> {
     std::fs::read(format!("{SHADERS}/{name}"))
         .map_err(|e| format!("cannot read {SHADERS}/{name}: {e}"))
 }
 
-// The generator declares textures inside its uniform block, and slangc
-// warns that it moves them to bindings of their own (31106, 31107).
-// bake/check.sh compiles the fixture surface with FLAGS and these.
+// The generator declares textures in its uniform block, which slangc warns
+// of. bake/check.sh passes the same flags.
 const SURFACE_FLAGS: [&str; 2] = ["-warnings-disable", "31106,31107"];
 
-/// `bytes` as SPIR-V words. `read_spv` checks the magic alone, which a
-/// cache entry cut short at a word boundary passes, to fail in the driver
-/// (and crash the validation layer): the instructions must end on the
-/// last word, with the OpFunctionEnd every module's last function ends
-/// with.
+/// `read_spv` checks only the magic, which an entry cut short passes, to crash the
+/// driver: the instructions must end on the last word, with OpFunctionEnd.
 fn words(bytes: &[u8], path: &str) -> Result<Vec<u32>, String> {
     let words = ash::util::read_spv(&mut Cursor::new(bytes))
         .map_err(|e| format!("{path} is not SPIR-V: {e}"))?;
@@ -180,7 +159,6 @@ fn words(bytes: &[u8], path: &str) -> Result<Vec<u32>, String> {
     Ok(words)
 }
 
-/// slangc's version, asked once per process.
 fn version() -> Result<&'static str, String> {
     static VERSION: OnceLock<Result<String, String>> = OnceLock::new();
     VERSION

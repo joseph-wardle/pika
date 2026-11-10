@@ -1,18 +1,11 @@
-// What the pixel stage the generate tool writes for a material reads of the
-// frame, from the view every pass reads, so it is written once a frame
-// rather than once a material: the eye, under the name MaterialX's
-// generator gives the uniform it would put in the material's own block
-// (bake/generate.cpp leaves it out), and the lights, through the functions
-// Pika's light loop calls (bake/generate.cpp Surface).
+// The frame data a generated pixel stage reads, the eye and the lights, written once a
+// frame in the view rather than in each material's block.
 
 #pragma once
 
-// vertex.slang declares the view, the one push constant.
 #include "vertex.slang"
 
-// The generated code takes the eye as a position. An orthographic camera's
-// eye is the direction toward the viewer, so it is put far along it, where
-// the view vector is that direction from everywhere drawn.
+// An orthographic eye goes far along its direction, so the view vector is that everywhere.
 float3 eye()
 {
     return view->eye.w == 0.0 ? view->eye.xyz * 1e7 : view->eye.xyz;
@@ -20,16 +13,13 @@ float3 eye()
 
 #define u_viewPosition eye()
 
-// What a light gives a point: the unit direction toward the light and the
-// illuminance it gives a surface there facing it.
 struct Incident
 {
     float3 direction;
     float3 illuminance;
 };
 
-// The tile of the lights that may reach P: the one its pixel is in, found
-// from P rather than the pixel, which the loop is not given.
+// Found from P rather than the pixel, which the loop is not given.
 uint2 tile(float3 P)
 {
     float4 clip = project(view, float4(P, 1));
@@ -39,12 +29,8 @@ uint2 tile(float3 P)
     return view->tiles[xy.y * grid.x + xy.x];
 }
 
-// The illuminance vector of a rect, disk or cylinder of radiance 1 at c
-// from P: a surface at P with normal N gets dot(N, it), exactly while the light is
-// wholly above the surface's horizon. It is Lambert's formula over the
-// light's outline as P sees it, a polygon of up to 8 corners: a disk's
-// matches its area, and a cylinder's follows its silhouette (src/light.rs
-// area).
+// Lambert's formula over the light's outline as P sees it, a polygon of up to 8 corners;
+// dot(N, it) is exact while the light is wholly above the horizon.
 float3 illuminance_vector(Light light, float3 c)
 {
     float3 corners[8];
@@ -59,9 +45,7 @@ float3 illuminance_vector(Light light, float3 c)
             return 0;
         out /= rho;
         float3 side = cross(axis, out);
-        // The silhouette's ends are arcs between the tangents from P, four
-        // points each, the middle two pushed out so the chords touch the arc
-        // midway.
+        // Each end arc gets four points, the middle two pushed out so chords touch it midway.
         float phi = acos(light.radius / rho);
         for (uint k = 0; k < 4; k++)
         {
@@ -74,7 +58,6 @@ float3 illuminance_vector(Light light, float3 c)
     }
     else
     {
-        // Behind its plane, it gives nothing.
         if (dot(c, cross(light.u, light.v)) >= 0)
             return 0;
         float3 u = light.u;
@@ -106,10 +89,8 @@ float3 illuminance_vector(Light light, float3 c)
     return 0.5 * (dot(sum, c) < 0 ? -sum : sum);
 }
 
-// illuminance_vector of a light at c from P, past its far: a point at its
-// centre showing its projected area, of 4 |u × v| for a rect, the octagon's
-// 2√2 |u × v| for a disk and 2 radius × 2 |u| side on for a cylinder, whose
-// ends give nothing.
+// Past its far: a point showing its projected area, 4 |u × v| for a rect, 2√2 |u × v|
+// for the octagon, 2 radius × 2 |u| side on for a cylinder.
 float3 far_illuminance_vector(Light light, float3 c)
 {
     float d2 = dot(c, c);
@@ -126,19 +107,14 @@ float3 far_illuminance_vector(Light light, float3 c)
     return toward * (area / d2);
 }
 
-// The lights that light P, on a mesh in the light-link collections of mask
-// `link`, one by one, as the surface's loop walks them (bake/generate.cpp).
-// Its tile lists those that may reach P's pixel anywhere in depth; the rest
-// are skipped here, before the BSDF runs, where they give exactly 0.
+// Lights skipped here, outside P's tile or link mask, would give exactly 0.
 struct Lights
 {
     float3 P;
     uint link;
-    // The tile's slots in tile_lights still to walk.
     uint next_slot;
     uint end_slot;
 
-    // Writes the next light's index in view->lights, or returns false.
     [mutating]
     bool next(out uint light_index)
     {
@@ -164,10 +140,7 @@ Lights lights_at(float3 P, int link)
     return lights;
 }
 
-// Whether P, on a mesh in the collections of mask `link`, is lit by `light`.
-// It must be linked to everything or to one of them (src/link.rs). Past its
-// reach its illuminance has faded to 0, and a rect or disk lights only the
-// side cross(u, v) points to (illuminance_vector gives 0 behind it).
+// Past its reach it has faded to 0; a rect or disk lights only the cross(u, v) side.
 bool lit_by(Light light, float3 P, uint link)
 {
     if ((light.link & link) != light.link)
@@ -180,7 +153,6 @@ bool lit_by(Light light, float3 P, uint link)
     return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
 }
 
-// What light light_index gives P, on a surface with normal N.
 Incident incident_light(uint light_index, float3 P, float3 N)
 {
     Light light = view->lights[light_index];
@@ -196,16 +168,13 @@ Incident incident_light(uint light_index, float3 P, float3 N)
         float3 toward = light.position - P;
         float d2 = dot(toward, toward);
         incident.direction = toward * rsqrt(d2);
-        // A sphere gives what a point at its centre does, exactly while it
-        // is above the surface's horizon (src/light.rs sphere). Inside, it
-        // gives no more than at its surface, less what it gives at its
-        // reach, so it fades to 0 there.
+        // Exact as a point while above the horizon. Inside, no more than at its surface,
+        // less what it gives at its reach, so it fades to 0 there.
         float r = light.radius;
         incident.illuminance = light.illuminance * max(1 / max(d2, r * r) - light.fade, 0);
         return incident;
     }
-    // An area light shines along its illuminance vector, as the BSDF's
-    // cosine wants for diffuse light; specular takes it as a point's.
+    // Diffuse takes the illuminance vector, as the BSDF's cosine wants; specular a point's.
     float3 c = light.position - P;
     float3 e = dot(c, c) >= light.far * light.far ? far_illuminance_vector(light, c)
                                                   : illuminance_vector(light, c);

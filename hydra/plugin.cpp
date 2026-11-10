@@ -1,10 +1,5 @@
-// The Pika Hydra delegate. It reads what Hydra hands it and copies bytes into
-// the Rust renderer (pika.h); it holds no renderer logic of its own.
-//
-// Meshes, instancers, and distant, sphere, rect, disk and cylinder lights,
-// with their light links, are synced into Pika's store, basis curves are fetched and measured, and other prims are
-// counted. Pika draws the meshes
-// into the color, depth and normal AOVs.
+// The Pika Hydra delegate: copies what Hydra hands it into the Rust renderer (pika.h) and
+// holds no renderer logic of its own.
 
 #include "buffer.h"
 #include "pika.h"
@@ -35,9 +30,7 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 namespace {
 
-// Pika's render settings: husk reads them off the render settings prim's
-// attributes of these names, usdview offers them in its Renderer Settings
-// dialog, usdrecord passes none.
+// husk reads these off the render settings prim; usdview offers them in Renderer Settings.
 TF_DEFINE_PRIVATE_TOKENS(_tokens, ((textureCap, "pika:textureCap")));
 
 class PikaRenderPass final : public HdRenderPass {
@@ -45,9 +38,8 @@ public:
     PikaRenderPass(HdRenderIndex *index, HdRprimCollection const &collection, Pika &pika)
         : HdRenderPass(index, collection), _pika(pika) {}
 
-    // usdview re-renders a pass that is not converged only while paused,
-    // and usdrecord and husk until it is, so playback overlaps frames and a
-    // still image is always the current frame.
+    // usdview re-renders an unconverged pass only while paused, usdrecord and husk until it is,
+    // so playback overlaps frames and a still image is always the current frame.
     bool IsConverged() const override { return _converged; }
 
 protected:
@@ -62,8 +54,7 @@ protected:
         }
         pika_frame frame = {};
         std::copy_n(state->GetWorldToViewMatrix().data(), 16, frame.world_to_view);
-        // A host may author the cap as any number; 0, and so one that is
-        // none, is no cap.
+        // A host may author the cap as any number; 0, and so none, is no cap.
         HdRenderDelegate const *delegate = GetRenderIndex()->GetRenderDelegate();
         int cap = delegate->GetRenderSetting<int>(_tokens->textureCap, 0);
         frame.texture_cap = uint32_t(std::max(cap, 0));
@@ -114,10 +105,8 @@ protected:
         } else {
             // The deprecated viewport counts y up from the bottom row.
             GfVec4f const &viewport = state->GetViewport();
-            // husk renders a dataWindowNDC by sizing the buffers to the data
-            // window, placing the viewport in the full image and conforming
-            // the projection to the window's own aspect. The full image's
-            // size is not in the render pass, so the window cannot be framed.
+            // husk renders a dataWindowNDC by sizing the buffers to the window and placing the
+            // viewport in the full image, whose size is not in the pass: it cannot be framed.
             if (viewport[0] < 0 || viewport[1] < 0 || viewport[0] + viewport[2] > frame.width ||
                 viewport[1] + viewport[3] > frame.height) {
                 fail("the viewport lies outside the render buffers, as husk sets it for a "
@@ -158,10 +147,8 @@ public:
         return _settings;
     }
 
-    // Supporting a type changes what Hydra hands over, so the counted types
-    // leave out the implicit surfaces (cube, sphere...), which Hydra
-    // otherwise turns into meshes, and ext computations, which would move
-    // skinned points out of the meshes' primvars.
+    // Supporting a type changes what Hydra hands over: implicit surfaces would stop becoming
+    // meshes, and ext computations would move skinned points out of the meshes' primvars.
     TfTokenVector const &GetSupportedRprimTypes() const override {
         static const TfTokenVector types = {
             HdPrimTypeTokens->mesh,        HdPrimTypeTokens->basisCurves,
@@ -174,9 +161,8 @@ public:
     TfTokenVector const &GetSupportedSprimTypes() const override {
         static const TfTokenVector types = [] {
             TfTokenVector t = HdLightPrimTypeTokens();
-            // Without it, usdview's and usdrecord's task controller sends
-            // its camera light as a distantLight, in UsdLux's terms, rather
-            // than as a GlfSimpleLight in Glf's.
+            // Without it, usdview's and usdrecord's task controller sends its camera light as a
+            // UsdLux distantLight rather than a GlfSimpleLight.
             t.erase(std::remove(t.begin(), t.end(), HdPrimTypeTokens->simpleLight), t.end());
             t.push_back(HdPrimTypeTokens->lightFilter);
             t.push_back(HdPrimTypeTokens->material);
@@ -286,9 +272,7 @@ private:
     Pika _pika;
     HdResourceRegistrySharedPtr _resources =
         std::make_shared<HdResourceRegistry>();
-    // The texels a texture's longest side is capped at, for a show whose
-    // textures do not fit beside its geometry; none by default, as textures
-    // are expected at their own size (design.md).
+    // None by default: textures are expected at their own size.
     HdRenderSettingDescriptorList _settings = {
         {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)}};
 };
@@ -318,10 +302,8 @@ TF_REGISTRY_FUNCTION(TfType) {
     HdRendererPluginRegistry::Define<PikaRendererPlugin>();
 }
 
-// Hosts on scene indices (Houdini 22's, and husk on 21) hand a renderer
-// light links only through this scene index, which each renderer adds for
-// itself: without it, a light's lightLink and a mesh's categories arrive
-// empty. Houdini 21's usdview and usdrecord hand them over either way.
+// Hosts on scene indices (Houdini 22's, husk on 21) get light links only through this scene
+// index: without it, a light's lightLink and a mesh's categories arrive empty.
 TF_REGISTRY_FUNCTION(HdSceneIndexPlugin) {
     VtArray<TfToken> lights;
     for (TfToken const &t : HdLightPrimTypeTokens())

@@ -1,10 +1,5 @@
-//! What Pika measures: one record per Hydra sync and one per rendered
-//! frame. Each record lists itself as `key value` pairs, which are appended
-//! to the file `PIKA_STATS` names (one line per record, for hydra/stats.py
-//! and hydra/census.py), summarised when the renderer closes, and handed to
-//! the host through Hydra's render stats. A key ending in `_ms` is
-//! milliseconds, written with three decimals; every other value is a count,
-//! written whole.
+//! One record per Hydra sync and per rendered frame, as `key value` pairs. A key ending in `_ms`
+//! is milliseconds with three decimals; every other value is a whole count.
 
 use std::fs::File;
 use std::io::Write;
@@ -16,77 +11,59 @@ use crate::gpu;
 use crate::store::{Census, Stats as Pulled};
 use crate::texture::Needs;
 
-/// The records so far, their file, and the clocks the periods come from.
 pub struct Stats {
     file: Option<(String, File)>,
     sync_start: Option<Instant>,
-    /// When the last sync began, so each sync can say how long the host
-    /// took from one sync to the next.
     last_sync: Option<Instant>,
-    /// When the last render call came, so each frame can say the host's
-    /// frame period.
     last_render: Option<Instant>,
     pub syncs: Vec<Sync>,
     pub frames: Vec<Frame>,
 }
 
-/// One Hydra sync, from the render delegate's `Update` to its
-/// `CommitResources`: the prim syncs, including Hydra's own pulls.
+/// From the delegate's `Update` to its `CommitResources`, including Hydra's own pulls.
 pub struct Sync {
     pub time: Duration,
-    /// From the last sync's start to this one's; none for the first.
+    /// None for the first sync.
     pub period: Option<Duration>,
     pub pulled: Pulled,
     pub census: Census,
 }
 
-/// Where one frame's time went, and what it rewrote and read back.
 pub struct Frame {
     pub width: u32,
     pub height: u32,
-    /// From the render call before to the one that drew this frame; none
-    /// for the first.
+    /// None for the first frame.
     pub period: Option<Duration>,
-    /// The CPU's work before the submit: updating the geometry and recording.
+    /// CPU work before the submit: updating the geometry and recording.
     pub record: Duration,
     pub times: Times,
-    /// The CPU copy into the host's render buffers.
     pub place: Duration,
     pub update: Update,
     pub read_bytes: u64,
-    /// The instances and triangles the camera's view drew.
+    /// Instances, then triangles.
     pub drawn: [u32; 2],
-    /// The lights it drew them under.
     pub lights: usize,
     pub memory: Memory,
     /// Meshes whose points moved.
     pub moved: usize,
     /// Meshes whose transform moved.
     pub transforms: usize,
-    /// The frame was placed a call later than it was drawn.
+    /// Placed a call later than it was drawn.
     pub latent: bool,
-    /// Surfaces slangc compiled for this frame.
     pub compiled: usize,
-    /// Textures the texture tool baked for this frame.
     pub baked: usize,
-    /// The baked bytes the textures loaded this frame uploaded.
+    /// Bytes.
     pub loaded: u64,
-    /// Reading those textures' levels from their files, on the render thread.
     pub texture_read: Duration,
     /// Materials whose build is out, drawn clay or as they were.
     pub pending: usize,
-    /// Textures whose image does not hold the levels that fit yet.
     pub pending_textures: usize,
     /// Textures lowered past the cap's levels to fit the device's memory.
     pub lowered_textures: usize,
-    /// Estimating where each material's meshes are drawn
-    /// (`Geometry::footprints`), on the render thread.
     pub need: Duration,
     pub needs: Needs,
 }
 
-/// What each owner holds on the GPU, and what the driver says the process
-/// uses and may use of the device's memory.
 #[derive(Clone, Copy, Default)]
 pub struct Memory {
     pub geometry: gpu::Memory,
@@ -97,7 +74,7 @@ pub struct Memory {
     pub vram_budget: u64,
 }
 
-/// Over 1080p at 24 fps: the gate's frame period.
+/// 24 fps: the gate's frame period.
 pub const BUDGET_MS: f64 = 41.67;
 
 fn ms(t: Duration) -> f64 {
@@ -105,8 +82,6 @@ fn ms(t: Duration) -> f64 {
 }
 
 impl Stats {
-    /// Opens the `PIKA_STATS` file, if the variable is set, and writes the
-    /// host and device every measurement below ran on.
     pub fn new(device_name: &str) -> Result<Self, String> {
         let mut stats = Self {
             file: None,
@@ -130,8 +105,6 @@ impl Stats {
         self.sync_start = Some(Instant::now());
     }
 
-    /// Records the sync that `begin_sync` started, with what the store
-    /// pulled during it and holds after it.
     pub fn end_sync(&mut self, pulled: Pulled, census: Census) -> Result<(), String> {
         let start = self
             .sync_start
@@ -148,7 +121,6 @@ impl Stats {
         Ok(())
     }
 
-    /// Marks a render call; returns the time since the one before.
     pub fn begin_render(&mut self) -> Option<Duration> {
         let now = Instant::now();
         self.last_render.replace(now).map(|last| now - last)
@@ -168,8 +140,6 @@ impl Stats {
             .map_err(|e| format!("cannot write PIKA_STATS file {path}: {e}"))
     }
 
-    /// Every time as p50/p95/max over the syncs and the frames so far, and
-    /// the last frame's memory, in a few lines.
     pub fn summary(&self) -> String {
         let percentiles = |values: Vec<f64>| -> String {
             let (p50, p95, max) = percentiles(values);
@@ -214,9 +184,7 @@ impl Stats {
         text
     }
 
-    /// What the host shows: the counts of records, then the last sync's
-    /// and the last frame's pairs, with `gpuMemoryUsed`, the key usdview's
-    /// HUD reads.
+    /// `gpuMemoryUsed` is the key usdview's HUD reads.
     pub fn host(&self) -> Vec<(String, f64)> {
         let mut pairs = vec![
             ("syncs".into(), self.syncs.len() as f64),
@@ -334,7 +302,6 @@ impl Frame {
     }
 }
 
-/// One record as a line: its kind and index, then its pairs.
 fn line(kind: &str, index: usize, pairs: &[(String, f64)]) -> String {
     let mut text = format!("{kind} {index}");
     for (key, value) in pairs {
@@ -346,15 +313,13 @@ fn line(kind: &str, index: usize, pairs: &[(String, f64)]) -> String {
     text + "\n"
 }
 
-/// p50, p95 and max of a non-empty set, by nearest rank.
+/// By nearest rank, of a non-empty set.
 fn percentiles(mut values: Vec<f64>) -> (f64, f64, f64) {
     values.sort_by(f64::total_cmp);
     let rank = |p: f64| values[((p * values.len() as f64) as usize).min(values.len() - 1)];
     (rank(0.5), rank(0.95), values[values.len() - 1])
 }
 
-/// How many periods exceed the budget, and the longest run of consecutive
-/// ones that do.
 fn misses(periods: impl Iterator<Item = f64>) -> (usize, usize) {
     let (mut misses, mut run, mut longest) = (0, 0, 0);
     for period in periods {
@@ -365,7 +330,6 @@ fn misses(periods: impl Iterator<Item = f64>) -> (usize, usize) {
     (misses, longest)
 }
 
-/// Bytes in the unit that reads best.
 pub fn size(bytes: u64) -> String {
     let b = bytes as f64;
     if b >= 1e9 {

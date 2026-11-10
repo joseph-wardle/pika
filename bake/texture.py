@@ -114,31 +114,27 @@ def check(out):
         want = [[((x + 0.5) / size, (y + 0.5) / size) for x in range(size)] for y in range(size)]
         expect(f"ramp level {i}", level, want, 0)
 
-    # Flat blocks come back within a step of BC7, sRGB in and sRGB out; the
-    # filtered levels average in linear light.
+    # Flat blocks come back within a step of BC7; filtered levels average in linear light.
     levels = baked("swatch", (8, 8, 1, 4, 146))
     expect("swatch level 0", levels[0][..., :3], swatch, 2)
     expect("swatch level 0 alpha", levels[0][..., 3], np.full((8, 8), 255), 2)
-    # Level 1 is one block of four flat colours, more than BC7's three
-    # subsets hold exactly.
+    # Level 1 has four flat colours, more than BC7's three subsets hold exactly.
     expect("swatch level 1", levels[1][..., :3], swatch[::2, ::2], 4)
     mean = linear(swatch / 255).reshape(-1, 3).mean(0)
     expect("swatch level 3", levels[3][0, 0, :3], srgb(mean) * 255, 2)
 
-    # The control: the same bytes declared linear are another texture.
+    # Negative control: the same bytes declared linear are another texture.
     levels = baked("swatch_raw", (8, 8, 1, 4, 146))
     if np.abs(levels[0][..., :3].astype(int) - swatch).max() < 16:
         fail("swatch_raw: the declared colour space made no difference")
 
-    # An 8-bit JPEG declared auto is sRGB, so its greys come back as
-    # stored; the colours stored in ACEScg primaries come back as sRGB codes.
+    # An 8-bit JPEG declared auto is sRGB; ACEScg colours come back as sRGB codes.
     levels = baked("greys", (128, 8, 1, 8, 146))
     expect("greys level 0", levels[0][..., :3], textures.blocks(8, [(g, g, g) for g in textures.GREYS], 16, np.uint8), 0)
     levels = baked("acescg", (32, 4, 1, 6, 146))
     expect("acescg level 0", levels[0][..., :3], textures.blocks(4, textures.COLORS, 8, np.uint8), 1)
 
-    # A set's tiles are its layers in tile order, and the table sends tile
-    # 1001 + i to its layer, the tiles the set lacks past the end.
+    # Tiles are layers in tile order; the table sends missing tiles past the end.
     table = [2 ** 32 - 1] * 100
     table[0], table[11] = 0, 1
     levels = baked("udim", (8, 8, 2, 4, 103), table=tuple(table))
@@ -146,9 +142,7 @@ def check(out):
     expect("udim level 0 tile 1012", levels[0][1], textures.ramp_pixels(0.5), 0)
     expect("udim level 3 tile 1012", levels[3][1], [[(0.25, 0.25)]], 0)
 
-    # A smaller tile is enlarged to the set's size bilinearly, texel centres
-    # aligned: the ramp's texels then hold their own centres again, but for
-    # the outer half texel, which clamps to the edge.
+    # A smaller tile is enlarged bilinearly, centres aligned, the outer half texel clamped.
     table[1], table[11] = 1, 2 ** 32 - 1
     levels = baked("mixed", (8, 8, 2, 4, 103), table=tuple(table))
     expect("mixed level 0 tile 1001", levels[0][0], textures.ramp_pixels(1.0), 0)
@@ -158,16 +152,14 @@ def check(out):
     # Where the set's level is the smaller tile's size, the tile's own.
     expect("mixed level 1 tile 1002", levels[1][1], textures.ramp_pixels(1.0, 4), 0)
 
-    # The wrap modes a file states are kept, u then v; one stating none
-    # (the ramp, the swatch) bakes black.
+    # The stated wrap modes are kept, u then v; a file stating none bakes black.
     levels = baked("wrapped", (8, 8, 1, 4, 145), wrap=(2, 1))
     expect("wrapped level 0", levels[0][..., :3], textures.blocks(4, [(g, g, g) for g in textures.WRAPPED], 2, np.uint8), 0)
 
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)
 
-    # Every level is kept, the stored ones as stored: those a filter would
-    # produce differ from them by construction (textures.py).
+    # Stored levels are kept as stored; a filter of level 0 would differ.
     levels = baked("mips", (8, 8, 1, 4, 145))
     expect("mips level 0", levels[0][..., :3], swatch, 2)
     for i, grey in enumerate((128, 64, 32), 1):
