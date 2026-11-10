@@ -618,12 +618,9 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
 /// whole layout, which can pass the 4 GiB NVIDIA reports.
 const STAGING: u64 = 1 << 30;
 
-/// Writes `copies` into the staging buffers, replaced by larger ones when
-/// they do not fit, and records them into `cb` with a barrier making them
-/// visible to every pass. A frame with nothing to copy frees the buffers: a scene's
-/// first upload is gigabytes of host memory that playback, which moves a
-/// frame's points at a time, must not keep, while reusing them between its
-/// own frames saves allocating them each.
+/// Writes `copies` into the staging buffers, replaced when they do not fit
+/// or [`reuses`] says they keep too much, and records them into `cb` with a
+/// barrier making them visible to every pass.
 fn upload(
     device: &gpu::Device,
     staging: &mut Vec<Buffer>,
@@ -632,11 +629,7 @@ fn upload(
 ) -> Result<u64, String> {
     let lengths: Vec<u64> = copies.iter().map(|c| c.bytes.len() as u64).collect();
     let total: u64 = lengths.iter().sum();
-    if total == 0 {
-        staging.clear();
-        return Ok(0);
-    }
-    if staging.iter().map(|s| s.size).sum::<u64>() < total {
+    if !reuses(staging.iter().map(|s| s.size).sum(), total) {
         // Every buffer but the last is STAGING bytes, as `pieces` lays them.
         staging.clear();
         // Write-combined memory: written once in order, never read.
@@ -652,6 +645,9 @@ fn upload(
             )?);
             left -= size;
         }
+    }
+    if total == 0 {
+        return Ok(0);
     }
     let d = &device.raw;
     for p in pieces(&lengths, STAGING) {
@@ -690,6 +686,15 @@ fn upload(
         )
     };
     Ok(total)
+}
+
+/// Whether staging buffers of `staged` bytes take a frame's `total` bytes
+/// without keeping more than twice them. A scene's first upload is
+/// gigabytes of host memory that playback, which moves a frame's points at
+/// a time, must not keep, while reusing the buffers between its own frames
+/// saves allocating them each.
+fn reuses(staged: u64, total: u64) -> bool {
+    total <= staged && staged <= 2 * total
 }
 
 /// `size` bytes of copy `copy` from `start`, staged at `at` in buffer
@@ -1765,6 +1770,16 @@ mod tests {
         assert!(round_trips(&lengths, 8, 0));
         // Negative control: pieces moved 4 bytes back overlap.
         assert!(!round_trips(&lengths, 8, 4));
+    }
+
+    #[test]
+    fn staging_is_kept_only_while_it_fits_closely() {
+        assert!(reuses(10, 10) && reuses(20, 10) && reuses(0, 0));
+        // Negative controls: too small, and a first upload's staging kept
+        // for a frame of playback or one with nothing to copy.
+        assert!(!reuses(9, 10));
+        assert!(!reuses(583_000_000, 5_400_000));
+        assert!(!reuses(5, 0));
     }
 
     #[test]
