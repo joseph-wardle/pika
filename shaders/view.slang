@@ -46,8 +46,8 @@ struct Light
     // at unit distance from its centre; the radiance of a rect, disk or
     // cylinder.
     float3 illuminance;
-    // How far it reaches: infinite for a distant light. The loop reads fade
-    // instead.
+    // How far it reaches: infinite for a distant light. The loop skips it
+    // beyond, where fade has taken its illuminance to 0.
     float reach;
     // A rect's half sides or the axes of a disk's polygon, which light the
     // side cross(u, v) points to; half a cylinder's axis.
@@ -60,7 +60,10 @@ struct Light
     // Its light-link collection's bit, or 0 when it lights every mesh
     // (src/link.rs).
     uint link;
-    uint3 pad;
+    // How far off a rect, disk or cylinder gives what a point does to within
+    // the threshold (src/light.rs Light::area): infinite for another light.
+    float far;
+    uint2 pad;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).

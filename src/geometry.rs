@@ -217,9 +217,9 @@ struct Draws {
 pub struct Geometry {
     layout: Option<Layout>,
     draws: Option<Draws>,
-    /// The host buffer the frame's uploads are copied from, kept while
+    /// The host buffers the frame's uploads are copied from, kept while
     /// frames keep uploading and dropped by the first that does not.
-    staging: Option<Buffer>,
+    staging: Vec<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
     tangent: Tangent,
@@ -281,7 +281,7 @@ impl Geometry {
         Ok(Self {
             layout: None,
             draws: None,
-            staging: None,
+            staging: Vec::new(),
             subdiv: Subdiv::new(device, subdiv)?,
             smooth: Smooth::new(device, smooth)?,
             tangent: Tangent::new(device, tangent)?,
@@ -293,7 +293,7 @@ impl Geometry {
     /// and barriers making them visible to the mesh pass, which draws the
     /// meshes of render `tags` (all of them when there are none), marking
     /// each step every frame, run or not. No GPU work may be pending:
-    /// buffers are replaced and the staging buffer rewritten.
+    /// buffers are replaced and the staging buffers rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -507,7 +507,7 @@ impl Geometry {
         footprints
     }
 
-    /// The bytes of every buffer, the staging buffer on the host side.
+    /// The bytes of every buffer, the staging buffers on the host side.
     pub fn memory(&self) -> gpu::Memory {
         let layout = self.layout.iter().flat_map(|l| {
             [
@@ -613,51 +613,56 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
     })
 }
 
-/// Writes `copies` into the staging buffer, grown when they do not fit, and
-/// records them into `cb` with a barrier making them visible to every pass.
-/// A frame with nothing to copy frees the buffer: a scene's first upload is
-/// its whole layout, gigabytes of host memory that playback, which moves a
-/// frame's points at a time, must not keep, while reusing the buffer between
-/// its own frames saves allocating one each.
+/// The largest staging buffer: the least `maxMemoryAllocationSize` Vulkan
+/// requires, so no driver rejects the size. A scene's first upload is its
+/// whole layout, which can pass the 4 GiB NVIDIA reports.
+const STAGING: u64 = 1 << 30;
+
+/// Writes `copies` into the staging buffers, replaced when they do not fit
+/// or [`reuses`] says they keep too much, and records them into `cb` with a
+/// barrier making them visible to every pass.
 fn upload(
     device: &gpu::Device,
-    staging: &mut Option<Buffer>,
+    staging: &mut Vec<Buffer>,
     copies: &[Upload],
     cb: vk::CommandBuffer,
 ) -> Result<u64, String> {
-    let total: u64 = copies.iter().map(|c| c.bytes.len() as u64).sum();
-    if total == 0 {
-        *staging = None;
-        return Ok(0);
-    }
-    let staging = match staging.take() {
-        Some(s) if s.size >= total => staging.insert(s),
-        _ => {
-            // Write-combined memory: written once in order, never read.
-            let host =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            staging.insert(Buffer::host(
+    let lengths: Vec<u64> = copies.iter().map(|c| c.bytes.len() as u64).collect();
+    let total: u64 = lengths.iter().sum();
+    if !reuses(staging.iter().map(|s| s.size).sum(), total) {
+        // Every buffer but the last is STAGING bytes, as `pieces` lays them.
+        staging.clear();
+        // Write-combined memory: written once in order, never read.
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let mut left = total;
+        while left > 0 {
+            let size = left.min(STAGING);
+            staging.push(Buffer::host(
                 device,
-                total,
+                size,
                 vk::BufferUsageFlags::TRANSFER_SRC,
                 host,
-            )?)
+            )?);
+            left -= size;
         }
-    };
+    }
+    if total == 0 {
+        return Ok(0);
+    }
     let d = &device.raw;
-    let mut at = 0;
-    for c in copies.iter().filter(|c| !c.bytes.is_empty()) {
-        let end = at + c.bytes.len();
-        staging.bytes()[at..end].copy_from_slice(c.bytes);
+    for p in pieces(&lengths, STAGING) {
+        let c = &copies[p.copy];
+        let s = &mut staging[p.buffer];
+        let from = &c.bytes[p.start as usize..(p.start + p.size) as usize];
+        s.bytes()[p.at as usize..(p.at + p.size) as usize].copy_from_slice(from);
         let region = vk::BufferCopy {
-            src_offset: at as u64,
-            dst_offset: c.offset,
-            size: c.bytes.len() as u64,
+            src_offset: p.at,
+            dst_offset: c.offset + p.start,
+            size: p.size,
         };
         // SAFETY: `cb` is recording outside any rendering, both buffers
         // were created on `d`, and the region lies inside each.
-        unsafe { d.cmd_copy_buffer(cb, staging.raw, c.buffer, &[region]) };
-        at = end;
+        unsafe { d.cmd_copy_buffer(cb, s.raw, c.buffer, &[region]) };
     }
     let barrier = vk::MemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::COPY)
@@ -681,6 +686,47 @@ fn upload(
         )
     };
     Ok(total)
+}
+
+/// Whether staging buffers of `staged` bytes take a frame's `total` bytes
+/// without keeping more than twice them. A scene's first upload is
+/// gigabytes of host memory that playback, which moves a frame's points at
+/// a time, must not keep, while reusing the buffers between its own frames
+/// saves allocating them each.
+fn reuses(staged: u64, total: u64) -> bool {
+    total <= staged && staged <= 2 * total
+}
+
+/// `size` bytes of copy `copy` from `start`, staged at `at` in buffer
+/// `buffer`.
+struct Piece {
+    copy: usize,
+    start: u64,
+    buffer: usize,
+    at: u64,
+    size: u64,
+}
+
+/// Lays copies of `lengths` bytes end to end in staging buffers of `chunk`
+/// bytes, splitting a copy where a buffer ends.
+fn pieces(lengths: &[u64], chunk: u64) -> Vec<Piece> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (copy, &length) in lengths.iter().enumerate() {
+        let mut start = 0;
+        while start < length {
+            let size = (chunk - at % chunk).min(length - start);
+            out.push(Piece {
+                copy,
+                start,
+                buffer: (at / chunk) as usize,
+                at: at % chunk,
+                size,
+            });
+            (start, at) = (start + size, at + size);
+        }
+    }
+    out
 }
 
 /// The vertex table, triangle indices, stencils and the smooth normal and
@@ -1685,6 +1731,55 @@ mod tests {
         };
         triangulate(mesh, first, &mut t)?;
         Ok(t)
+    }
+
+    /// Stages copies of `lengths` bytes (each byte naming its copy and
+    /// place) in `chunk`-byte buffers by `pieces`, then copies them out as
+    /// the GPU would, after every write, each piece moved `shift` bytes
+    /// back: whether every copy's bytes came back.
+    fn round_trips(lengths: &[u64], chunk: u64, shift: u64) -> bool {
+        let copies: Vec<Vec<u8>> = (lengths.iter().enumerate())
+            .map(|(c, &n)| (0..n).map(|i| (c as u8) << 5 | i as u8).collect())
+            .collect();
+        let mut pieces = pieces(lengths, chunk);
+        for p in &mut pieces {
+            p.at = p.at.saturating_sub(shift);
+        }
+        let total: u64 = lengths.iter().sum();
+        let mut staging = vec![vec![0; chunk as usize]; total.div_ceil(chunk) as usize];
+        for p in &pieces {
+            let from = &copies[p.copy][p.start as usize..(p.start + p.size) as usize];
+            staging[p.buffer][p.at as usize..(p.at + p.size) as usize].copy_from_slice(from);
+        }
+        let mut out: Vec<Vec<u8>> = lengths.iter().map(|&n| vec![0; n as usize]).collect();
+        for p in &pieces {
+            let from = &staging[p.buffer][p.at as usize..(p.at + p.size) as usize];
+            out[p.copy][p.start as usize..(p.start + p.size) as usize].copy_from_slice(from);
+        }
+        out == copies
+    }
+
+    #[test]
+    fn staging_splits_copies_at_buffer_ends() {
+        // Copies shorter than, ending on and spanning several buffers, and
+        // an empty one.
+        let lengths = [3, 5, 0, 20, 8, 1];
+        let p = pieces(&lengths, 8);
+        assert!(p.iter().all(|p| p.size > 0 && p.at + p.size <= 8));
+        assert_eq!(p.last().unwrap().buffer, 4);
+        assert!(round_trips(&lengths, 8, 0));
+        // Negative control: pieces moved 4 bytes back overlap.
+        assert!(!round_trips(&lengths, 8, 4));
+    }
+
+    #[test]
+    fn staging_is_kept_only_while_it_fits_closely() {
+        assert!(reuses(10, 10) && reuses(20, 10) && reuses(0, 0));
+        // Negative controls: too small, and a first upload's staging kept
+        // for a frame of playback or one with nothing to copy.
+        assert!(!reuses(9, 10));
+        assert!(!reuses(583_000_000, 5_400_000));
+        assert!(!reuses(5, 0));
     }
 
     #[test]

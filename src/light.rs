@@ -16,7 +16,8 @@ pub const TILE: u32 = 16;
 
 /// The illuminance at which a light's reach ends. A facing white Lambert
 /// surface shows illuminance / π, so a pixel loses at most this / π of
-/// each light (`Light::sphere`, `Light::area`).
+/// each light (`Light::sphere`, `Light::area`), and of an area light read
+/// as a point past its `far`, up to as much again.
 pub const THRESHOLD: f32 = 0.01;
 
 /// A light's shape, `shaders/view.slang`'s constants.
@@ -54,7 +55,10 @@ pub struct Light {
     pub fade: f32,
     /// Its collection's bit, or 0 when it lights every mesh (`link`).
     pub link: u32,
-    pub pad: [u32; 3],
+    /// How far off an area light gives what a point does to within
+    /// `THRESHOLD` (`Light::area`): infinite for another light.
+    pub far: f32,
+    pub pad: [u32; 2],
 }
 
 impl Light {
@@ -69,7 +73,8 @@ impl Light {
             v: [0.0; 3],
             fade: 0.0,
             link: 0,
-            pad: [0; 3],
+            far: f32::INFINITY,
+            pad: [0; 2],
         }
     }
 
@@ -89,7 +94,8 @@ impl Light {
             v: [0.0; 3],
             fade: 1.0 / (reach * reach),
             link: 0,
-            pad: [0; 3],
+            far: f32::INFINITY,
+            pad: [0; 2],
         }
     }
 
@@ -99,7 +105,7 @@ impl Light {
     /// centre's distance d, so its illuminance vector is under
     /// area / (d - bound)². The loop takes `THRESHOLD` / radiance off it,
     /// which loses that much and ends the light where the bound falls to
-    /// it.
+    /// it. Past `far` the loop reads it as a point (`far`).
     #[allow(clippy::too_many_arguments)]
     fn area(
         shape: u32,
@@ -112,19 +118,41 @@ impl Light {
         bound: f32,
     ) -> Self {
         let brightest = brightest(radiance);
+        let shown = brightest * area / THRESHOLD;
         Self {
             position: centre,
             radius,
             illuminance: radiance,
-            reach: bound + (brightest * area / THRESHOLD).sqrt(),
+            reach: bound + shown.sqrt(),
             u,
             shape,
             v,
             fade: THRESHOLD / brightest,
             link: 0,
-            pad: [0; 3],
+            far: far(shape, shown, bound),
+            pad: [0; 2],
         }
     }
+}
+
+/// Where a rect, disk or cylinder of `shape`, within `bound` of its centre,
+/// becomes a point at its centre showing its projected area, `shown` being
+/// its area × radiance / `THRESHOLD`. That point's illuminance vector
+/// misses Lambert's polygon's by a share falling as area × bound² / d⁴ for
+/// a rect or disk, and area × bound / d³ for a cylinder, whose outline's
+/// arcs converge more slowly. It is where area × bound² / (d - bound)⁴, or
+/// 0.5 × area × bound / (d - bound)³, falls to `THRESHOLD` / radiance,
+/// constants chosen so that the miss
+/// `area_lights_read_as_points_past_their_far` samples stays under
+/// `THRESHOLD`. That bounds the illuminance vector, so a diffuse surface's
+/// error, not a sharp specular lobe's. Nearer than twice the bound, which
+/// was not sampled, a light is never a point.
+fn far(shape: u32, shown: f32, bound: f32) -> f32 {
+    let beyond = match shape {
+        CYLINDER => (0.5 * shown * bound).cbrt(),
+        _ => (shown * bound * bound).powf(0.25),
+    };
+    (bound + beyond).max(2.0 * bound)
 }
 
 fn brightest(c: [f32; 3]) -> f32 {
@@ -621,8 +649,7 @@ mod tests {
     }
 
     /// `shaders/frame.slang`'s illuminance_vector.
-    fn illuminance_vector(light: &Light, p: [f32; 3]) -> [f32; 3] {
-        let c = add(light.position, p, -1.0);
+    fn illuminance_vector(light: &Light, c: [f32; 3]) -> [f32; 3] {
         let (u, v) = (light.u, light.v);
         let corners: Vec<[f32; 3]> = match light.shape {
             CYLINDER => {
@@ -672,11 +699,30 @@ mod tests {
         sum.map(|v| v * sign)
     }
 
+    /// `shaders/frame.slang`'s far_illuminance_vector.
+    fn far_illuminance_vector(light: &Light, c: [f32; 3]) -> [f32; 3] {
+        let d2 = dot(c, c);
+        let toward = c.map(|v| v / d2.sqrt());
+        let area = match light.shape {
+            CYLINDER => {
+                let side = cross(light.u, toward);
+                4.0 * light.radius * dot(side, side).sqrt()
+            }
+            RECT => 4.0 * (-dot(toward, cross(light.u, light.v))).max(0.0),
+            _ => 2.0 * 2f32.sqrt() * (-dot(toward, cross(light.u, light.v))).max(0.0),
+        };
+        toward.map(|v| v * area / d2)
+    }
+
     /// What `shaders/frame.slang`'s loop gives a point `p` with normal `n`
     /// from a sphere or an area light, in its first channel.
     fn incident(light: &Light, p: [f32; 3], n: [f32; 3]) -> f32 {
         if light.shape != SPHERE {
-            let e = illuminance_vector(light, p);
+            let c = add(light.position, p, -1.0);
+            let e = match dot(c, c) >= light.far * light.far {
+                true => far_illuminance_vector(light, c),
+                false => illuminance_vector(light, c),
+            };
             let magnitude = dot(e, e).sqrt();
             if magnitude == 0.0 {
                 return 0.0;
@@ -981,6 +1027,76 @@ mod tests {
         }
         // Two rects, two disks and a cylinder.
         assert_eq!(near, 5);
+    }
+
+    /// Random rects, disks and cylinders, of random size, stretch, turn and
+    /// intensity.
+    fn random_area_lights(random: &mut Random) -> Vec<Light> {
+        (0..300)
+            .map(|i| {
+                let [a, b] = [0; 2].map(|_| random.next(0.05, 3.0));
+                let shape = match i % 3 {
+                    0 => Shape::Rect {
+                        width: a,
+                        height: b,
+                    },
+                    1 => Shape::Disk { radius: a },
+                    _ => Shape::Cylinder {
+                        length: a,
+                        radius: b / 6.0,
+                    },
+                };
+                let scale = [0; 3].map(|_| random.next(0.3, 2.0) as f64);
+                let m = transform(scale, random.next(0.0, 360.0) as f64, [0.0; 3]);
+                let intensity = 10f32.powf(random.next(0.0, 4.0));
+                resolve(&area_light(shape, intensity, false, m)).unwrap()
+            })
+            .collect()
+    }
+
+    /// Over random area lights, the worst miss between the point's and
+    /// Lambert's polygon's illuminance vectors, as a share of `THRESHOLD`,
+    /// from `far` × `shrink` to the reach; and how many lights become
+    /// points before their reach.
+    fn far_error(shrink: f32) -> (f32, usize) {
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        let lights = random_area_lights(&mut random);
+        let (mut worst, mut points) = (0f32, 0);
+        for light in &lights {
+            let far = light.far * shrink;
+            points += (far < light.reach) as usize;
+            for _ in 0..200 {
+                let d = [0; 3].map(|_| random.next(-1.0, 1.0));
+                let length = dot(d, d).sqrt();
+                if length > 1.0 || length < 0.1 {
+                    continue;
+                }
+                let distance = far + (light.reach - far).max(0.0) * random.next(0.0, 1.0).powi(3);
+                let c = d.map(|v| v * distance / length);
+                let miss = add(
+                    illuminance_vector(light, c),
+                    far_illuminance_vector(light, c),
+                    -1.0,
+                );
+                worst =
+                    worst.max(brightest(light.illuminance) * dot(miss, miss).sqrt() / THRESHOLD);
+            }
+        }
+        (worst, points)
+    }
+
+    #[test]
+    fn area_lights_read_as_points_past_their_far() {
+        let (worst, points) = far_error(1.0);
+        assert!(worst < 1.0, "{worst}");
+        // Not vacuous: most lights are points before they end.
+        assert!(points > 250, "{points}");
+    }
+
+    #[test]
+    fn area_lights_read_as_points_nearer_miss() {
+        let (worst, _) = far_error(0.5);
+        assert!(worst > 1.0, "{worst}");
     }
 
     #[test]

@@ -130,13 +130,11 @@ std::string vertex(mx::ShaderStage const &stage) {
 // MaterialX's surface with Pika's light loop in place of its own. The
 // generator is told of no lights (hwMaxActiveLightSources 0), so the pixel
 // stage holds no LightData, light shaders or sampleLightSource; the loop
-// asks shaders/frame.slang for the lights instead, and a skipped light, one
-// not linked to the mesh's light-link collections, costs no BSDF. The
-// vertex stage hands those collections over as an int, which MaterialX
-// lacks a uint for, and which Slang does not interpolate. The loop calls functions rather than reading the view so
-// that the lights' kinds and lists change frame.slang alone: a change to
-// the text emitted here changes the tool, which re-bakes every texture
-// (src/bake.rs keys both on the tool's bytes).
+// asks shaders/frame.slang for the lights that light P instead. The loop
+// walks frame.slang's Lights rather
+// than the view so that the lights' kinds, lists and culling change
+// frame.slang alone: a change to the text emitted here changes the tool,
+// which re-bakes every texture (src/bake.rs keys both on the tool's bytes).
 class Surface : public mx::HwSurfaceNode {
   public:
     static mx::ShaderNodeImplPtr create() { return std::make_shared<Surface>(); }
@@ -144,8 +142,11 @@ class Surface : public mx::HwSurfaceNode {
     void createVariables(mx::ShaderNode const &node, mx::GenContext &context,
                          mx::Shader &shader) const override {
         mx::HwSurfaceNode::createVariables(node, context, shader);
-        // Only the loop reads it, and Slang drops an input nothing reads,
-        // which leaves the vertex stage's output unmatched.
+        // The mesh's light-link mask, an int because MaterialX has no uint
+        // (Slang does not interpolate ints): the vertex stage writes asint of
+        // it and frame.slang's lights_at reads the bits back. Only the loop
+        // reads it, and Slang drops an input nothing reads, which leaves the
+        // vertex stage's output unmatched.
         if (bsdf(node))
             mx::addStageInput(mx::HW::VERTEX_DATA, mx::Type::INTEGER, "link",
                               shader.getStage(mx::Stage::PIXEL));
@@ -159,12 +160,11 @@ class Surface : public mx::HwSurfaceNode {
         auto const &g = static_cast<mx::HwShaderGenerator const &>(context.getShaderGenerator());
         // N, V, P, L and occlusion are HwSurfaceNode's, declared before the loop.
         g.emitComment("Pika's light loop (bake/generate.cpp)", stage);
-        g.emitLine("for (uint light_index = 0; light_index < light_count(P); ++light_index)", stage,
-                   false);
-        g.emitScopeBegin(stage);
         std::string const &vd = stage.getInputBlock(mx::HW::VERTEX_DATA).getInstance();
-        g.emitLine("if (!linked(light_index, P, " + vd + ".link))", stage, false);
-        g.emitLine("    continue", stage);
+        g.emitLine("Lights lights = lights_at(P, " + vd + ".link)", stage);
+        g.emitLine("uint light_index", stage);
+        g.emitLine("while (lights.next(light_index))", stage, false);
+        g.emitScopeBegin(stage);
         g.emitLine("Incident incident = incident_light(light_index, P, N)", stage);
         g.emitLine("L = incident.direction", stage);
         g.emitLine("occlusion = visibility(light_index, P)", stage);

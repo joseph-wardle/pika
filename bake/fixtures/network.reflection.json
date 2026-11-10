@@ -628,7 +628,7 @@
                 {
                     "name": "_vd",
                     "stage": "fragment",
-                    "binding": {"kind": "varyingInput", "index": 0, "count": 5},
+                    "binding": {"kind": "varyingInput", "index": 0, "count": 6},
                     "type": {
                         "kind": "struct",
                         "name": "VertexData",
@@ -714,6 +714,16 @@
                                 "stage": "fragment",
                                 "binding": {"kind": "varyingInput", "index": 4},
                                 "semanticName": "POSITIONWORLD"
+                            },
+                            {
+                                "name": "link",
+                                "type": {
+                                    "kind": "scalar",
+                                    "scalarType": "int32"
+                                },
+                                "stage": "fragment",
+                                "binding": {"kind": "varyingInput", "index": 5},
+                                "semanticName": "LINK"
                             }
                         ]
                     }
@@ -766,7 +776,7 @@
             ],
             "result": {
                 "stage": "vertex",
-                "binding": {"kind": "varyingOutput", "index": 0, "count": 5},
+                "binding": {"kind": "varyingOutput", "index": 0, "count": 6},
                 "type": {
                     "kind": "struct",
                     "name": "VertexData",
@@ -852,6 +862,16 @@
                             "stage": "vertex",
                             "binding": {"kind": "varyingOutput", "index": 4},
                             "semanticName": "POSITIONWORLD"
+                        },
+                        {
+                            "name": "link",
+                            "type": {
+                                "kind": "scalar",
+                                "scalarType": "int32"
+                            },
+                            "stage": "vertex",
+                            "binding": {"kind": "varyingOutput", "index": 5},
+                            "semanticName": "LINK"
                         }
                     ]
                 }
