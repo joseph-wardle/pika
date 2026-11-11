@@ -433,6 +433,23 @@ impl Geometry {
         footprints
     }
 
+    /// The drawn instances whose transform or points moved, by their index; valid only for a
+    /// frame whose update did not rewrite the draws, which renumbers them.
+    pub fn moved_instances(&self, moved: &Moved) -> Vec<u32> {
+        let Some(d) = &self.draws else {
+            return Vec::new();
+        };
+        let ids = moved.transforms.iter().chain(&moved.points);
+        let rows = ids.filter_map(|id| d.tables.rows.get(id)).flatten();
+        let mut instances: Vec<u32> = rows
+            .flat_map(|r| r.instances.clone())
+            .map(|i| i as u32)
+            .collect();
+        instances.sort_unstable();
+        instances.dedup();
+        instances
+    }
+
     /// Each drawn instance with its mesh's box, in the mesh's own space.
     pub fn instances(&self) -> impl Iterator<Item = (&Instance, &[f32; 6])> {
         self.draws.iter().flat_map(|d| {

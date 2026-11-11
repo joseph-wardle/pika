@@ -344,7 +344,7 @@ impl Renderer {
         let links = Links::new(&self.store);
         let mut lights = Vec::new();
         let mut casters = Vec::new();
-        for l in self.store.lights().values() {
+        for (&id, l) in self.store.lights() {
             let Some(resolved) = light::resolve(l) else {
                 continue;
             };
@@ -352,6 +352,7 @@ impl Renderer {
             if l.params.is_some_and(|p| p.shadow) {
                 let shadow = link.shadow;
                 casters.push(Caster {
+                    id,
                     light: lights.len(),
                     shadow,
                 });
@@ -410,7 +411,8 @@ impl Renderer {
         self.commands.mark("draw")?;
         // Between the prepass and shading, which reads them: pages follow the depth drawn.
         if let Some((geometry, view)) = drawn {
-            self.shadows.record(cb, geometry, view, target);
+            let still = (!update.draws).then(|| self.geometry.moved_instances(&moved));
+            (self.shadows).record(&self.device, cb, geometry, view, target, still.as_deref())?;
         }
         self.commands.mark("shadow")?;
         target.resume_rendering(cb);

@@ -277,7 +277,13 @@ impl Frame {
             ("drawn_lights", self.lights as u64),
             ("shadow_pages", u64::from(self.shadow.held)),
             ("shadow_pages_wanted", u64::from(self.shadow.wanted)),
+            ("shadow_pages_drawn", u64::from(self.shadow.drawn)),
             ("shadow_draws", u64::from(self.shadow.draws)),
+            ("shadow_triangles", u64::from(self.shadow.triangles)),
+            (
+                "shadow_still_triangles",
+                u64::from(self.shadow.still_triangles),
+            ),
             ("geometry_bytes", m.geometry.device),
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
@@ -380,7 +386,10 @@ mod tests {
             shadow: shadow::Counts {
                 wanted: 300,
                 held: 256,
+                drawn: 12,
                 draws: 9000,
+                triangles: 400_000,
+                still_triangles: 150_000,
             },
             memory: Memory {
                 geometry: gpu::Memory {
@@ -428,7 +437,8 @@ mod tests {
              wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
-             shadow_pages 256 shadow_pages_wanted 300 shadow_draws 9000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
+             shadow_pages 256 shadow_pages_wanted 300 shadow_pages_drawn 12 shadow_draws 9000 \
+             shadow_triangles 400000 shadow_still_triangles 150000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \

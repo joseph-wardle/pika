@@ -1,7 +1,9 @@
-// Virtual shadow pages, in the frame's order: mark the tiles the camera's pixels read,
-// count them, choose which levels the pool holds, assign pool pages to them, clear those
-// pages, list each caster instance once per page it meets, and draw that list by atomic
-// min, so the pool needs no depth attachment.
+// Virtual shadow pages, in the frame's order: mark the tiles the camera's pixels read, count
+// them, choose which levels the pool holds, release the pages of tiles no longer held, gather
+// the free pages, assign them to the tiles that need one, find the held pages a moving
+// caster's old or new box covers, remember each moved caster's box, clear the pages to draw,
+// list each caster instance once per page to draw that it meets, and draw that list by
+// atomic min, so the pool needs no depth attachment. A page held and unchanged is not drawn.
 
 #include "view.slang"
 
@@ -14,34 +16,66 @@ struct Pages
     // Pulls the casters' vertices; its records give each mesh's draw.
     View *casters;
     Shadow *shadows;
-    // Every shadow's tiles, as each Shadow's tiles points into them.
-    Atomic<uint> *tiles;
-    // Per shadow, level and face, the held tiles' bounds: least x and y, then least
-    // across - 1 - x and y, so all four start at 0xffffffff and fall by min.
+    // Every shadow's tiles, as each Shadow's tiles points into them, kept from frame to frame.
+    uint *tiles;
+    // Per tile, this frame's flags: MARK to PAINTED.
+    Atomic<uint> *marks;
+    // Per shadow, level and face, the bounds of the tiles drawn this frame: least x and y,
+    // then least across - 1 - x and y, so all four start at 0xffffffff and fall by min.
     Atomic<uint> *bounds;
     // The camera's depth AOV: 1 - clip depth, 1 where nothing was drawn.
     float *depth;
-    // Per pool page: its shadow and its tile in that shadow's tiles.
-    uint2 *owners;
+    // Per pool page: its shadow, its tile in that shadow's tiles and the tile's place (a
+    // distant light's from its light-space origin); FREE in x when no tile holds it.
+    uint4 *owners;
     // State: see STATE.
     Atomic<uint> *state;
     // vk::DrawIndexedIndirectCommand, 5 words each, and per draw its instance and page.
     uint *draws;
     uint2 *pairs;
     Atomic<uint> *pool;
+    // The pages free once tiles let theirs go, and the pages drawn this frame.
+    uint *free;
+    uint *drawn;
+    // Per instance, 8 words: its world box when it last moved, low corner then high, and
+    // the frame it last moved.
+    float *last;
+    // The instances whose transform or points moved this frame.
+    uint *moved;
     uint count;
     // Pool pages, and draws the lists hold.
     uint pages;
     uint capacity;
+    // 1 when the instances' last boxes are not theirs: every page is drawn anew.
+    uint fresh;
+    uint frame;
     uint pad;
 };
 
+// A tile's flags: marked by a pixel, a finer mark's parent, held but without a page, to be
+// drawn this frame, and drawn because its page is new or shows a changed light, not because a
+// caster moved.
+static const uint MARK = 1;
+static const uint PARENT = 2;
+static const uint NEED = 4;
+static const uint DRAW = 8;
+static const uint PAINTED = 16;
+
+static const uint FREE = 0xffffffff;
+
 // The state's words (src/shadow.rs STATE): draws listed, pages wanted once levels drop,
-// pages marked, the first level dropped (LEVELS for none), draws past the capacity; then, by the coarsest
-// level of the shadows counted and by level, tiles marked and tiles that are a finer mark's
-// parent; by coarsest level, its tiles both; and by level, pages assigned and where the
-// level's pages start.
-static const uint MARKED = 5;
+// pages marked, the first level dropped (LEVELS for none), draws past the capacity, pages
+// drawn, triangles drawn, and of those the triangles of casters that did not move drawn into
+// pages that only a moving caster changed (both wrap past 2^32); the free pages and those
+// taken; then, by the coarsest level of the shadows counted and by level, tiles marked and
+// tiles that are a finer mark's parent; by coarsest level, its tiles both; and by level,
+// pages ranked and where the level's ranks start.
+static const uint DRAWN = 5;
+static const uint TRIANGLES = 6;
+static const uint STILL = 7;
+static const uint FREED = 8;
+static const uint TAKEN = 9;
+static const uint MARKED = 10;
 static const uint PARENTS = MARKED + LEVELS * LEVELS;
 static const uint BOTH = PARENTS + LEVELS * LEVELS;
 static const uint NEXT = BOTH + LEVELS;
@@ -67,15 +101,20 @@ Atomic<uint> *bounds(uint j, uint i, uint face)
     return push.pages->bounds + 4 * ((j * LEVELS + i) * FACES + face);
 }
 
-// Shadow j's tile entries.
-Atomic<uint> *entries(uint j)
+// Shadow j's tiles and their flags.
+uint *entries(uint j)
 {
     return push.pages->tiles + j * LEVELS * TILEMAP;
 }
 
-// Marks with bit 1 the tiles of a distant light's level i within two of its texels of q: one
-// for the lookup's offset off the surface, one for the depth's rounding. True when they all
-// lie inside the level.
+Atomic<uint> *marks(uint j)
+{
+    return push.pages->marks + j * LEVELS * TILEMAP;
+}
+
+// Marks the tiles of a distant light's level i within two of its texels of q: one for the
+// lookup's offset off the surface, one for the depth's rounding. True when they all lie
+// inside the level.
 bool mark_around(uint j, float2 q, uint i)
 {
     Shadow *s = push.pages->shadows + j;
@@ -86,7 +125,7 @@ bool mark_around(uint j, float2 q, uint i)
     int2 b = min(hi, int(TILES) - 1);
     for (int y = a.y; y <= b.y; y++)
         for (int x = a.x; x <= b.x; x++)
-            entries(j)[tile_index(s, i, 0, int2(x, y))].store(1);
+            marks(j)[tile_index(s, i, 0, int2(x, y))].store(MARK);
     return inside(lo) && inside(hi);
 }
 
@@ -109,7 +148,7 @@ void mark_faces(uint j, float3 q, uint i)
         int2 b = clamp(int2(floor(face_tiles(uv + margin, n))), 0, int(n) - 1);
         for (int y = a.y; y <= b.y; y++)
             for (int x = a.x; x <= b.x; x++)
-                entries(j)[tile_index(s, i, face, int2(x, y))].store(1);
+                marks(j)[tile_index(s, i, face, int2(x, y))].store(MARK);
     }
 }
 
@@ -157,7 +196,7 @@ void mark(uint3 thread : SV_DispatchThreadID)
     }
 }
 
-// Shadow j's tile e: its level, face and place.
+// Shadow j's tile e: its level, face and place, a distant light's from its level's origin.
 struct Tile
 {
     uint level;
@@ -175,7 +214,16 @@ Tile tile_of(Shadow *s, uint e)
     uint r = e - start(s, t.level);
     t.face = r / (n * n);
     t.at = int2(r % n, r / n % n);
+    // Unwrapped; tile_index wraps it again.
+    if (s->faces == 0)
+        t.at = (t.at - s->origin[t.level]) & int(TILES - 1);
     return t;
+}
+
+// Where a tile lies from its light-space origin, which a page's content depends on.
+int2 place_of(Shadow *s, Tile t)
+{
+    return s->faces == 0 ? t.at + s->origin[t.level] : t.at;
 }
 
 // The level i + 1 tile holding level i's tile t; a local light's LODs have no origin.
@@ -186,8 +234,8 @@ uint parent(Shadow *s, Tile t)
     return tile_index(s, i + 1, t.face, up);
 }
 
-// Over every shadow's tiles: counts the marks, flags each mark's parent with bit 2 and
-// counts each parent once. Shadows are counted by their coarsest level, which has no parent.
+// Over every shadow's tiles: counts the marks, flags each mark's parent and counts each
+// parent once. Shadows are counted by their coarsest level, which has no parent.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void count(uint3 thread : SV_DispatchThreadID)
@@ -198,34 +246,35 @@ void count(uint3 thread : SV_DispatchThreadID)
         uint j = k / (LEVELS * TILEMAP);
         uint e = k % (LEVELS * TILEMAP);
         Shadow *s = p->shadows + j;
-        if (e >= start(s, s->levels) || (entries(j)[e].load() & 1) == 0)
+        if (e >= start(s, s->levels) || (marks(j)[e].load() & MARK) == 0)
             continue;
         Tile t = tile_of(s, e);
         uint top = s->levels - 1;
         p->state[MARKED + top * LEVELS + t.level].increment();
         if (t.level == top)
             continue;
-        uint before = entries(j)[parent(s, t)].or(2);
-        if ((before & 2) != 0)
+        uint before = marks(j)[parent(s, t)].or(PARENT);
+        if ((before & PARENT) != 0)
             continue;
         p->state[PARENTS + top * LEVELS + t.level + 1].increment();
-        if (t.level + 1 == top && (before & 1) != 0)
+        if (t.level + 1 == top && (before & MARK) != 0)
             p->state[BOTH + top].increment();
     }
 }
 
-// Whether a tile at level i holding flags gets a page when levels from dropped up draw their
+// Whether a tile at level i holding flags is held when levels from dropped up draw their
 // marks into their parents; top is its shadow's coarsest level, which cannot drop.
 bool wanted(uint flags, uint i, uint top, uint dropped)
 {
+    flags &= MARK | PARENT;
     if (dropped >= top || i < dropped)
-        return (flags & 1) != 0;
+        return (flags & MARK) != 0;
     if (i == dropped)
         return false;
-    return i < top ? (flags & 2) != 0 : flags != 0;
+    return i < top ? (flags & PARENT) != 0 : flags != 0;
 }
 
-// Pages level i wants, over shadows whose coarsest level is top, when dropped drops.
+// Tiles level i holds, over shadows whose coarsest level is top, when dropped drops.
 uint wanted_at(uint i, uint top, uint dropped)
 {
     Pages *p = push.pages;
@@ -240,7 +289,7 @@ uint wanted_at(uint i, uint top, uint dropped)
 
 // One thread. Past the pool, every shadow's levels from the first dropped one up draw their
 // marks into their parents instead, so the farthest pages drop a LOD first; lookups find the
-// parents by walking up. Pages go coarsest first: should even dropping every level
+// parents by walking up. Tiles rank coarsest first: should even dropping every level
 // overflow, the finest go.
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -282,11 +331,46 @@ void choose(uint3 thread : SV_DispatchThreadID)
     p->state[3].store(dropped);
 }
 
-// Over every shadow's tiles: gives each wanted tile a page while the pool lasts, from its
-// level's start, and every other tile NO_PAGE.
+// Lists shadow j's page for tile t to be cleared and drawn this frame.
+void draw_page(uint j, Tile t, uint page)
+{
+    Pages *p = push.pages;
+    Shadow *s = p->shadows + j;
+    p->drawn[p->state[DRAWN].increment()] = page;
+    uint across = tiles_across(s, t.level);
+    Atomic<uint> *b = bounds(j, t.level, t.face);
+    b[0].min(t.at.x);
+    b[1].min(t.at.y);
+    b[2].min(across - 1 - t.at.x);
+    b[3].min(across - 1 - t.at.y);
+}
+
+// Gives shadow j's tile e, t, the page, drawn anew.
+void paint(uint j, uint e, Tile t, uint page)
+{
+    Pages *p = push.pages;
+    Shadow *s = p->shadows + j;
+    p->owners[page] = uint4(j, e, asuint(place_of(s, t)));
+    marks(j)[e].or(DRAW | PAINTED);
+    draw_page(j, t, page);
+}
+
+// Shadow j's tile e lets its page go, if it holds one.
+void let_go(uint j, uint e)
+{
+    uint page = entries(j)[e];
+    if (page == NO_PAGE)
+        return;
+    push.pages->owners[page].x = FREE;
+    entries(j)[e] = NO_PAGE;
+}
+
+// Over every shadow's tiles: ranks the tiles held this frame by level, coarsest first, and
+// those ranked past the pool are not held. A tile not held lets its page go; one held keeps
+// its page, drawn anew should its light or place have changed, or needs one.
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void assign(uint3 thread : SV_DispatchThreadID)
+void release(uint3 thread : SV_DispatchThreadID)
 {
     Pages *p = push.pages;
     uint dropped = p->state[3].load();
@@ -296,60 +380,271 @@ void assign(uint3 thread : SV_DispatchThreadID)
         uint e = k % (LEVELS * TILEMAP);
         Shadow *s = p->shadows + j;
         if (e >= start(s, s->levels))
-            continue;
-        Atomic<uint> *entry = entries(j) + e;
-        Tile t = tile_of(s, e);
-        uint page = NO_PAGE;
-        if (wanted(entry->load(), t.level, s->levels - 1, dropped))
         {
-            uint n = p->state[BASE + t.level].load() + p->state[NEXT + t.level].increment();
-            if (n < p->pages)
-            {
-                page = n;
-                p->owners[page] = uint2(j, e);
-                uint across = tiles_across(s, t.level);
-                Atomic<uint> *b = bounds(j, t.level, t.face);
-                b[0].min(t.at.x);
-                b[1].min(t.at.y);
-                b[2].min(across - 1 - t.at.x);
-                b[3].min(across - 1 - t.at.y);
-            }
+            let_go(j, e);
+            continue;
         }
-        entry->store(page);
+        Tile t = tile_of(s, e);
+        if (!wanted(marks(j)[e].load(), t.level, s->levels - 1, dropped))
+        {
+            let_go(j, e);
+            continue;
+        }
+        uint rank = p->state[BASE + t.level].load() + p->state[NEXT + t.level].increment();
+        if (rank >= p->pages)
+        {
+            let_go(j, e);
+            continue;
+        }
+        uint page = entries(j)[e];
+        if (page == NO_PAGE)
+            marks(j)[e].or(NEED);
+        else if (s->reset != 0 || any(asint(p->owners[page].zw) != place_of(s, t)))
+            paint(j, e, t, page);
     }
 }
 
-// Over every pool texel; pages past those held are left as they are.
+// Over every pool page: lists the free ones.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void gather(uint3 thread : SV_DispatchThreadID)
+{
+    Pages *p = push.pages;
+    for (uint k = thread.x; k < push.count; k += push.stride)
+    {
+        if (p->owners[k].x == FREE)
+            p->free[p->state[FREED].increment()] = k;
+    }
+}
+
+// Over every shadow's tiles: gives each that needs a page a free one. Ranking kept the held
+// tiles within the pool, so there is one for each.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void assign(uint3 thread : SV_DispatchThreadID)
+{
+    Pages *p = push.pages;
+    for (uint k = thread.x; k < push.count; k += push.stride)
+    {
+        uint j = k / (LEVELS * TILEMAP);
+        uint e = k % (LEVELS * TILEMAP);
+        if ((marks(j)[e].load() & NEED) == 0)
+            continue;
+        uint n = p->state[TAKEN].increment();
+        if (n >= p->state[FREED].load())
+            continue;
+        uint page = p->free[n];
+        entries(j)[e] = page;
+        paint(j, e, tile_of(p->shadows + j, e), page);
+    }
+}
+
+// The 8 corners of instance's box in world space, and the record it draws.
+uint corners_of(uint instance, out float3 corners[8])
+{
+    View *v = push.pages->casters;
+    uint r = v->owners[instance];
+    float *box = v->boxes + 6 * r;
+    float4 *m = v->instances + 7 * instance;
+    for (uint c = 0; c < 8; c++)
+    {
+        bool3 high = (c & uint3(1, 2, 4)) != 0;
+        float4 corner = float4(select(high, float3(box[3], box[4], box[5]),
+                                      float3(box[0], box[1], box[2])), 1);
+        corners[c] = float3(dot(m[0], corner), dot(m[1], corner), dot(m[2], corner));
+    }
+    return r;
+}
+
+bool casts(uint instance, Shadow *s)
+{
+    uint link = asuint(push.pages->casters->instances[7 * instance + 6].z);
+    return (link & s->link) == s->link;
+}
+
+// The tiles a to b of s's level i and face that a box, by its corners, may cover; false when
+// it covers none.
+bool covers(Shadow *s, uint i, uint face, float3 corners[8], out int2 a, out int2 b)
+{
+    a = 0;
+    b = -1;
+    if (s->faces == 0)
+    {
+        float2 lo = float2(1e38);
+        float2 hi = float2(-1e38);
+        for (uint c = 0; c < 8; c++)
+        {
+            float2 q = to_light(s, corners[c]).xy;
+            lo = min(lo, q);
+            hi = max(hi, q);
+        }
+        a = max(tile_at(s, lo, i), 0);
+        b = min(tile_at(s, hi, i), int(TILES) - 1);
+        return all(a <= b);
+    }
+    float3 q[8];
+    float3 near = float3(1e38);
+    float3 far = float3(-1e38);
+    for (uint c = 0; c < 8; c++)
+    {
+        q[c] = to_light(s, corners[c]);
+        near = min(near, q[c]);
+        far = max(far, q[c]);
+    }
+    // The box's nearest point to the light's centre, past its reach.
+    float3 gap = max(max(near, -far), 0);
+    if (dot(gap, gap) >= s->far * s->far)
+        return false;
+    float2 lo = float2(1e38);
+    float2 hi = float2(-1e38);
+    float deepest = -1e38;
+    bool behind = false;
+    for (uint c = 0; c < 8; c++)
+    {
+        float3 f = on_face(face, q[c]);
+        deepest = max(deepest, f.z);
+        behind = behind || f.z <= 0;
+        lo = min(lo, f.xy / f.z);
+        hi = max(hi, f.xy / f.z);
+    }
+    if (deepest <= s->near)
+        return false;
+    // A box reaching behind the face's plane may cover any of it.
+    if (behind)
+    {
+        lo = -1;
+        hi = 1;
+    }
+    if (any(lo > 1) || any(hi < -1))
+        return false;
+    int n = int(tiles_across(s, i));
+    a = clamp(int2(floor(face_tiles(lo, n))), 0, n - 1);
+    b = clamp(int2(floor(face_tiles(hi, n))), 0, n - 1);
+    return true;
+}
+
+// Lists shadow j's held pages from tile a to b of level i and face to be drawn.
+void dirty(uint j, uint i, uint face, int2 a, int2 b)
+{
+    Shadow *s = push.pages->shadows + j;
+    for (int y = a.y; y <= b.y; y++)
+    {
+        for (int x = a.x; x <= b.x; x++)
+        {
+            uint e = tile_index(s, i, face, int2(x, y));
+            uint page = entries(j)[e];
+            if (page == NO_PAGE || (marks(j)[e].or(DRAW) & DRAW) != 0)
+                continue;
+            Tile t;
+            t.level = i;
+            t.face = face;
+            t.at = int2(x, y);
+            draw_page(j, t, page);
+        }
+    }
+}
+
+// Per moved instance and level: the held pages its box covered when it last moved, and
+// those it covers now, are drawn anew.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void moving(uint3 thread : SV_DispatchThreadID)
+{
+    Pages *p = push.pages;
+    for (uint k = thread.x; k < push.count; k += push.stride)
+    {
+        uint instance = p->moved[k / LEVELS];
+        uint i = k % LEVELS;
+        float3 now[8];
+        corners_of(instance, now);
+        float *box = p->last + 8 * instance;
+        float3 then[8];
+        for (uint c = 0; c < 8; c++)
+        {
+            bool3 high = (c & uint3(1, 2, 4)) != 0;
+            then[c] = select(high, float3(box[3], box[4], box[5]), float3(box[0], box[1], box[2]));
+        }
+        for (uint j = 0; j < p->count; j++)
+        {
+            Shadow *s = p->shadows + j;
+            if (i >= s->levels || !casts(instance, s))
+                continue;
+            for (uint face = 0; face < max(s->faces, 1); face++)
+            {
+                int2 a, b;
+                if (covers(s, i, face, then, a, b))
+                    dirty(j, i, face, a, b);
+                if (covers(s, i, face, now, a, b))
+                    dirty(j, i, face, a, b);
+            }
+        }
+    }
+}
+
+// Per moved instance, or every one when fresh: its world box and this frame, for the next
+// frame it moves in.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void remember(uint3 thread : SV_DispatchThreadID)
+{
+    Pages *p = push.pages;
+    for (uint k = thread.x; k < push.count; k += push.stride)
+    {
+        uint instance = p->fresh != 0 ? k : p->moved[k];
+        float3 corners[8];
+        corners_of(instance, corners);
+        float3 lo = corners[0];
+        float3 hi = corners[0];
+        for (uint c = 1; c < 8; c++)
+        {
+            lo = min(lo, corners[c]);
+            hi = max(hi, corners[c]);
+        }
+        float *box = p->last + 8 * instance;
+        box[0] = lo.x;
+        box[1] = lo.y;
+        box[2] = lo.z;
+        box[3] = hi.x;
+        box[4] = hi.y;
+        box[5] = hi.z;
+        box[6] = asfloat(p->frame);
+    }
+}
+
+// Over the texels of the pages drawn this frame.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void clear(uint3 thread : SV_DispatchThreadID)
 {
     Pages *p = push.pages;
-    uint held = min(p->state[1].load(), p->pages);
-    for (uint k = thread.x; k < push.count && k / (PAGE * PAGE) < held; k += push.stride)
-        p->pool[k].store(0xffffffff);
+    uint texels = p->state[DRAWN].load() * PAGE * PAGE;
+    for (uint k = thread.x; k < texels; k += push.stride)
+        p->pool[p->drawn[k / (PAGE * PAGE)] * PAGE * PAGE + k % (PAGE * PAGE)].store(0xffffffff);
 }
 
-// Lists one draw of the instance into each held page of shadow j's level i and face its
-// tiles from lo to hi meet.
-void list(uint j, uint i, uint face, int2 lo, int2 hi, uint instance, uint r)
+// Lists one draw of the instance into each page to draw of shadow j's level i and face its
+// tiles from a to b meet.
+void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
 {
     Pages *p = push.pages;
     View *v = p->casters;
     Shadow *s = p->shadows + j;
     Atomic<uint> *bound = bounds(j, i, face);
-    // Untouched, the level holds no page there.
+    // Untouched, the level draws no page there.
     if (bound[0].load() >= TILES)
         return;
     int across = int(tiles_across(s, i));
-    int2 a = max(lo, int2(bound[0].load(), bound[1].load()));
-    int2 b = min(hi, across - 1 - int2(bound[2].load(), bound[3].load()));
+    a = max(a, int2(bound[0].load(), bound[1].load()));
+    b = min(b, across - 1 - int2(bound[2].load(), bound[3].load()));
+    bool still = asuint(p->last[8 * instance + 6]) != p->frame;
     for (int y = a.y; y <= b.y; y++)
     {
         for (int x = a.x; x <= b.x; x++)
         {
-            uint page = s->tiles[tile_index(s, i, face, int2(x, y))];
-            if (page == NO_PAGE)
+            uint e = tile_index(s, i, face, int2(x, y));
+            uint page = entries(j)[e];
+            uint flags = marks(j)[e].load();
+            if (page == NO_PAGE || (flags & DRAW) == 0)
                 continue;
             uint d = p->state[0].increment();
             if (d >= p->capacity)
@@ -357,7 +652,11 @@ void list(uint j, uint i, uint face, int2 lo, int2 hi, uint instance, uint r)
                 p->state[4].increment();
                 continue;
             }
-            p->draws[5 * d] = v->records[5 * r].load();
+            uint indices = v->records[5 * r].load();
+            p->state[TRIANGLES].add(indices / 3);
+            if (still && (flags & PAINTED) == 0)
+                p->state[STILL].add(indices / 3);
+            p->draws[5 * d] = indices;
             p->draws[5 * d + 1] = 1;
             p->draws[5 * d + 2] = v->records[5 * r + 2].load();
             p->draws[5 * d + 3] = v->records[5 * r + 3].load();
@@ -367,88 +666,28 @@ void list(uint j, uint i, uint face, int2 lo, int2 hi, uint instance, uint r)
     }
 }
 
-// Per caster instance and level: one draw for each held page its box meets.
+// Per caster instance and level: one draw for each page to draw its box meets.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cast(uint3 thread : SV_DispatchThreadID)
 {
     Pages *p = push.pages;
-    View *v = p->casters;
     for (uint k = thread.x; k < push.count; k += push.stride)
     {
         uint instance = k / LEVELS;
         uint i = k % LEVELS;
-        uint r = v->owners[instance];
-        float *box = v->boxes + 6 * r;
-        float4 *m = v->instances + 7 * instance;
-        uint link = asuint(m[6].z);
         float3 corners[8];
-        for (uint c = 0; c < 8; c++)
-        {
-            bool3 high = (c & uint3(1, 2, 4)) != 0;
-            float4 corner = float4(select(high, float3(box[3], box[4], box[5]),
-                                          float3(box[0], box[1], box[2])), 1);
-            corners[c] = float3(dot(m[0], corner), dot(m[1], corner), dot(m[2], corner));
-        }
+        uint r = corners_of(instance, corners);
         for (uint j = 0; j < p->count; j++)
         {
             Shadow *s = p->shadows + j;
-            if (i >= s->levels || (link & s->link) != s->link)
+            if (i >= s->levels || !casts(instance, s))
                 continue;
-            if (s->faces == 0)
+            for (uint face = 0; face < max(s->faces, 1); face++)
             {
-                float2 lo = float2(1e38);
-                float2 hi = float2(-1e38);
-                for (uint c = 0; c < 8; c++)
-                {
-                    float2 q = to_light(s, corners[c]).xy;
-                    lo = min(lo, q);
-                    hi = max(hi, q);
-                }
-                list(j, i, 0, tile_at(s, lo, i), tile_at(s, hi, i), instance, r);
-                continue;
-            }
-            float3 q[8];
-            float3 near = float3(1e38);
-            float3 far = float3(-1e38);
-            for (uint c = 0; c < 8; c++)
-            {
-                q[c] = to_light(s, corners[c]);
-                near = min(near, q[c]);
-                far = max(far, q[c]);
-            }
-            // The box's nearest point to the light's centre, past its reach.
-            float3 gap = max(max(near, -far), 0);
-            if (dot(gap, gap) >= s->far * s->far)
-                continue;
-            int n = int(tiles_across(s, i));
-            for (uint face = 0; face < s->faces; face++)
-            {
-                float2 lo = float2(1e38);
-                float2 hi = float2(-1e38);
-                float deepest = -1e38;
-                bool behind = false;
-                for (uint c = 0; c < 8; c++)
-                {
-                    float3 f = on_face(face, q[c]);
-                    deepest = max(deepest, f.z);
-                    behind = behind || f.z <= 0;
-                    lo = min(lo, f.xy / f.z);
-                    hi = max(hi, f.xy / f.z);
-                }
-                if (deepest <= s->near)
-                    continue;
-                // A box reaching behind the face's plane may cover any of it.
-                if (behind)
-                {
-                    lo = -1;
-                    hi = 1;
-                }
-                if (any(lo > 1) || any(hi < -1))
-                    continue;
-                int2 a = clamp(int2(floor(face_tiles(lo, n))), 0, n - 1);
-                int2 b = clamp(int2(floor(face_tiles(hi, n))), 0, n - 1);
-                list(j, i, face, a, b, instance, r);
+                int2 a, b;
+                if (covers(s, i, face, corners, a, b))
+                    list(j, i, face, a, b, instance, r);
             }
         }
     }
@@ -470,7 +709,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint draw : SV_VulkanInstanceID)
     Pages *p = push.pages;
     View *v = p->casters;
     uint2 pair = p->pairs[draw];
-    uint2 owner = p->owners[pair.y];
+    uint4 owner = p->owners[pair.y];
     Shadow *s = p->shadows + owner.x;
     Tile tile = tile_of(s, owner.y);
     uint point = v->vertices[vertex].x;
@@ -481,7 +720,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint draw : SV_VulkanInstanceID)
     Varyings o;
     if (s->faces == 0)
     {
-        int2 t = tile.at + s->origin[tile.level];
+        int2 t = asint(owner.zw);
         o.position = float4((q.xy / tile_width(s, tile.level) - float2(t)) * 2 - 1, q.z, 1);
         o.depth = q.z;
     }

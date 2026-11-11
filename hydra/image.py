@@ -149,6 +149,9 @@ BLURRED = {"lowered": (0, 1)}
 # Scenes whose pika:shadowPool holds fewer pages than husk's camera marks; husk must warn of it
 # in one line.
 POOLED = {"receding": 1}
+# Scenes whose lights and camera stay while casters move: husk must keep some pages from frame
+# 1 and draw others anew.
+CACHED = {"moving"}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
@@ -169,7 +172,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
             "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
             "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
-            "shadow rays past local lights",
+            "shadow rays past local lights", "moved casters' old shadows kept",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1240,6 +1243,16 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     if not tris:
         return image
     world = np.array([[list(v) for v in t["points"]] for t in tris])
+    faces = [t["face"][0] for t in tris]
+    casting = world
+    if control == "moved casters' old shadows kept" and time != FRAMES[0]:
+        # The triangles that moved since frame 1, where they were then.
+        old = triangles(stage, FRAMES[0], host)
+        stage.GetSessionLayer().Clear()
+        moved = old if len(old) != len(tris) else [o for o, t in zip(old, tris) if o["points"] != t["points"]]
+        if moved:
+            casting = np.concatenate([world, np.array([[list(v) for v in o["points"]] for o in moved])])
+            faces = faces + [o["face"][0] for o in moved]
     nearest, p, bary = cast(to_clip, width, height, shift, world)
     around = footprint(to_clip, width, height, shift, world, nearest)
     hit = nearest >= 0
@@ -1301,9 +1314,8 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     facing[dot(facing, toward) < 0] *= -1
     shine = np.zeros((len(p), 3))
     paths = [tris[k]["face"][0] for k in i]
-    faces = [t["face"][0] for t in tris]
     held = np.zeros(len(p), int)
-    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, world, faces), control)
+    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, casting, faces), control)
     for bit, (d, e, sin, shadow) in enumerate(found):
         held |= shadow.astype(int) << bit
         cos = dot(facing, d)
@@ -1497,6 +1509,21 @@ def blurred(stats, name):
     return []
 
 
+def cached(stats, name):
+    """Failures unless the `stats` husk wrote show, past the first frame, a frame that kept
+    some of its shadow pages and drew others anew, when the scene is CACHED."""
+    frames = []
+    with open(stats) as f:
+        for line in f:
+            words = line.split()
+            if words and words[0] == "frame":
+                pairs = dict(zip(words[2::2], words[3::2]))
+                frames.append((int(pairs["shadow_pages_drawn"]), int(pairs["shadow_pages"])))
+    if name in CACHED and not any(0 < drawn < held for drawn, held in frames[1:]):
+        return [f"{name}: shadow pages drawn of those held past the first frame {frames[1:]}"]
+    return []
+
+
 def usdrecord(scene, out, width):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
@@ -1607,6 +1634,7 @@ def main():
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
             failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name), POOLED.get(name, 0))
             failures += blurred(log.replace(".husk.log", ".husk.stats"), name)
+            failures += cached(log.replace(".husk.log", ".husk.stats"), name)
             changed |= c
             if s not in records:
                 continue

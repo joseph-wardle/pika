@@ -50,12 +50,15 @@ struct Light
 
 static const uint NO_SHADOW = 0xffffffff;
 
-// A light's virtual shadow map (src/shadow.rs Shadow), of tiles of PAGE² texels; a tile drawn
-// this frame holds a page of the pool: depth from the light as float bits, so the nearest
-// caster is the least. A distant light's is a clipmap of up to LEVELS square levels around
-// the camera, each TILES² tiles, level i's side 2^(level + i) world units, its depth in
-// [0, 1] over the casters. A local light's is a cube of faces around its centre, each face's
-// LOD l (TILES >> l)² tiles, its depth the distance along the face's axis.
+// A light's virtual shadow map (src/shadow.rs Shadow), of tiles of PAGE² texels; a tile the
+// camera's pixels read holds a page of the pool: depth from the light as float bits, so the
+// nearest caster is the least. A page stays drawn from frame to frame until what it shows
+// changes (src/shadow.rs). A distant light's is a clipmap of up to LEVELS square levels around
+// the camera, each TILES² tiles, level i's side 2^(level + i) world units, its depth in [0, 1]
+// over the casters; its tiles are held wrapped, at their place from the light-space origin
+// modulo TILES, so a level moving with the camera keeps the tiles it still covers. A local
+// light's is a cube of faces around its centre, each face's LOD l (TILES >> l)² tiles, its
+// depth the distance along the face's axis.
 static const uint LEVELS = 16;
 static const uint TILES = 32;
 static const uint PAGE = 256;
@@ -86,7 +89,8 @@ struct Shadow
     // A local light's clipping distances along a face's axis.
     float near;
     float far;
-    uint pad;
+    // 1 when its light's map changed: every page it holds is drawn anew.
+    uint reset;
     // LEVELS × TILEMAP per shadow (start()): a page or NO_PAGE.
     uint *tiles;
     Atomic<uint> *pool;
@@ -105,7 +109,8 @@ uint tiles_across(Shadow *s, uint i)
 }
 
 // Where level i's tiles start in a shadow's tiles: a distant light's level by level, a local
-// light's LOD by LOD, six faces each, face by face, then row by row.
+// light's LOD by LOD, six faces each, face by face, then row by row; a distant light's
+// level is wrapped.
 uint start(Shadow *s, uint i)
 {
     if (s->faces == 0)
@@ -117,6 +122,8 @@ uint start(Shadow *s, uint i)
 uint tile_index(Shadow *s, uint i, uint face, int2 t)
 {
     uint across = tiles_across(s, i);
+    if (s->faces == 0)
+        t = (t + s->origin[i]) & int(TILES - 1);
     return start(s, i) + (face * across + t.y) * across + t.x;
 }
 
