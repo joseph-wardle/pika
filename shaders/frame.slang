@@ -147,19 +147,6 @@ Lights lights_at(float3 P, int link)
     return lights;
 }
 
-// Past its reach it has faded to 0; a rect or disk lights only the cross(u, v) side.
-bool lit_by(Light light, float3 P, uint link)
-{
-    if ((light.link & link) != light.link)
-        return false;
-    if (light.shape == DISTANT)
-        return true;
-    float3 d = P - light.position;
-    if (dot(d, d) >= light.reach * light.reach)
-        return false;
-    return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
-}
-
 Incident incident_light(uint light_index, float3 P, float3 N)
 {
     Light light = view->lights[light_index];
@@ -191,24 +178,56 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     return incident;
 }
 
+// Where P falls in level i's tiles: the tile, P's place across it in [0, 1] and its depth
+// from the light. False off the level, or off a local light's faces.
+bool locate(Shadow *s, float3 P, uint i, out uint tile, out float2 across, out float depth)
+{
+    float3 q = to_light(s, P);
+    tile = 0;
+    across = 0;
+    depth = 0;
+    if (s->faces == 0)
+    {
+        int2 t = tile_at(s, q.xy, i);
+        if (!inside(t))
+            return false;
+        float2 u = q.xy / tile_width(s, i);
+        tile = tile_index(s, i, 0, t);
+        across = u - floor(u);
+        // Negative depth, nearer the light than any caster, would read as a huge integer.
+        depth = max(q.z, 0.0);
+        return true;
+    }
+    uint face = face_of(q);
+    if (face >= s->faces)
+        return false;
+    float3 f = on_face(face, q);
+    uint n = tiles_across(s, i);
+    float2 u = face_tiles(f.xy / f.z, n);
+    int2 t = clamp(int2(floor(u)), 0, int(n) - 1);
+    tile = tile_index(s, i, face, t);
+    across = saturate(u - float2(t));
+    depth = f.z;
+    return true;
+}
+
 // Whether level i holds a page at P moved a texel of that level off the surface toward the
 // light, so the surface does not shadow itself; if so, lit is how much of the light reaches.
-bool lookup(Shadow *s, float3 P, float3 n, uint i, out float lit)
+// depth is P's along its face of a local light.
+bool lookup(Shadow *s, float3 P, float3 n, uint i, float depth, out float lit)
 {
     lit = 1.0;
-    float width = tile_width(s, i);
-    float3 q = to_light(s, P + n * (width / PAGE));
-    int2 t = tile_at(s, q.xy, i);
-    if (!inside(t))
+    uint tile;
+    float2 across;
+    float moved;
+    if (!locate(s, P + n * texel_width(s, i, depth), i, tile, across, moved))
         return false;
-    uint page = s->tiles[(i * TILES + t.y) * TILES + t.x];
+    uint page = s->tiles[tile];
     if (page == NO_PAGE)
         return false;
-    float2 u = q.xy / width;
-    uint2 x = min(uint2((u - floor(u)) * PAGE), PAGE - 1);
-    // Negative depth, nearer the light than any caster, would read as a huge integer.
+    uint2 x = min(uint2(across * PAGE), PAGE - 1);
     uint caster = s->pool[(page * PAGE + x.y) * PAGE + x.x].load();
-    lit = caster < asuint(max(q.z, 0.0)) ? 0.0 : 1.0;
+    lit = caster < asuint(moved) ? 0.0 : 1.0;
     return true;
 }
 
@@ -221,16 +240,20 @@ float visibility(uint light_index, float3 P)
     if (light.shadow == NO_SHADOW)
         return 1.0;
     Shadow *s = view->shadows + light.shadow;
-    float3 n = dot(shadow_normal, light.position) < 0 ? -shadow_normal : shadow_normal;
+    float3 toward = light.shape == DISTANT ? light.position : light.position - P;
+    float3 n = dot(shadow_normal, toward) < 0 ? -shadow_normal : shadow_normal;
     float w = dot(view->view_projection[3], float4(P, 1));
-    uint first = level_at(s, to_light(s, P), w);
+    float3 q = to_light(s, P);
+    // A local light's texels widen with the depth along P's own face.
+    float depth = on_face(face_of(q), q).z;
+    uint first = s->faces == 0 ? level_at(s, q, w) : lod_at(s, depth, w);
     float lit;
     for (uint i = first; i < s->levels; i++)
     {
-        if (lookup(s, P, n, i, lit))
+        if (lookup(s, P, n, i, depth, lit))
             return lit;
     }
-    if (first > 0 && lookup(s, P, n, first - 1, lit))
+    if (first > 0 && lookup(s, P, n, first - 1, depth, lit))
         return lit;
     return 1.0;
 }

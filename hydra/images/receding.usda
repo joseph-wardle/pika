@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = """Disks receding over a long clay ground, each twice as far and as wide as the last, so their shadows fall on clipmap levels from finest to coarse, and a roof above the frame casting into it. The pool, pika:shadowPool = 4 MB (16 pages), holds fewer pages than the camera marks, so the farthest levels drop a LOD; their texels stay under a pixel. usdrecord passes no render settings, so it draws them at the default pool. Frame 2 moves the camera and turns the key."""
+    doc = """Disks receding over a long clay ground, each twice as far and as wide as the last, so their shadows fall on clipmap levels from finest to coarse, and a roof above the frame casting into it. The pool, pika:shadowPool = 14 MB (56 pages), holds fewer pages than the camera marks (58 at frame 1, 59 at frame 2) but more than the coarsest level it reads (55), so the finer level drops a LOD into it; its texels stay under a pixel. usdrecord passes no render settings, so it draws them at the default pool. Frame 2 moves the camera and turns the key."""
     subLayers = [@settings.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -109,6 +109,6 @@ over "render"
 {
     over "settings"
     {
-        custom int pika:shadowPool = 4
+        custom int pika:shadowPool = 14
     }
 }

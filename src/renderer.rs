@@ -349,7 +349,7 @@ impl Renderer {
                 continue;
             };
             let link = links.light(l);
-            if resolved.shape == light::DISTANT && l.params.is_some_and(|p| p.shadow) {
+            if l.params.is_some_and(|p| p.shadow) {
                 let shadow = link.shadow;
                 casters.push(Caster {
                     light: lights.len(),

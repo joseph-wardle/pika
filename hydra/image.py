@@ -78,13 +78,14 @@ What the reference encodes:
   surface's color, so a scene lights a surface with two at most. A light
   lights only the meshes its lightLink collection includes; Pika links
   per mesh, so a scene's instances must share their prototype's links.
-  A distant light, the camera light among them, unless its shadow:enable
-  is off, gives nothing to a hit whose ray toward it, along its axis
-  whatever its angle, meets a triangle of a mesh its shadowLink collection
-  includes (every mesh for the camera light), the hit's own triangle
-  aside, whatever pika:shadowPool holds: a scene in POOLED marks more
-  pages than its pool, whose dropped levels must keep their texels under a
-  pixel. Other lights cast no shadows yet. Other light types are refused.
+  A light, the camera light among them, unless its shadow:enable is off,
+  gives nothing to a hit whose ray toward it meets a triangle of a mesh its
+  shadowLink collection includes (every mesh for the camera light), the
+  hit's own triangle aside, whatever pika:shadowPool holds: a distant
+  light's ray runs along its axis whatever its angle, and another's to its
+  centre whatever its shape. A scene in POOLED marks more pages than its
+  pool, whose dropped levels must keep their texels under a pixel. Other
+  light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -168,6 +169,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
             "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
             "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
+            "shadow rays past local lights",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1098,10 +1100,11 @@ def links(prim, paths, control):
 PAIRS = 1 << 20
 
 
-def shadowed(toward, casts, p, own, world, control):
-    """Which hits `p`, on triangles `own`, a distant light toward `toward`
-    (one direction, or one per hit) shadows: their rays toward it meet one
-    of the triangles of `world` that `casts`."""
+def shadowed(toward, casts, p, own, world, control, reach=None):
+    """Which hits `p`, on triangles `own`, a light toward `toward` (one
+    direction, or one per hit) shadows: their rays toward it meet one of
+    the triangles of `world` that `casts`, nearer than `reach`, the
+    distance to a local light's centre, when given."""
     if control == "shadows ignored":
         return np.zeros(len(p), bool)
     if control == "shadow rays turned 6°":
@@ -1116,6 +1119,8 @@ def shadowed(toward, casts, p, own, world, control):
         d = toward if toward.ndim == 1 else toward[start:start + chunk, None]
         u, v, t, det = intersect(p[start:start + chunk, None], d, v0, e1, e2)
         hit = (det != 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+        if reach is not None and control != "shadow rays past local lights":
+            hit &= t < reach[start:start + chunk, None]
         out[start:start + chunk] = (hit & (k != own[start:start + chunk, None])).any(axis=1)
     return out
 
@@ -1163,10 +1168,16 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=N
         api = UsdLux.LightAPI(prim)
         on = links(prim, paths, control)
         held = np.zeros(len(p), bool)
+        local = prim.IsA(UsdLux.SphereLight) or any(prim.IsA(t) for t in AREA)
         if prim.IsA(UsdLux.SphereLight):
             given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
-        elif any(prim.IsA(t) for t in AREA):
+        elif local:
             given = area(prim, time, p[on], n[on], control)
+        if local:
+            centre = np.array(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time).ExtractTranslation())
+            c = centre - p[on]
+            d = np.linalg.norm(c, axis=1)
+            held[on] = shadowed(c / d[:, None], shadow_casters(prim, faces, control), p[on], own[on], world, control, d)
         else:
             m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
             z = np.array([m[2][0], m[2][1], m[2][2]])

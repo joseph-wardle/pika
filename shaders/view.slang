@@ -50,31 +50,44 @@ struct Light
 
 static const uint NO_SHADOW = 0xffffffff;
 
-// A distant light's virtual shadow map (src/shadow.rs Shadow): a clipmap of LEVELS square
-// levels around the camera, each TILES² tiles of PAGE² texels, level i's side 2^(level + i)
-// world units. A tile drawn this frame holds a page of the pool: light depth, 0 toward the
-// light, as float bits, so the nearest caster is the least.
+// A light's virtual shadow map (src/shadow.rs Shadow), of tiles of PAGE² texels; a tile drawn
+// this frame holds a page of the pool: depth from the light as float bits, so the nearest
+// caster is the least. A distant light's is a clipmap of up to LEVELS square levels around
+// the camera, each TILES² tiles, level i's side 2^(level + i) world units, its depth in
+// [0, 1] over the casters. A local light's is a cube of faces around its centre, each face's
+// LOD l (TILES >> l)² tiles, its depth the distance along the face's axis.
 static const uint LEVELS = 16;
 static const uint TILES = 32;
 static const uint PAGE = 256;
+static const uint TILEMAP = TILES * TILES;
+static const uint LOCAL_LEVELS = 6;
 // A tile with no page; before allocation, 0 is unmarked.
 static const uint NO_PAGE = 0xffffffff;
 
 struct Shadow
 {
-    // World to light space: x and y in world units across the light, z its depth in [0, 1]
-    // over the casters. Rows of the column-vector matrix.
+    // World to light space, rows of the column-vector matrix. A distant light's: x and y in
+    // world units across the light, z its depth in [0, 1] over the casters. A local light's:
+    // its frame about its centre, z out of a rect or disk light's lit side.
     float4 light_space[3];
-    // Per level, its first tile counted from the light-space origin, in that level's tiles.
+    // Per level, its first tile counted from the light-space origin, in that level's tiles;
+    // 0 for a local light.
     int2 origin[LEVELS];
-    // The finest level's exponent and how many levels follow it.
+    // A distant light's finest level's exponent, and how many levels follow it.
     int level;
     uint levels;
     // A pixel's world width per unit of camera clip w.
     float pixel;
     // The shadow-link bit casters must carry, 0 when every mesh casts.
     uint link;
-    // LEVELS × TILES² per shadow, level by level, row by row: a page or NO_PAGE.
+    // 0 for a distant light, else 6, or 5 for a rect or disk light, whose -z face sees
+    // nothing it lights.
+    uint faces;
+    // A local light's clipping distances along a face's axis.
+    float near;
+    float far;
+    uint pad;
+    // LEVELS × TILEMAP per shadow (start()): a page or NO_PAGE.
     uint *tiles;
     Atomic<uint> *pool;
 };
@@ -83,6 +96,59 @@ float3 to_light(Shadow *s, float3 P)
 {
     float4 p = float4(P, 1);
     return float3(dot(s->light_space[0], p), dot(s->light_space[1], p), dot(s->light_space[2], p));
+}
+
+// Tiles across level i, or a local light's LOD i.
+uint tiles_across(Shadow *s, uint i)
+{
+    return s->faces == 0 ? TILES : TILES >> i;
+}
+
+// Where level i's tiles start in a shadow's tiles: a distant light's level by level, a local
+// light's LOD by LOD, six faces each, face by face, then row by row.
+uint start(Shadow *s, uint i)
+{
+    if (s->faces == 0)
+        return i * TILEMAP;
+    // 6 × the tiles of LODs 0 to i - 1: 4096 (1 - 4^-i) / 3 × 6.
+    return 8192 - (8192 >> (2 * i));
+}
+
+uint tile_index(Shadow *s, uint i, uint face, int2 t)
+{
+    uint across = tiles_across(s, i);
+    return start(s, i) + (face * across + t.y) * across + t.x;
+}
+
+// A face's axes in a local light's space: x and y across it, z along it.
+float3 on_face(uint face, float3 q)
+{
+    switch (face)
+    {
+    case 0: return q;
+    case 1: return float3(q.y, q.z, q.x);
+    case 2: return float3(q.y, q.z, -q.x);
+    case 3: return float3(q.z, q.x, q.y);
+    case 4: return float3(q.z, q.x, -q.y);
+    default: return float3(q.x, q.y, -q.z);
+    }
+}
+
+// The face a direction from the light's centre meets, 0 for +z (on_face's order).
+uint face_of(float3 q)
+{
+    float3 a = abs(q);
+    if (a.z >= a.x && a.z >= a.y)
+        return q.z > 0 ? 0 : 5;
+    if (a.x >= a.y)
+        return q.x > 0 ? 1 : 2;
+    return q.y > 0 ? 3 : 4;
+}
+
+// A point across a face, in [-1, 1], in its tiles at LOD i.
+float2 face_tiles(float2 uv, uint across)
+{
+    return (uv * 0.5 + 0.5) * float(across);
 }
 
 // A tile's world width at level i: a power of two, so dividing by it is exact.
@@ -112,6 +178,33 @@ uint level_at(Shadow *s, float3 q, float w)
     while (i + 1 < s->levels && !inside(tile_at(s, q.xy, i)))
         i++;
     return i;
+}
+
+// The finest LOD whose texels are no wider than a pixel at a point depth along its face from
+// a local light; a face is 2 depth wide.
+uint lod_at(Shadow *s, float depth, float w)
+{
+    float want = floor(log2(w * s->pixel * TILES * PAGE / (2 * depth)));
+    return uint(clamp(want, 0, float(s->levels - 1)));
+}
+
+// A texel's world width at level i; for a local light, at a point depth along its face.
+float texel_width(Shadow *s, uint i, float depth)
+{
+    return s->faces == 0 ? tile_width(s, i) / PAGE : 2 * depth * exp2(float(i)) / (TILES * PAGE);
+}
+
+// Past its reach it has faded to 0; a rect or disk lights only the cross(u, v) side.
+bool lit_by(Light light, float3 P, uint link)
+{
+    if ((light.link & link) != light.link)
+        return false;
+    if (light.shape == DISTANT)
+        return true;
+    float3 d = P - light.position;
+    if (dot(d, d) >= light.reach * light.reach)
+        return false;
+    return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
 }
 
 // The side of a light tile in pixels (src/light.rs TILE).

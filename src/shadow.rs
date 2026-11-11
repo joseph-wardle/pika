@@ -1,6 +1,8 @@
-//! Virtual shadow maps for distant lights (`shaders/shadow.slang`): a clipmap of `LEVELS`
-//! square levels around the camera, each `TILES`² tiles. Only the tiles the camera's pixels
-//! read hold a page of the pool, and every held page is drawn anew each frame.
+//! Virtual shadow maps (`shaders/shadow.slang`): for a distant light, a clipmap of up to
+//! `LEVELS` square levels around the camera, each `TILES`² tiles; for a sphere, rect, disk or
+//! cylinder light, a cube of faces around its centre to its reach, each face `LOCAL_LEVELS`
+//! LODs of `TILES`² tiles and coarser. Only the tiles the camera's pixels read hold a page of
+//! the one pool, and every held page is drawn anew each frame.
 
 use ash::vk;
 
@@ -13,14 +15,19 @@ use crate::view::View;
 
 /// `shaders/view.slang`'s constants.
 const LEVELS: usize = 16;
+const LOCAL_LEVELS: u32 = 6;
 const TILES: u32 = 32;
+/// Faces' bounds per shadow and level.
+const FACES: u64 = 6;
 const PAGE: u32 = 256;
 /// A pool page's bytes, as `pika:shadowPool` counts them.
 const PAGE_BYTES: u64 = PAGE as u64 * PAGE as u64 * 4;
 /// Draws a frame lists, one per caster instance and page it meets: 14 MB of lists.
 const CAPACITY: u32 = 1 << 19;
-/// `Pages`' state words.
-const STATE: u64 = 5 * 4;
+/// `Pages`' state words (`shaders/shadow.slang` `MARKED`): five the host reads, then the
+/// counts per level.
+const STATE: usize = 5 + 2 * LEVELS * LEVELS + 3 * LEVELS;
+const READ: u64 = 5 * 4;
 
 /// `shaders/view.slang`'s `Shadow`.
 #[repr(C)]
@@ -32,6 +39,10 @@ pub struct Shadow {
     levels: u32,
     pixel: f32,
     link: u32,
+    faces: u32,
+    near: f32,
+    far: f32,
+    pad: u32,
     tiles: vk::DeviceAddress,
     pool: vk::DeviceAddress,
 }
@@ -67,7 +78,7 @@ struct Push {
     pad: u32,
 }
 
-/// A shadowed distant light, by its index among the view's lights.
+/// A shadowed light, by its index among the view's lights.
 pub struct Caster {
     pub light: usize,
     /// Its shadow-link bit, 0 when every mesh casts.
@@ -97,14 +108,16 @@ pub struct Shadows {
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
     mark: gpu::Compute,
-    allocate: gpu::Compute,
+    count: gpu::Compute,
+    choose: gpu::Compute,
+    assign: gpu::Compute,
     clear: gpu::Compute,
     cast: gpu::Compute,
     pool: Option<Pool>,
     constants: Buffer,
     table: Option<Buffer>,
     tiles: Option<Buffer>,
-    /// Per shadow and level, its held tiles' bounds.
+    /// Per shadow, level and face, its held tiles' bounds.
     bounds: Option<Buffer>,
     depth: Option<Buffer>,
     view: Option<View>,
@@ -134,7 +147,9 @@ impl Shadows {
             layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
             mark: compute(c"mark")?,
-            allocate: compute(c"allocate")?,
+            count: compute(c"count")?,
+            choose: compute(c"choose")?,
+            assign: compute(c"assign")?,
             clear: compute(c"clear")?,
             cast: compute(c"cast")?,
             pool: None,
@@ -150,8 +165,8 @@ impl Shadows {
             view: None,
             draws: Buffer::device_local(device, CAPACITY as u64 * draw_bytes, indirect)?,
             pairs: Buffer::device_local(device, CAPACITY as u64 * 8, storage)?,
-            state: Buffer::device_local(device, STATE, indirect | copied)?,
-            counts: Buffer::host(device, STATE, vk::BufferUsageFlags::TRANSFER_DST, host)?,
+            state: Buffer::device_local(device, (STATE * 4) as u64, indirect | copied)?,
+            counts: Buffer::host(device, READ, vk::BufferUsageFlags::TRANSFER_DST, host)?,
             shadows: Vec::new(),
             unproject: [[0.0; 4]; 4],
             extent: [0; 2],
@@ -214,8 +229,9 @@ impl Shadows {
         Ok(())
     }
 
-    /// Fits each caster's clipmap to the camera and the scene and points its light at it;
-    /// the lights are then ready for the camera's view, whose shadows are at `table`.
+    /// Fits each distant caster's clipmap to the camera and the scene and each local one's
+    /// cube to its light, and points its light at it; the lights are then ready for the
+    /// camera's view, whose shadows are at `table`.
     #[allow(clippy::too_many_arguments)]
     pub fn fit(
         &mut self,
@@ -247,9 +263,12 @@ impl Shadows {
             0.0 => projection[14] / (projection[10] - 1.0),
             _ => 1.0,
         };
+        let (distant, local): (Vec<_>, Vec<_>) = casters
+            .iter()
+            .partition(|c| lights[c.light].shape == light::DISTANT);
         let mut fitted = Vec::new();
         let mut coarsest = i32::MIN;
-        for c in casters {
+        for c in distant {
             let toward = lights[c.light].position.map(f64::from);
             let instances = geometry.instances();
             let Some((rows, reach)) = light_space(toward, centre, instances, c.shadow) else {
@@ -263,15 +282,15 @@ impl Shadows {
             coarsest = coarsest.max(level as i32);
             fitted.push((c, rows));
         }
-        // Every shadow has the same levels, as the allocation needs.
+        // Every distant shadow has the same levels, which keeps a level's pages at one size.
         let want = (near.max(f64::MIN_POSITIVE) * pixel * (TILES * PAGE) as f64).log2();
         let finest =
             (want.floor() as i32).clamp(coarsest.saturating_sub(LEVELS as i32 - 1), coarsest);
         let levels = coarsest.saturating_sub(finest) as u32 + 1;
         let tile_bytes = LEVELS as u64 * TILES as u64 * TILES as u64 * 4;
-        let count = fitted.len().max(1) as u64;
+        let count = (fitted.len() + local.len()).max(1) as u64;
         grow(device, &mut self.tiles, count * tile_bytes)?;
-        grow(device, &mut self.bounds, count * LEVELS as u64 * 16)?;
+        grow(device, &mut self.bounds, count * LEVELS as u64 * FACES * 16)?;
         grow(device, &mut self.table, count * size_of::<Shadow>() as u64)?;
         grow(
             device,
@@ -279,24 +298,50 @@ impl Shadows {
             extent[0] as u64 * extent[1] as u64 * 4,
         )?;
         let tiles = self.tiles.as_ref().map_or(0, |t| t.address);
-        for (j, (c, rows)) in fitted.into_iter().enumerate() {
+        // A local light's, which a distant one's levels then replace.
+        let shadow = |j: usize, rows: [[f64; 4]; 3], c: &Caster| Shadow {
+            light_space: rows.map(|r| r.map(|v| v as f32)),
+            origin: [[0; 2]; LEVELS],
+            level: 0,
+            levels: LOCAL_LEVELS,
+            pixel: pixel as f32,
+            link: c.shadow,
+            faces: 0,
+            near: 0.0,
+            far: 0.0,
+            pad: 0,
+            tiles: tiles + j as u64 * tile_bytes,
+            pool: pool.texels.address,
+        };
+        let mut shadows = Vec::new();
+        for (c, rows) in fitted {
             let across = [0, 1].map(|k| dot3(&rows[k], centre));
             let origin = std::array::from_fn(|i| {
                 let width = f64::from(finest + i as i32).exp2() / TILES as f64;
                 across.map(|v| (v / width).floor() as i32 - (TILES / 2) as i32)
             });
-            lights[c.light].shadow = j as u32;
-            self.shadows.push(Shadow {
-                light_space: rows.map(|r| r.map(|v| v as f32)),
+            lights[c.light].shadow = shadows.len() as u32;
+            shadows.push(Shadow {
                 origin,
                 level: finest,
                 levels,
-                pixel: pixel as f32,
-                link: c.shadow,
-                tiles: tiles + j as u64 * tile_bytes,
-                pool: pool.texels.address,
+                ..shadow(shadows.len(), rows, c)
             });
         }
+        for c in local {
+            let l = &lights[c.light];
+            let one_sided = l.shape == light::RECT || l.shape == light::DISK;
+            let s = Shadow {
+                faces: if one_sided { 5 } else { 6 },
+                // A caster inside the light's own shape would hide all of it.
+                near: l.radius.max(l.reach * 1e-4),
+                far: l.reach,
+                ..shadow(shadows.len(), local_space(l), c)
+            };
+            lights[c.light].shadow = shadows.len() as u32;
+            shadows.push(s);
+        }
+        self.shadows = shadows;
         let capacity = light::capacity(0, [1, 1]);
         if !self.view.as_ref().is_some_and(|v| v.fits(bound, capacity)) {
             self.view = None;
@@ -354,7 +399,8 @@ impl Shadows {
             capacity: CAPACITY,
             pad: 0,
         };
-        let state = [0, 0, 0, LEVELS as u32, 0];
+        let mut state = [0; STATE];
+        state[3] = LEVELS as u32;
         // SAFETY: `Pages`, `Shadow` and the state are plain `repr(C)` data without padding.
         let (pages, shadows, state) = unsafe {
             (
@@ -363,7 +409,7 @@ impl Shadows {
                     self.shadows.as_ptr().cast::<u8>(),
                     size_of_val(&*self.shadows),
                 ),
-                std::slice::from_raw_parts(state.as_ptr().cast::<u8>(), STATE as usize),
+                std::slice::from_raw_parts(state.as_ptr().cast::<u8>(), size_of_val(&state)),
             )
         };
         let tile_bytes = self.shadows.len() as u64 * LEVELS as u64 * (TILES * TILES * 4) as u64;
@@ -380,7 +426,7 @@ impl Shadows {
                 cb,
                 bounds.raw,
                 0,
-                self.shadows.len() as u64 * LEVELS as u64 * 16,
+                self.shadows.len() as u64 * LEVELS as u64 * FACES * 16,
                 !0,
             );
         }
@@ -416,13 +462,17 @@ impl Shadows {
             );
         let [w, h] = self.extent;
         let pixels = 0..w * h;
-        // One group, as `allocate` expects.
-        let group = 0..64;
+        let entries = 0..self.shadows.len() as u32 * LEVELS as u32 * TILES * TILES;
         let texels = 0..pool.pages * PAGE * PAGE;
-        let instances = 0..geometry.instance_count * self.shadows[0].levels;
+        let instances = 0..geometry.instance_count * LEVELS as u32;
         self.mark.record(cb, &[pixels], push);
         barrier(d, cb, computed);
-        self.allocate.record(cb, &[group], push);
+        self.count.record(cb, std::slice::from_ref(&entries), push);
+        barrier(d, cb, computed);
+        let thread = 0..1;
+        self.choose.record(cb, &[thread], push);
+        barrier(d, cb, computed);
+        self.assign.record(cb, &[entries], push);
         barrier(d, cb, computed);
         self.clear.record(cb, &[texels], push);
         self.cast.record(cb, &[instances], push);
@@ -445,7 +495,7 @@ impl Shadows {
         let region = vk::BufferCopy {
             src_offset: 0,
             dst_offset: 0,
-            size: STATE,
+            size: READ,
         };
         // SAFETY: `cb` is recording outside rendering and both buffers hold the state.
         unsafe { d.cmd_copy_buffer(cb, self.state.raw, self.counts.raw, &[region]) };
@@ -530,15 +580,18 @@ impl Shadows {
             return Counts::default();
         }
         let b = self.counts.bytes();
-        let [draws, held, wanted, dropped, past] =
+        let [draws, after, wanted, dropped, past] =
             std::array::from_fn(|i| u32::from_ne_bytes(b[4 * i..4 * i + 4].try_into().unwrap()));
         let pages = self.pool.as_ref().map_or(0, |p| p.pages);
         if wanted > pages && !self.warned[0] {
             self.warned[0] = true;
-            let levels = self.shadows.first().map_or(0, |s| s.levels);
-            let consequence = match levels.saturating_sub(dropped) {
-                0 => "some go unshadowed".to_owned(),
-                n => format!("the farthest {n} of their {levels} levels drop a LOD"),
+            let levels = self.shadows.iter().map(|s| s.levels).max().unwrap_or(0);
+            let consequence = if after > pages {
+                "some go unshadowed".to_owned()
+            } else {
+                // The coarsest level cannot drop.
+                let n = levels.saturating_sub(1).saturating_sub(dropped);
+                format!("the farthest {n} of their {levels} levels drop a LOD")
             };
             eprintln!(
                 "pika: warning: shadows want {wanted} pages and pika:shadowPool holds {pages}; \
@@ -554,7 +607,7 @@ impl Shadows {
         }
         Counts {
             wanted,
-            held,
+            held: after.min(pages),
             draws: draws.min(CAPACITY),
         }
     }
@@ -658,6 +711,21 @@ fn light_space<'a>(
     Some((rows, reach))
 }
 
+/// World-to-light rows for a local light: its frame about its centre, z out of a rect or
+/// disk light's lit side, whose cube then needs no -z face.
+fn local_space(l: &Light) -> [[f64; 4]; 3] {
+    let c = l.position.map(f64::from);
+    let axes = if l.shape == light::RECT || l.shape == light::DISK {
+        let (u, v) = (l.u.map(f64::from), l.v.map(f64::from));
+        let z = normalize(cross(u, v));
+        let x = normalize(u);
+        [x, cross(z, x), z]
+    } else {
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+    };
+    axes.map(|a| [a[0], a[1], a[2], -dot(a, c)])
+}
+
 /// Gauss–Jordan with partial pivoting; `None` when `m` is singular.
 fn invert(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
     let mut a = *m;
@@ -731,5 +799,29 @@ mod tests {
         }
         // Negative control: a repeated row has no inverse.
         assert!(invert(&[m[0], m[0], m[2], m[3]]).is_none());
+    }
+
+    /// A rect light's cube needs no -z face only if z points out of its lit side.
+    #[test]
+    fn a_rect_lights_frame_faces_its_lit_side() {
+        let mut l = Light::sphere([1.0, 2.0, 3.0], 0.0, [1.0; 3]);
+        l.shape = light::RECT;
+        // Lit on the u × v side: -y.
+        l.u = [1.0, 0.0, 0.0];
+        l.v = [0.0, 0.0, 0.5];
+        let rows = local_space(&l);
+        let to = |p: [f64; 3]| rows.map(|r| dot3(&r, p));
+        assert!(to([1.0, 2.0, 3.0]).iter().all(|v| v.abs() < 1e-12));
+        let below = to([1.2, 1.0, 3.1]);
+        assert!(below[2] > 0.9, "{below:?}");
+        // Negative control: the unlit side is behind the frame.
+        assert!(to([1.0, 3.0, 3.0])[2] < 0.0);
+        // The frame is orthonormal.
+        for (i, a) in rows.iter().enumerate() {
+            for (j, b) in rows.iter().enumerate() {
+                let d: f64 = (0..3).map(|k| a[k] * b[k]).sum();
+                assert!((d - f64::from(u8::from(i == j))).abs() < 1e-12);
+            }
+        }
     }
 }
