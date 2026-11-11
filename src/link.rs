@@ -1,5 +1,7 @@
-//! Light linking: each distinct lightLink collection gets one bit of a mask, and the
-//! light loop skips a light whose bit the mesh lacks.
+//! Light and shadow linking: each distinct lightLink collection gets one bit of a
+//! mask, and the light loop skips a light whose bit the mesh lacks; shadowLink
+//! collections get bits of a second mask, and a light's shadows skip the meshes
+//! lacking its bit.
 
 use std::collections::BTreeMap;
 use std::sync::Once;
@@ -8,53 +10,81 @@ use crate::store::{Light, Mesh, Store};
 
 const BITS: usize = 32;
 
+/// A light's bits, one or none per mask, or a mesh's: the collections it is in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Mask {
+    pub light: u32,
+    pub shadow: u32,
+}
+
 pub struct Links {
-    bits: BTreeMap<String, u32>,
+    light: BTreeMap<String, u32>,
+    shadow: BTreeMap<String, u32>,
 }
 
 impl Links {
-    /// Bits in token order, so they do not hang on the order lights were
-    /// added in. Past `BITS` collections, a light lights every mesh.
     pub fn new(store: &Store) -> Self {
-        let mut tokens: Vec<&str> = (store.lights().values())
-            .filter_map(|l| l.link.as_deref())
-            .filter(|l| !l.is_empty())
-            .collect();
-        tokens.sort_unstable();
-        tokens.dedup();
-        if tokens.len() > BITS {
-            static WARNED: Once = Once::new();
-            WARNED.call_once(|| {
-                eprintln!(
-                    "pika: warning: the lights link {} collections, and Pika links {BITS}; the lights of the rest light every mesh (warned once)",
-                    tokens.len()
-                )
-            });
+        let links = || store.lights().values().filter_map(|l| l.link.as_ref());
+        static LIGHT: Once = Once::new();
+        static SHADOW: Once = Once::new();
+        Self {
+            light: bits(links().map(|l| l.light.as_str()), "light", &LIGHT),
+            shadow: bits(links().map(|l| l.shadow.as_str()), "shadow", &SHADOW),
         }
-        let bits = (tokens.into_iter().take(BITS).enumerate())
-            .map(|(i, t)| (t.to_owned(), 1 << i))
-            .collect();
-        Self { bits }
     }
 
-    /// The light's bit, or 0 when it lights every mesh.
-    pub fn light(&self, light: &Light) -> u32 {
-        let link = light.link.as_deref().unwrap_or("");
-        self.bits.get(link).copied().unwrap_or(0)
+    /// Each bit 0 when the light reaches every mesh.
+    pub fn light(&self, light: &Light) -> Mask {
+        let bit = |bits: &BTreeMap<String, u32>, token: &str| bits.get(token).copied().unwrap_or(0);
+        let link = light.link.as_ref();
+        Mask {
+            light: bit(&self.light, link.map_or("", |l| &l.light)),
+            shadow: bit(&self.shadow, link.map_or("", |l| &l.shadow)),
+        }
     }
 
-    pub fn mesh(&self, mesh: &Mesh) -> u32 {
-        (mesh.categories.iter().flatten())
-            .filter_map(|c| self.bits.get(c))
-            .fold(0, |mask, bit| mask | bit)
+    pub fn mesh(&self, mesh: &Mesh) -> Mask {
+        let mask = |bits: &BTreeMap<String, u32>| {
+            (mesh.categories.iter().flatten())
+                .filter_map(|c| bits.get(c))
+                .fold(0, |mask, bit| mask | bit)
+        };
+        Mask {
+            light: mask(&self.light),
+            shadow: mask(&self.shadow),
+        }
     }
+}
+
+/// Bits in token order, so they do not hang on the order lights were added in.
+/// Past `BITS` collections, a light reaches every mesh.
+fn bits<'a>(
+    tokens: impl Iterator<Item = &'a str>,
+    kind: &str,
+    warned: &Once,
+) -> BTreeMap<String, u32> {
+    let mut tokens: Vec<&str> = tokens.filter(|t| !t.is_empty()).collect();
+    tokens.sort_unstable();
+    tokens.dedup();
+    if tokens.len() > BITS {
+        warned.call_once(|| {
+            eprintln!(
+                "pika: warning: the lights {kind}-link {} collections, and Pika links {BITS}; the lights of the rest reach every mesh (warned once)",
+                tokens.len()
+            )
+        });
+    }
+    (tokens.into_iter().take(BITS).enumerate())
+        .map(|(i, t)| (t.to_owned(), 1 << i))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::Link;
 
-    /// As the light loop decides it.
+    /// As the light loop decides it, and as shadows will.
     fn reaches(light: u32, mesh: u32) -> bool {
         light & mesh == light
     }
@@ -64,7 +94,11 @@ mod tests {
         let lights = (links.iter().enumerate())
             .map(|(i, link)| {
                 let id = store.insert_light(format!("/light{i}"));
-                store.set_light_link(id, (*link).into()).unwrap();
+                let link = Link {
+                    light: (*link).into(),
+                    shadow: String::new(),
+                };
+                store.set_light_link(id, link).unwrap();
                 id
             })
             .collect();
@@ -83,9 +117,9 @@ mod tests {
         let links = Links::new(store);
         (meshes.iter())
             .map(|m| {
-                let mesh = links.mesh(&store.meshes()[m]);
+                let mesh = links.mesh(&store.meshes()[m]).light;
                 (lights.iter())
-                    .map(|l| reaches(links.light(&store.lights()[l]), mesh))
+                    .map(|l| reaches(links.light(&store.lights()[l]).light, mesh))
                     .collect()
             })
             .collect()
@@ -115,14 +149,17 @@ mod tests {
         // A mesh not yet synced is in no collection.
         let mut store = store;
         let unsynced = store.insert_mesh("/unsynced".into());
-        assert_eq!(Links::new(&store).mesh(&store.meshes()[&unsynced]), 0);
+        assert_eq!(
+            Links::new(&store).mesh(&store.meshes()[&unsynced]),
+            Mask::default()
+        );
     }
 
     #[test]
     fn bits_follow_tokens_not_light_order() {
         let (a, la, _) = store(&["b", "a"], &[]);
         let (b, lb, _) = store(&["a", "b"], &[]);
-        let bit = |s: &Store, id: u64| Links::new(s).light(&s.lights()[&id]);
+        let bit = |s: &Store, id: u64| Links::new(s).light(&s.lights()[&id]).light;
         assert_eq!(bit(&a, la[0]), bit(&b, lb[1]));
         assert_ne!(bit(&a, la[0]), bit(&a, la[1]));
     }
@@ -137,15 +174,67 @@ mod tests {
         assert!(lit[BITS]);
     }
 
+    /// A light's shadow link picks its casters apart from what it lights: the sun lights
+    /// both meshes, but only the one in its shadowLink collection casts.
+    #[test]
+    fn shadow_links_pick_casters_apart_from_light_links() {
+        let link = |light: &str, shadow: &str| Link {
+            light: light.into(),
+            shadow: shadow.into(),
+        };
+        let tokens = |t: &[&str]| t.iter().map(|&t| t.to_owned()).collect();
+        let mut store = Store::new();
+        let sun = store.insert_light("/sun".into());
+        let key = store.insert_light("/key".into());
+        let caster = store.insert_mesh("/caster".into());
+        let window = store.insert_mesh("/window".into());
+        store.set_light_link(sun, link("", "group_1")).unwrap();
+        store.set_light_link(key, link("group_0", "")).unwrap();
+        store
+            .set_categories(caster, tokens(&["group_0", "group_1"]))
+            .unwrap();
+        store.set_categories(window, tokens(&["group_0"])).unwrap();
+        let masks = |store: &Store| {
+            let links = Links::new(store);
+            let light = |id| links.light(&store.lights()[&id]);
+            let mesh = |id| links.mesh(&store.meshes()[&id]);
+            (light(sun), light(key), mesh(caster), mesh(window))
+        };
+        let (s, k, c, w) = masks(&store);
+        assert!(reaches(s.light, c.light) && reaches(s.light, w.light));
+        assert!(reaches(s.shadow, c.shadow));
+        assert!(
+            !reaches(s.shadow, w.shadow),
+            "the window casts the sun's shadow"
+        );
+        assert!(reaches(k.light, w.light) && reaches(k.shadow, w.shadow));
+        // Negative control: with the link removed, the window casts the sun's shadow.
+        store.set_light_link(sun, link("", "")).unwrap();
+        let (s, _, _, w) = masks(&store);
+        assert!(reaches(s.shadow, w.shadow));
+    }
+
     #[test]
     fn links_move_the_draws() {
         let (mut store, lights, meshes) = store(&["group_0"], &[&[]]);
         store.take_moved();
-        store.set_light_link(lights[0], "group_0".into()).unwrap();
+        let link = |light: &str, shadow: &str| Link {
+            light: light.into(),
+            shadow: shadow.into(),
+        };
+        store
+            .set_light_link(lights[0], link("group_0", ""))
+            .unwrap();
         store.set_categories(meshes[0], Vec::new()).unwrap();
         assert!(!store.take_moved().draws, "an unchanged link moves nothing");
-        store.set_light_link(lights[0], "group_1".into()).unwrap();
+        store
+            .set_light_link(lights[0], link("group_1", ""))
+            .unwrap();
         assert!(store.take_moved().draws);
+        store
+            .set_light_link(lights[0], link("group_1", "group_2"))
+            .unwrap();
+        assert!(store.take_moved().draws, "a shadow link moves the casters");
         store
             .set_categories(meshes[0], vec!["group_1".into()])
             .unwrap();

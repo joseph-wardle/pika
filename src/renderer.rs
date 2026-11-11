@@ -334,7 +334,7 @@ impl Renderer {
         let links = Links::new(&self.store);
         let lights: Vec<_> = (self.store.lights().values())
             .filter_map(|l| {
-                let link = links.light(l);
+                let link = links.light(l).light;
                 light::resolve(l).map(|r| light::Light { link, ..r })
             })
             .collect();

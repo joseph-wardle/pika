@@ -500,6 +500,7 @@ mod tests {
             normalize,
             shape: Shape::Distant { angle },
             visible: true,
+            shadow: true,
         }
     }
 

@@ -692,8 +692,10 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     // A changed link is a collection change, which hosts may send as a
     // params change too.
     if (bits & (DirtyParams | DirtyCollection)) {
-        TfToken link = light_param(delegate, id, HdTokens->lightLink, TfToken());
-        _pika.report(pika_light_link(renderer, _id, link.GetText()), id.GetString() + " link");
+        TfToken light = light_param(delegate, id, HdTokens->lightLink, TfToken());
+        TfToken shadow = light_param(delegate, id, HdTokens->shadowLink, TfToken());
+        _pika.report(pika_light_link(renderer, _id, light.GetText(), shadow.GetText()),
+                     id.GetString() + " link");
     }
     if (!(bits & DirtyParams))
         return;
@@ -715,6 +717,7 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);
     params.length = light_param(delegate, id, HdLightTokens->length, 1.0f);
     params.visible = delegate->GetVisible(id);
+    params.shadow = light_param(delegate, id, HdLightTokens->shadowEnable, true);
     _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
 }
 

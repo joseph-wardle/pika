@@ -131,6 +131,8 @@ typedef struct pika_light {
     float height;
     float length;
     bool visible;
+    // UsdLux's shadow:enable.
+    bool shadow;
 } pika_light;
 
 // Bottom row first; `pixels` is null when the AOV is not bound.
@@ -239,9 +241,10 @@ int pika_light_new(const pika_renderer *renderer, const char *path, uint64_t *ou
 int pika_light_free(const pika_renderer *renderer, uint64_t id);
 int pika_light_params(const pika_renderer *renderer, uint64_t id,
                       const pika_light *params);
-// The lightLink collection's token, the category of the meshes it lights; ""
-// lights every mesh.
-int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *link);
+// The lightLink collection's token, the category of the meshes it lights, and the
+// shadowLink collection's, of the meshes that cast its shadows; "" reaches every mesh.
+int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *light,
+                    const char *shadow);
 // A distant light shines down its -z axis.
 int pika_light_transform(const pika_renderer *renderer, uint64_t id,
                          const double matrix[16]);

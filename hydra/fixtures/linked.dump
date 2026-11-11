@@ -30,20 +30,20 @@ mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tr
   normals none
   texcoord none
 light /world/fill
-  visible true
+  visible true shadow true
   intensity 50000 exposure 0 color 1 1 1 normalize false
   distant angle 0.53
-  link ""
+  link "" shadow "group_0"
   transform
     1 0 0 0
     0 1 0 0
     0 0 1 0
     0 0 0 1
 light /world/key
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 0.5
-  link "group_0"
+  link "group_0" shadow ""
   transform
     1 0 0 0
     0 1 0 0
@@ -90,20 +90,20 @@ mesh /world/right
   normals none
   texcoord none
 light /world/rim
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   rect width 1 height 1
-  link "group_1"
+  link "group_1" shadow ""
   transform
     1 0 0 0
     0 1 0 0
     0 0 1 0
     0 0 0 1
 light /world/spot
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 0.5
-  link "group_2"
+  link "group_2" shadow ""
   transform
     1 0 0 0
     0 1 0 0
@@ -141,20 +141,20 @@ mesh /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tr
   normals none
   texcoord none
 light /world/fill
-  visible true
+  visible true shadow true
   intensity 50000 exposure 0 color 1 1 1 normalize false
   distant angle 0.53
-  link ""
+  link "" shadow "group_1"
   transform
     1 0 0 0
     0 1 0 0
     0 0 1 0
     0 0 0 1
 light /world/key
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 0.5
-  link "group_3"
+  link "group_3" shadow ""
   transform
     1 0 0 0
     0 1 0 0
@@ -190,7 +190,7 @@ mesh /world/right
     0 0 1 0
     0 0 0 1
   material ""
-  categories ["group_3"]
+  categories ["group_3", "group_1"]
   topology none rightHanded
     face_vertex_counts 3
     face_vertex_indices 0 1 2
@@ -201,20 +201,20 @@ mesh /world/right
   normals none
   texcoord none
 light /world/rim
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   rect width 1 height 1
-  link ""
+  link "" shadow ""
   transform
     1 0 0 0
     0 1 0 0
     0 0 1 0
     0 0 0 1
 light /world/spot
-  visible true
+  visible true shadow true
   intensity 1 exposure 0 color 1 1 1 normalize false
   sphere radius 0.5
-  link "group_2"
+  link "group_2" shadow ""
   transform
     1 0 0 0
     0 1 0 0

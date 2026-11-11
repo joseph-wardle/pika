@@ -43,7 +43,8 @@ pub struct Mesh {
     /// Hydra syncs only prims of the tags a pass draws, leaving the rest stale (a proxy
     /// is inserted but never synced), so drawing must filter by tag.
     pub render_tag: Option<String>,
-    /// Light-link collection tokens; lights linked to one of them, or to all, light it.
+    /// Light- and shadow-link collection tokens; lights linked to one of them, or to
+    /// all, light it or take its shadow.
     pub categories: Option<Vec<String>>,
 }
 
@@ -104,8 +105,16 @@ pub struct Light {
     pub path: String,
     pub params: Option<LightParams>,
     pub transform: Option<[f64; 16]>,
-    /// Its lightLink collection token; empty when it lights every mesh.
-    pub link: Option<String>,
+    pub link: Option<Link>,
+}
+
+/// Collection tokens, each empty when the light reaches every mesh.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Link {
+    /// The lightLink collection's: the meshes it lights.
+    pub light: String,
+    /// The shadowLink collection's: the meshes that cast its shadows.
+    pub shadow: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -117,6 +126,8 @@ pub struct LightParams {
     pub shape: Shape,
     /// Hydra's visibility, which the params dirty bit covers too.
     pub visible: bool,
+    /// UsdLux's shadow:enable.
+    pub shadow: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -312,7 +323,8 @@ pub struct Moved {
     /// A visibility, render tag, instancing or light link (instances carry links) changed.
     pub draws: bool,
     pub materials: BTreeSet<u64>,
-    pub lights: bool,
+    /// Lights added, removed or changed.
+    pub lights: BTreeSet<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -767,38 +779,43 @@ impl Store {
             link: None,
         };
         self.lights.insert(id, light);
-        self.moved.lights = true;
+        self.moved.lights.insert(id);
         id
     }
 
     pub fn remove_light(&mut self, id: u64) -> Result<(), String> {
         let light = self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
         self.stats.removed += 1;
-        self.moved.lights = true;
-        self.moved.draws |= light.link.is_some_and(|l| !l.is_empty());
+        self.moved.lights.insert(id);
+        self.moved.draws |= light.link.is_some_and(|l| l != Link::default());
         Ok(())
     }
 
     pub fn set_light_params(&mut self, id: u64, params: LightParams) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
         let bytes = size_of::<LightParams>();
-        self.moved.lights |= write(&mut self.stats.light, &mut light.params, params, bytes);
+        if write(&mut self.stats.light, &mut light.params, params, bytes) {
+            self.moved.lights.insert(id);
+        }
         Ok(())
     }
 
     pub fn set_light_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
-        self.moved.lights |= write(&mut self.stats.light, &mut light.transform, transform, 128);
+        if write(&mut self.stats.light, &mut light.transform, transform, 128) {
+            self.moved.lights.insert(id);
+        }
         Ok(())
     }
 
     /// A link moves the meshes too: collection bits are assigned over every light's link.
-    pub fn set_light_link(&mut self, id: u64, link: String) -> Result<(), String> {
-        let bytes = link.len();
+    pub fn set_light_link(&mut self, id: u64, link: Link) -> Result<(), String> {
+        let bytes = link.light.len() + link.shadow.len();
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
-        let moved = write(&mut self.stats.light, &mut light.link, link, bytes);
-        self.moved.lights |= moved;
-        self.moved.draws |= moved;
+        if write(&mut self.stats.light, &mut light.link, link, bytes) {
+            self.moved.lights.insert(id);
+            self.moved.draws = true;
+        }
         Ok(())
     }
 
@@ -1076,7 +1093,7 @@ impl fmt::Display for Light {
         writeln!(f, "light {}", self.path)?;
         match &self.params {
             Some(p) => {
-                writeln!(f, "  visible {}", p.visible)?;
+                writeln!(f, "  visible {} shadow {}", p.visible, p.shadow)?;
                 writeln!(
                     f,
                     "  intensity {} exposure {} color{} normalize {}",
@@ -1100,7 +1117,7 @@ impl fmt::Display for Light {
             None => writeln!(f, "  params {UNSYNCED}")?,
         }
         match &self.link {
-            Some(link) => writeln!(f, "  link {link:?}")?,
+            Some(link) => writeln!(f, "  link {:?} shadow {:?}", link.light, link.shadow)?,
             None => writeln!(f, "  link {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())
@@ -1190,7 +1207,9 @@ mod tests {
     fn lights_move_only_when_they_change() {
         let mut store = Store::new();
         let id = store.insert_light("/sun".into());
-        assert!(store.take_moved().lights);
+        let other = store.insert_light("/fill".into());
+        let both = BTreeSet::from([id, other]);
+        assert_eq!(store.take_moved().lights, both);
         let params = LightParams {
             intensity: 1.0,
             exposure: 0.0,
@@ -1198,16 +1217,20 @@ mod tests {
             normalize: false,
             shape: Shape::Distant { angle: 0.53 },
             visible: true,
+            shadow: true,
         };
         let mut transform = [0.0; 16];
         transform[0] = 1.0;
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
-        assert!(store.take_moved().lights);
+        store.set_light_params(other, params).unwrap();
+        store.set_light_link(other, Link::default()).unwrap();
+        assert_eq!(store.take_moved().lights, both);
         // Hydra resends a light's fields unchanged, as usdview does its camera light: no move.
         store.end_sync();
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
+        store.set_light_link(other, Link::default()).unwrap();
         assert_eq!(store.take_moved(), Moved::default());
         let stats = store.end_sync();
         assert!(stats.light.pulled > 0 && stats.light.redundant == stats.light.pulled);
@@ -1216,11 +1239,18 @@ mod tests {
             ..params
         };
         store.set_light_params(id, brighter).unwrap();
-        assert!(store.take_moved().lights);
+        assert_eq!(store.take_moved().lights, BTreeSet::from([id]));
+        let unlinked = Link {
+            shadow: "group_0".into(),
+            ..Link::default()
+        };
+        store.set_light_link(other, unlinked).unwrap();
+        let moved = store.take_moved();
+        assert_eq!((moved.lights, moved.draws), (BTreeSet::from([other]), true));
         store.remove_light(id).unwrap();
-        assert!(store.take_moved().lights);
+        assert_eq!(store.take_moved().lights, BTreeSet::from([id]));
         assert!(store.set_light_params(id, params).is_err());
-        assert_eq!(store.census().unwrap().lights, 0);
+        assert_eq!(store.census().unwrap().lights, 1);
     }
 
     #[test]

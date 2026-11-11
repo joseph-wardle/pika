@@ -1499,7 +1499,7 @@ fn mesh_instances(
             }
         },
     };
-    let link = links.mesh(mesh);
+    let link = links.mesh(mesh).light;
     (matrices.iter())
         .filter_map(|m| Instance::new(m, topology.left_handed, link))
         .collect()

@@ -9,8 +9,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, LightParams, Normals, Refined, RefinedTexcoord,
-    Scheme, Shape, Stencils, Subset, Texcoord, Topology,
+    InstancePrimvars, Instancing, Interpolation, LightParams, Link, Normals, Refined,
+    RefinedTexcoord, Scheme, Shape, Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -33,6 +33,7 @@ pub struct CLight {
     height: f32,
     length: f32,
     visible: bool,
+    shadow: bool,
 }
 
 #[repr(C)]
@@ -907,6 +908,7 @@ pub unsafe extern "C" fn pika_light_params(
             normalize: p.normalize,
             shape,
             visible: p.visible,
+            shadow: p.shadow,
         };
         lock(handle)?.store.set_light_params(id, params)
     })
@@ -928,16 +930,18 @@ pub unsafe extern "C" fn pika_light_transform(
 }
 
 /// # Safety
-/// `renderer` must be live, and `link` a NUL-terminated string.
+/// `renderer` must be live, and `light` and `shadow` NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_link(
     renderer: *const Handle,
     id: u64,
-    link: *const c_char,
+    light: *const c_char,
+    shadow: *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
-        let (handle, link) = unsafe { (&*renderer, string(link)?) };
+        // SAFETY: the caller guarantees the renderer and the strings.
+        let (handle, light, shadow) = unsafe { (&*renderer, string(light)?, string(shadow)?) };
+        let link = Link { light, shadow };
         lock(handle)?.store.set_light_link(id, link)
     })
 }

@@ -8,10 +8,15 @@
 # A light's lightLink collection reaches the store as one token per
 # distinct collection, empty for a light that lights everything, and each
 # mesh as the tokens of the collections it is in, its categories: the key
-# links the left triangle, the rim the right one, the fill everything.
+# links the left triangle, the rim the right one, the fill everything. Its
+# shadowLink collection gets tokens of its own: the fill's shadows come only
+# from the left triangle, and the others' unauthored ones are everything.
+# Collections of the same prims share a token whatever their kind, so the
+# fill's shadowLink is the key's lightLink token.
 # Pika links per mesh, so the instances the spot links one of are lit as
 # their prototype is, which is warned of. Frame 2 links the key to both
-# triangles and the rim to everything.
+# triangles, the rim to everything, and the fill's shadows to the right
+# triangle.
 def Xform "world"
 {
     def Camera "camera" {}
@@ -60,7 +65,11 @@ def Xform "world"
         rel collection:lightLink:includes = </world/right>
     }
 
-    def DistantLight "fill" {}
+    def DistantLight "fill"
+    {
+        uniform bool collection:shadowLink:includeRoot = 0
+        rel collection:shadowLink:includes = </world/left>
+    }
 
     def SphereLight "spot"
     {
