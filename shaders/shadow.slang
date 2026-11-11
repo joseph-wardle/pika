@@ -544,8 +544,8 @@ void dirty(uint j, uint i, uint face, int2 a, int2 b)
     }
 }
 
-// Per moved instance and level: the held pages its box covered when it last moved, and
-// those it covers now, are drawn anew.
+// Per moved instance, level and shadow: the held pages its box covered when it last moved,
+// and those it covers now, are drawn anew.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void moving(uint3 thread : SV_DispatchThreadID)
@@ -553,8 +553,12 @@ void moving(uint3 thread : SV_DispatchThreadID)
     Pages *p = push.pages;
     for (uint k = thread.x; k < push.count; k += push.stride)
     {
-        uint instance = p->moved[k / LEVELS];
-        uint i = k % LEVELS;
+        uint j = k % p->count;
+        uint instance = p->moved[k / (LEVELS * p->count)];
+        uint i = k / p->count % LEVELS;
+        Shadow *s = p->shadows + j;
+        if (i >= s->levels || !casts(instance, s))
+            continue;
         float3 now[8];
         corners_of(instance, now);
         float *box = p->last + 8 * instance;
@@ -564,19 +568,13 @@ void moving(uint3 thread : SV_DispatchThreadID)
             bool3 high = (c & uint3(1, 2, 4)) != 0;
             then[c] = select(high, float3(box[3], box[4], box[5]), float3(box[0], box[1], box[2]));
         }
-        for (uint j = 0; j < p->count; j++)
+        for (uint face = 0; face < max(s->faces, 1); face++)
         {
-            Shadow *s = p->shadows + j;
-            if (i >= s->levels || !casts(instance, s))
-                continue;
-            for (uint face = 0; face < max(s->faces, 1); face++)
-            {
-                int2 a, b;
-                if (covers(s, i, face, then, a, b))
-                    dirty(j, i, face, a, b);
-                if (covers(s, i, face, now, a, b))
-                    dirty(j, i, face, a, b);
-            }
+            int2 a, b;
+            if (covers(s, i, face, then, a, b))
+                dirty(j, i, face, a, b);
+            if (covers(s, i, face, now, a, b))
+                dirty(j, i, face, a, b);
         }
     }
 }
@@ -666,7 +664,7 @@ void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
     }
 }
 
-// Per caster instance and level: one draw for each page to draw its box meets.
+// Per caster instance, level and shadow: one draw for each page to draw its box meets.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cast(uint3 thread : SV_DispatchThreadID)
@@ -674,21 +672,19 @@ void cast(uint3 thread : SV_DispatchThreadID)
     Pages *p = push.pages;
     for (uint k = thread.x; k < push.count; k += push.stride)
     {
-        uint instance = k / LEVELS;
-        uint i = k % LEVELS;
+        uint j = k % p->count;
+        uint instance = k / (LEVELS * p->count);
+        uint i = k / p->count % LEVELS;
+        Shadow *s = p->shadows + j;
+        if (i >= s->levels || !casts(instance, s))
+            continue;
         float3 corners[8];
         uint r = corners_of(instance, corners);
-        for (uint j = 0; j < p->count; j++)
+        for (uint face = 0; face < max(s->faces, 1); face++)
         {
-            Shadow *s = p->shadows + j;
-            if (i >= s->levels || !casts(instance, s))
-                continue;
-            for (uint face = 0; face < max(s->faces, 1); face++)
-            {
-                int2 a, b;
-                if (covers(s, i, face, corners, a, b))
-                    list(j, i, face, a, b, instance, r);
-            }
+            int2 a, b;
+            if (covers(s, i, face, corners, a, b))
+                list(j, i, face, a, b, instance, r);
         }
     }
 }

@@ -644,7 +644,7 @@ impl Shadows {
         let entries = 0..self.shadows.len() as u32 * LEVELS as u32 * TILES * TILES;
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
-        let casting = 0..geometry.instance_count * LEVELS as u32;
+        let casting = 0..geometry.instance_count * LEVELS as u32 * self.shadows.len() as u32;
         let remembered = 0..if fresh {
             geometry.instance_count
         } else {
@@ -665,7 +665,7 @@ impl Shadows {
         self.assign.record(cb, &[entries], push);
         barrier(d, cb, computed);
         if !moved.is_empty() {
-            let moving = 0..moved.len() as u32 * LEVELS as u32;
+            let moving = 0..moved.len() as u32 * LEVELS as u32 * self.shadows.len() as u32;
             self.moving.record(cb, std::slice::from_ref(&moving), push);
             barrier(d, cb, computed);
         }
