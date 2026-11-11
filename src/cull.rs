@@ -19,21 +19,20 @@ struct Push {
     first: u32,
     count: u32,
     stride: u32,
-    shadow: u32,
+    unused: u32,
 }
 
 impl Cull {
     pub fn new(device: &gpu::Device, spirv: &[u32]) -> Result<Self, String> {
-        let compute = gpu::Compute::new(device, spirv, size_of::<Push>())?;
+        let compute = gpu::Compute::new(device, spirv, c"cs", size_of::<Push>())?;
         Ok(Self {
             device: device.raw.clone(),
             compute,
         })
     }
 
-    /// Call after `view` began its frame. A light's view keeps only the instances carrying
-    /// its `shadow` link bit; the camera's passes 0.
-    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View, shadow: u32) {
+    /// Call after `view` began its frame.
+    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View) {
         if geometry.count == 0 {
             return;
         }
@@ -43,7 +42,7 @@ impl Cull {
             first,
             count,
             stride,
-            shadow,
+            unused: 0,
         });
         let culled = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)

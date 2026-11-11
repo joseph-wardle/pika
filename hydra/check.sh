@@ -188,6 +188,26 @@ DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/image.py" "$OUT/images" usdre
 for log in "$OUT"/images/*.log; do
     clean "$(basename "$log" .log)" "$log"
 done
+# An empty shadow pool is refused, not drawn unshadowed; receding.usda's own small pool, which
+# rendered clean above, is the control.
+cat >"$OUT/unpooled.usda" <<EOF
+#usda 1.0
+(
+    subLayers = [@$ROOT/hydra/images/receding.usda@]
+)
+
+over "render"
+{
+    over "settings"
+    {
+        custom int pika:shadowPool = 0
+    }
+}
+EOF
+husk -V 1 -R Pika -s /render/settings -f 1 -n 1 -o "$OUT/unpooled.\$F4.exr" "$OUT/unpooled.usda" \
+    >"$OUT/unpooled.log" 2>&1 || true
+grep -q "^pika: error: render: pika:shadowPool is 0 MB" "$OUT/unpooled.log" ||
+    fail "an empty shadow pool was not refused (see $OUT/unpooled.log)"
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 export -f fixture clean store_after counts keys expected pending redundant fail
 export OUT ROOT

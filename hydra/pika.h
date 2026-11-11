@@ -158,6 +158,9 @@ typedef struct pika_frame {
     size_t render_tag_count;
     // Texels a texture's longest side is capped at (pika:textureCap); 0 is none.
     uint32_t texture_cap;
+    // The shadow page pool's megabytes (pika:shadowPool), in quarter-megabyte pages; 0 is an
+    // error.
+    uint32_t shadow_pool;
 } pika_frame;
 
 // A key ending in _ms is milliseconds; any other value is a count.

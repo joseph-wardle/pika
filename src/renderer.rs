@@ -76,6 +76,8 @@ pub struct Frame<'a> {
     pub render_tags: Vec<String>,
     /// `pika:textureCap`, 0 for none.
     pub texture_cap: u32,
+    /// `pika:shadowPool`, in MB.
+    pub shadow_pool: u32,
 }
 
 /// OpenGL's far plane.
@@ -116,6 +118,7 @@ struct Inputs {
     clear_color: [f32; 4],
     render_tags: Vec<String>,
     texture_cap: u32,
+    shadow_pool: u32,
 }
 
 /// The host's buffers are taken to hold the last frame placed into ones that match.
@@ -287,6 +290,7 @@ impl Renderer {
             clear_color: frame.clear_color,
             render_tags: frame.render_tags.clone(),
             texture_cap: frame.texture_cap,
+            shadow_pool: frame.shadow_pool,
         };
         let mut aovs = [frame.color, frame.depth, frame.normal];
 
@@ -306,6 +310,7 @@ impl Renderer {
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
         let start = Instant::now();
+        self.shadows.reserve(&self.device, inputs.shadow_pool)?;
         let target = match &mut self.target {
             Some(t) if t.fits(&formats, w, h) => t,
             slot => {
@@ -358,7 +363,17 @@ impl Renderer {
         }
         if let Some(g) = &bound {
             let (device, geometry) = (&self.device, &self.geometry);
-            (self.shadows).fit(device, geometry, g, &camera, &mut lights, &casters)?;
+            let projection = &inputs.projection;
+            (self.shadows).fit(
+                device,
+                geometry,
+                g,
+                &camera,
+                projection,
+                [w, h],
+                &mut lights,
+                &casters,
+            )?;
         }
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
@@ -373,13 +388,9 @@ impl Renderer {
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
             let shadows = self.shadows.table();
             view.begin(cb, &camera, geometry, &lights, &tiles, [w, h], shadows);
-            self.cull.record(cb, geometry, view, 0);
+            self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
-        if let Some(geometry) = &bound {
-            self.shadows.record(cb, geometry, &self.cull);
-        }
-        self.commands.mark("shadow")?;
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(
             cb,
@@ -395,7 +406,14 @@ impl Renderer {
         if let Some((geometry, view)) = drawn {
             (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
+        target.end_rendering(cb);
         self.commands.mark("draw")?;
+        // Between the prepass and shading, which reads them: pages follow the depth drawn.
+        if let Some((geometry, view)) = drawn {
+            self.shadows.record(cb, geometry, view, target);
+        }
+        self.commands.mark("shadow")?;
+        target.resume_rendering(cb);
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();
             (self.shade).draw(cb, formats[0].0, target.area(), geometry, groups, view);
@@ -450,6 +468,7 @@ impl Renderer {
             (Some(view), true) => view.drawn(),
             _ => [0; 2],
         };
+        let shadow = self.shadows.counts();
         let placing = Instant::now();
         let [x, y, w, h] = pending.buffers.window;
         let fits = pending.buffers == *buffers;
@@ -499,6 +518,7 @@ impl Renderer {
             read_bytes,
             drawn,
             lights: pending.lights,
+            shadow,
             memory,
             moved: pending.moved,
             transforms: pending.transforms,

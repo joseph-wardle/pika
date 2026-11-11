@@ -1,0 +1,114 @@
+#usda 1.0
+(
+    doc = """Disks receding over a long clay ground, each twice as far and as wide as the last, so their shadows fall on clipmap levels from finest to coarse, and a roof above the frame casting into it. The pool, pika:shadowPool = 4 MB (16 pages), holds fewer pages than the camera marks, so the farthest levels drop a LOD; their texels stay under a pixel. usdrecord passes no render settings, so it draws them at the default pool. Frame 2 moves the camera and turns the key."""
+    subLayers = [@settings.usda@]
+    startTimeCode = 1
+    endTimeCode = 2
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Camera "camera"
+{
+    float focalLength = 35
+    float horizontalAperture = 36
+    float verticalAperture = 20.25
+    float2 clippingRange = (0.1, 200)
+    double3 xformOp:translate.timeSamples = {
+        1: (0, 1.5, 0),
+        2: (0.3, 1.6, -2.5),
+    }
+    float3 xformOp:rotateXYZ = (-8, 0, 0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
+}
+
+def Mesh "ground"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-40, 0, 2), (40, 0, 2), (40, 0, -120), (-40, 0, -120)]
+}
+
+def Mesh "disk1"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [16]
+    int[] faceVertexIndices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    point3f[] points = [(1.000000, 0, 0.000000), (0.923880, 0, 0.382683), (0.707107, 0, 0.707107), (0.382683, 0, 0.923880), (0.000000, 0, 1.000000), (-0.382683, 0, 0.923880), (-0.707107, 0, 0.707107), (-0.923880, 0, 0.382683), (-1.000000, 0, 0.000000), (-0.923880, 0, -0.382683), (-0.707107, 0, -0.707107), (-0.382683, 0, -0.923880), (-0.000000, 0, -1.000000), (0.382683, 0, -0.923880), (0.707107, 0, -0.707107), (0.923880, 0, -0.382683)]
+    double3 xformOp:translate = (-0.6, 0.375, -3)
+    float3 xformOp:scale = (0.25, 1, 0.25)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+}
+
+def Mesh "disk2"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [16]
+    int[] faceVertexIndices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    point3f[] points = [(1.000000, 0, 0.000000), (0.923880, 0, 0.382683), (0.707107, 0, 0.707107), (0.382683, 0, 0.923880), (0.000000, 0, 1.000000), (-0.382683, 0, 0.923880), (-0.707107, 0, 0.707107), (-0.923880, 0, 0.382683), (-1.000000, 0, 0.000000), (-0.923880, 0, -0.382683), (-0.707107, 0, -0.707107), (-0.382683, 0, -0.923880), (-0.000000, 0, -1.000000), (0.382683, 0, -0.923880), (0.707107, 0, -0.707107), (0.923880, 0, -0.382683)]
+    double3 xformOp:translate = (0.4, 0.75, -6)
+    float3 xformOp:scale = (0.5, 1, 0.5)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+}
+
+def Mesh "disk3"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [16]
+    int[] faceVertexIndices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    point3f[] points = [(1.000000, 0, 0.000000), (0.923880, 0, 0.382683), (0.707107, 0, 0.707107), (0.382683, 0, 0.923880), (0.000000, 0, 1.000000), (-0.382683, 0, 0.923880), (-0.707107, 0, 0.707107), (-0.923880, 0, 0.382683), (-1.000000, 0, 0.000000), (-0.923880, 0, -0.382683), (-0.707107, 0, -0.707107), (-0.382683, 0, -0.923880), (-0.000000, 0, -1.000000), (0.382683, 0, -0.923880), (0.707107, 0, -0.707107), (0.923880, 0, -0.382683)]
+    double3 xformOp:translate = (-1.5, 1.5, -12)
+    float3 xformOp:scale = (1.0, 1, 1.0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+}
+
+def Mesh "disk4"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [16]
+    int[] faceVertexIndices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    point3f[] points = [(1.000000, 0, 0.000000), (0.923880, 0, 0.382683), (0.707107, 0, 0.707107), (0.382683, 0, 0.923880), (0.000000, 0, 1.000000), (-0.382683, 0, 0.923880), (-0.707107, 0, 0.707107), (-0.923880, 0, 0.382683), (-1.000000, 0, 0.000000), (-0.923880, 0, -0.382683), (-0.707107, 0, -0.707107), (-0.382683, 0, -0.923880), (-0.000000, 0, -1.000000), (0.382683, 0, -0.923880), (0.707107, 0, -0.707107), (0.923880, 0, -0.382683)]
+    double3 xformOp:translate = (2.0, 3.0, -24)
+    float3 xformOp:scale = (2.0, 1, 2.0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+}
+
+def Mesh "disk5"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [16]
+    int[] faceVertexIndices = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
+    point3f[] points = [(1.000000, 0, 0.000000), (0.923880, 0, 0.382683), (0.707107, 0, 0.707107), (0.382683, 0, 0.923880), (0.000000, 0, 1.000000), (-0.382683, 0, 0.923880), (-0.707107, 0, 0.707107), (-0.923880, 0, 0.382683), (-1.000000, 0, 0.000000), (-0.923880, 0, -0.382683), (-0.707107, 0, -0.707107), (-0.382683, 0, -0.923880), (-0.000000, 0, -1.000000), (0.382683, 0, -0.923880), (0.707107, 0, -0.707107), (0.923880, 0, -0.382683)]
+    double3 xformOp:translate = (-5, 6.0, -48)
+    float3 xformOp:scale = (4.0, 1, 4.0)
+    uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+}
+
+def Mesh "roof"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-1, 6, -7), (1, 6, -7), (1, 6, -9), (-1, 6, -9)]
+}
+
+# π lux on a surface facing it.
+def DistantLight "key"
+{
+    float inputs:angle = 0
+    float inputs:intensity = 3.1415927
+    float3 xformOp:rotateXYZ.timeSamples = {
+        1: (-55, -30, 0),
+        2: (-45, -40, 0),
+    }
+    uniform token[] xformOpOrder = ["xformOp:rotateXYZ"]
+}
+
+over "render"
+{
+    over "settings"
+    {
+        custom int pika:shadowPool = 4
+    }
+}

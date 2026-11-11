@@ -254,7 +254,9 @@ impl Instance {
             .synchronization2(true);
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
-            .scalar_block_layout(true);
+            .scalar_block_layout(true)
+            .draw_indirect_count(true)
+            .shader_output_layer(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
@@ -274,8 +276,9 @@ impl Instance {
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
                     "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
-                 drawIndirectFirstInstance, independentBlend, textureCompressionBC and \
-                 scalarBlockLayout.",
+                 drawIndirectFirstInstance, independentBlend, textureCompressionBC, \
+                 fragmentStoresAndAtomics, scalarBlockLayout, drawIndirectCount and \
+                 shaderOutputLayer.",
                     info.name
                 )
             })?;
@@ -372,6 +375,11 @@ pub struct Device<'a> {
 }
 
 impl Device<'_> {
+    pub fn limits(&self) -> vk::PhysicalDeviceLimits {
+        // SAFETY: the physical device belongs to this live instance.
+        unsafe { (self.instance.raw).get_physical_device_properties(self.physical) }.limits
+    }
+
     /// Use and budget by heap index. Each heap is checked alone: the small
     /// CPU-writable device-local heap holds no textures however free it is.
     pub fn heaps(&self) -> Vec<Heap> {
@@ -672,7 +680,13 @@ impl Compute {
     /// Vulkan's guaranteed minimum of groups in one dispatch dimension.
     const MAX_GROUPS: u64 = 65535;
 
-    pub fn new(device: &Device, spirv: &[u32], push_size: usize) -> Result<Self, String> {
+    /// `name` is the module's entry point to build.
+    pub fn new(
+        device: &Device,
+        spirv: &[u32],
+        name: &std::ffi::CStr,
+        push_size: usize,
+    ) -> Result<Self, String> {
         let d = &device.raw;
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -693,7 +707,7 @@ impl Compute {
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)
-            .name(c"cs");
+            .name(name);
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(c.layout);

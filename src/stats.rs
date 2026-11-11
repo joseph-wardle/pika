@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::commands::Times;
 use crate::geometry::Update;
 use crate::gpu;
+use crate::shadow;
 use crate::store::{Census, Stats as Pulled};
 use crate::texture::Needs;
 
@@ -43,6 +44,7 @@ pub struct Frame {
     /// Instances, then triangles.
     pub drawn: [u32; 2],
     pub lights: usize,
+    pub shadow: shadow::Counts,
     pub memory: Memory,
     /// Meshes whose points moved.
     pub moved: usize,
@@ -273,6 +275,9 @@ impl Frame {
             ("drawn_instances", u64::from(self.drawn[0])),
             ("drawn_triangles", u64::from(self.drawn[1])),
             ("drawn_lights", self.lights as u64),
+            ("shadow_pages", u64::from(self.shadow.held)),
+            ("shadow_pages_wanted", u64::from(self.shadow.wanted)),
+            ("shadow_draws", u64::from(self.shadow.draws)),
             ("geometry_bytes", m.geometry.device),
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
@@ -372,6 +377,11 @@ mod tests {
             read_bytes: 20_995_200,
             drawn: [1274, 11_550_000],
             lights: 47,
+            shadow: shadow::Counts {
+                wanted: 300,
+                held: 256,
+                draws: 9000,
+            },
             memory: Memory {
                 geometry: gpu::Memory {
                     device: 1 << 30,
@@ -418,7 +428,7 @@ mod tests {
              wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
-             geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
+             shadow_pages 256 shadow_pages_wanted 300 shadow_draws 9000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \

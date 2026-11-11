@@ -50,17 +50,69 @@ struct Light
 
 static const uint NO_SHADOW = 0xffffffff;
 
-// A light's plain shadow map (src/shadow.rs Shadow): light depth, 0 toward the light,
-// as float bits, so the nearest caster is the least.
+// A distant light's virtual shadow map (src/shadow.rs Shadow): a clipmap of LEVELS square
+// levels around the camera, each TILES² tiles of PAGE² texels, level i's side 2^(level + i)
+// world units. A tile drawn this frame holds a page of the pool: light depth, 0 toward the
+// light, as float bits, so the nearest caster is the least.
+static const uint LEVELS = 16;
+static const uint TILES = 32;
+static const uint PAGE = 256;
+// A tile with no page; before allocation, 0 is unmarked.
+static const uint NO_PAGE = 0xffffffff;
+
 struct Shadow
 {
-    // World to the map's clip space, orthographic: rows of the column-vector matrix.
-    float4 view_projection[4];
-    Atomic<uint> *map;
-    // Texels a side, and a texel's width in world units.
-    uint size;
-    float texel;
+    // World to light space: x and y in world units across the light, z its depth in [0, 1]
+    // over the casters. Rows of the column-vector matrix.
+    float4 light_space[3];
+    // Per level, its first tile counted from the light-space origin, in that level's tiles.
+    int2 origin[LEVELS];
+    // The finest level's exponent and how many levels follow it.
+    int level;
+    uint levels;
+    // A pixel's world width per unit of camera clip w.
+    float pixel;
+    // The shadow-link bit casters must carry, 0 when every mesh casts.
+    uint link;
+    // LEVELS × TILES² per shadow, level by level, row by row: a page or NO_PAGE.
+    uint *tiles;
+    Atomic<uint> *pool;
 };
+
+float3 to_light(Shadow *s, float3 P)
+{
+    float4 p = float4(P, 1);
+    return float3(dot(s->light_space[0], p), dot(s->light_space[1], p), dot(s->light_space[2], p));
+}
+
+// A tile's world width at level i: a power of two, so dividing by it is exact.
+float tile_width(Shadow *s, uint i)
+{
+    return exp2(float(s->level + int(i))) / TILES;
+}
+
+// Outside the level, a tile index just past its edge.
+int2 tile_at(Shadow *s, float2 q, uint i)
+{
+    float2 t = floor(q / tile_width(s, i)) - float2(s->origin[i]);
+    return int2(clamp(t, -1, float(TILES)));
+}
+
+bool inside(int2 t)
+{
+    return all(t >= 0) && all(t < int(TILES));
+}
+
+// The finest level whose texels are no wider than a pixel at P, w its camera clip w, and
+// whose tiles hold P; the coarsest holds every mesh (src/shadow.rs).
+uint level_at(Shadow *s, float3 q, float w)
+{
+    float want = floor(log2(w * s->pixel * TILES * PAGE)) - float(s->level);
+    uint i = uint(clamp(want, 0, float(s->levels - 1)));
+    while (i + 1 < s->levels && !inside(tile_at(s, q.xy, i)))
+        i++;
+    return i;
+}
 
 // The side of a light tile in pixels (src/light.rs TILE).
 static const uint TILE = 16;
@@ -95,7 +147,7 @@ struct View
     // The instances the cull pass kept, at each record's first instance.
     uint *visible;
     Atomic<uint> *drawn;
-    // The camera's view reads every light's; a light's view draws into its own, the first.
+    // Each shadowed light's, at its Light.shadow.
     Shadow *shadows;
 };
 

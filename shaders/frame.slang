@@ -191,23 +191,46 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     return incident;
 }
 
+// Whether level i holds a page at P moved a texel of that level off the surface toward the
+// light, so the surface does not shadow itself; if so, lit is how much of the light reaches.
+bool lookup(Shadow *s, float3 P, float3 n, uint i, out float lit)
+{
+    lit = 1.0;
+    float width = tile_width(s, i);
+    float3 q = to_light(s, P + n * (width / PAGE));
+    int2 t = tile_at(s, q.xy, i);
+    if (!inside(t))
+        return false;
+    uint page = s->tiles[(i * TILES + t.y) * TILES + t.x];
+    if (page == NO_PAGE)
+        return false;
+    float2 u = q.xy / width;
+    uint2 x = min(uint2((u - floor(u)) * PAGE), PAGE - 1);
+    // Negative depth, nearer the light than any caster, would read as a huge integer.
+    uint caster = s->pool[(page * PAGE + x.y) * PAGE + x.x].load();
+    lit = caster < asuint(max(q.z, 0.0)) ? 0.0 : 1.0;
+    return true;
+}
+
 // How much of light light_index reaches P: none where its map holds a caster nearer the
-// light. Outside the map, all.
+// light. Past the pool a level may have no page there, so coarser ones are tried, then the
+// finer one a pixel on a level's edge may have marked instead.
 float visibility(uint light_index, float3 P)
 {
     Light light = view->lights[light_index];
     if (light.shadow == NO_SHADOW)
         return 1.0;
     Shadow *s = view->shadows + light.shadow;
-    // A texel off the surface, toward the light, so the surface does not shadow itself.
     float3 n = dot(shadow_normal, light.position) < 0 ? -shadow_normal : shadow_normal;
-    float4 q = float4(P + n * s->texel, 1);
-    float3 c = float3(dot(s->view_projection[0], q), dot(s->view_projection[1], q),
-                      dot(s->view_projection[2], q));
-    float2 uv = c.xy * 0.5 + 0.5;
-    if (any(uv < 0) || any(uv >= 1))
-        return 1.0;
-    uint2 t = min(uint2(uv * s->size), s->size - 1);
-    // Negative depth, nearer the light than any caster, would read as a huge integer.
-    return s->map[t.y * s->size + t.x].load() < asuint(max(c.z, 0.0)) ? 0.0 : 1.0;
+    float w = dot(view->view_projection[3], float4(P, 1));
+    uint first = level_at(s, to_light(s, P), w);
+    float lit;
+    for (uint i = first; i < s->levels; i++)
+    {
+        if (lookup(s, P, n, i, lit))
+            return lit;
+    }
+    if (first > 0 && lookup(s, P, n, first - 1, lit))
+        return lit;
+    return 1.0;
 }

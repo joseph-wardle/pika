@@ -82,7 +82,9 @@ What the reference encodes:
   is off, gives nothing to a hit whose ray toward it, along its axis
   whatever its angle, meets a triangle of a mesh its shadowLink collection
   includes (every mesh for the camera light), the hit's own triangle
-  aside. Other lights cast no shadows yet. Other light types are refused.
+  aside, whatever pika:shadowPool holds: a scene in POOLED marks more
+  pages than its pool, whose dropped levels must keep their texels under a
+  pixel. Other lights cast no shadows yet. Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -143,6 +145,9 @@ TAIL = 4
 # at frame 1 a pixel of the lowered scene covers 2√2 texels of its 8×8, level 1, which its 4×4
 # floor holds; at frame 2 √2, level 0, which it does not.
 BLURRED = {"lowered": (0, 1)}
+# Scenes whose pika:shadowPool holds fewer pages than husk's camera marks; husk must warn of it
+# in one line.
+POOLED = {"receding": 1}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
@@ -1522,17 +1527,19 @@ def budget_warnings(name):
     return int(name in BUDGET) + int(any(BLURRED.get(name, (0, 0))))
 
 
-def warned(log, name, capped, lowered):
+def warned(log, name, capped, lowered, pooled):
     """Failures unless `log` holds `capped` warnings of textures the cap
-    shrinks and `lowered` of textures lowered to fit."""
+    shrinks, `lowered` of textures lowered to fit and `pooled` of a shadow
+    pool too small."""
     with open(log) as f:
         lines = [line for line in f if line.startswith("pika: warning: ")]
     failures = []
-    for kind, mark, expected in (("cap", "by pika:textureCap", capped),
-                                 ("budget", "to fit the device's memory budget", lowered)):
+    for kind, mark, expected in (("textures shrunk by the cap", "by pika:textureCap", capped),
+                                 ("textures shrunk by the budget", "to fit the device's memory budget", lowered),
+                                 ("a shadow pool too small", "and pika:shadowPool holds", pooled)):
         count = sum(mark in line for line in lines)
         if count != expected:
-            failures.append(f"{name}: {count} warnings of textures shrunk by the {kind}, not {expected}")
+            failures.append(f"{name}: {count} warnings of {kind}, not {expected}")
     return failures
 
 
@@ -1587,7 +1594,7 @@ def main():
             renders, log = husks[s].result()
             print(f"{name} in husk ({log}):")
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
-            failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name))
+            failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name), POOLED.get(name, 0))
             failures += blurred(log.replace(".husk.log", ".husk.stats"), name)
             changed |= c
             if s not in records:
@@ -1595,7 +1602,7 @@ def main():
             renders, log = records[s].result()
             print(f"{name} in usdrecord ({log}):")
             failures += check(f"{name} (usdrecord)", renders, recorded.get(s, refs[s]).result(), ["color"])[0]
-            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name))
+            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name), 0)
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")

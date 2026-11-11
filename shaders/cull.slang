@@ -6,8 +6,7 @@ struct Push
     uint first;
     uint count;
     uint stride;
-    // A light's shadow-link bit, which its casters must carry; 0 for the camera.
-    uint shadow;
+    uint unused;
 };
 
 [[vk::push_constant]]
@@ -44,8 +43,6 @@ void cs(uint3 thread : SV_DispatchThreadID)
         uint instance = push.first + i;
         uint r = view->owners[instance];
         float *box = view->boxes + 6 * r;
-        if ((asuint(view->instances[7 * instance + 6].z) & push.shadow) != push.shadow)
-            continue;
         if (!seen(view->instances + 7 * instance, float3(box[0], box[1], box[2]),
                   float3(box[3], box[4], box[5])))
             continue;

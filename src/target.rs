@@ -140,7 +140,7 @@ impl Target {
             .image_view(self.depth_view)
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 0.0,
@@ -158,6 +158,137 @@ impl Target {
             d.cmd_pipeline_barrier2(
                 cb,
                 &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+            );
+            d.cmd_begin_rendering(cb, &rendering);
+        }
+    }
+
+    /// Records after `end_rendering` of the prepass: copies the depth AOV, `DEPTH_AOV`'s
+    /// floats row by row, into `buffer`, for passes before `resume_rendering`.
+    pub fn copy_depth(&self, cb: vk::CommandBuffer, buffer: vk::Buffer) {
+        let depth = &self.colors[1];
+        let barrier =
+            |src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (_, _), layouts: [_; 2]| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(src.0)
+                    .src_access_mask(src.1)
+                    .dst_stage_mask(dst.0)
+                    .dst_access_mask(dst.1)
+                    .old_layout(layouts[0])
+                    .new_layout(layouts[1])
+                    .image(depth.image)
+                    .subresource_range(COLOR)
+            };
+        let attachment = (
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        );
+        let copy = (
+            vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::TRANSFER_READ,
+        );
+        let to_copy = barrier(
+            attachment,
+            copy,
+            [
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ],
+        );
+        let back = barrier(
+            copy,
+            (
+                attachment.0,
+                attachment.1 | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+            ),
+            [
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ],
+        );
+        let copied = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, every handle was created on `d`, and
+        // `buffer` holds `width`×`height` floats (the caller's).
+        unsafe {
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_copy]),
+            );
+            d.cmd_copy_image_to_buffer(
+                cb,
+                depth.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[region],
+            );
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&[copied])
+                    .image_memory_barriers(&[back]),
+            );
+        }
+    }
+
+    /// Renders on into what the last rendering stored, colors and depth alike.
+    pub fn resume_rendering(&self, cb: vk::CommandBuffer) {
+        let stages = vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
+            | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
+        let access = vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        let stored = vk::MemoryBarrier2::default()
+            .src_stage_mask(stages)
+            .src_access_mask(access)
+            .dst_stage_mask(stages)
+            .dst_access_mask(
+                access
+                    | vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+            );
+        let attachments: Vec<_> = (self.colors.iter())
+            .map(|a| {
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(a.view)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+            })
+            .collect();
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(self.depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE);
+        let rendering = vk::RenderingInfo::default()
+            .render_area(self.area())
+            .layer_count(1)
+            .color_attachments(&attachments)
+            .depth_attachment(&depth);
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, after a rendering of these attachments
+        // that stored them; the info structs outlive the calls.
+        unsafe {
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().memory_barriers(&[stored]),
             );
             d.cmd_begin_rendering(cb, &rendering);
         }

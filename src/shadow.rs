@@ -1,27 +1,70 @@
-//! Shadow maps: each shadowed distant light gets a plain `SIZE`² map, orthographic, drawn by
-//! atomic min of light depth, so it needs no depth attachment. Its square covers the casters
-//! the camera sees, so a receiver that casts nothing and lies outside them is lit.
+//! Virtual shadow maps for distant lights (`shaders/shadow.slang`): a clipmap of `LEVELS`
+//! square levels around the camera, each `TILES`² tiles. Only the tiles the camera's pixels
+//! read hold a page of the pool, and every held page is drawn anew each frame.
 
 use ash::vk;
 
-use crate::cull::Cull;
 use crate::geometry::{Bound, Geometry};
 use crate::gpu::{self, Buffer};
 use crate::light::{self, Light, Tiles};
+use crate::target::Target;
 use crate::transform::{Camera, Instance};
 use crate::view::View;
 
-/// Texels a side: 64 MB a map.
-pub const SIZE: u32 = 4096;
+/// `shaders/view.slang`'s constants.
+const LEVELS: usize = 16;
+const TILES: u32 = 32;
+const PAGE: u32 = 256;
+/// A pool page's bytes, as `pika:shadowPool` counts them.
+const PAGE_BYTES: u64 = PAGE as u64 * PAGE as u64 * 4;
+/// Draws a frame lists, one per caster instance and page it meets: 14 MB of lists.
+const CAPACITY: u32 = 1 << 19;
+/// `Pages`' state words.
+const STATE: u64 = 5 * 4;
 
 /// `shaders/view.slang`'s `Shadow`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Shadow {
-    pub view_projection: [[f32; 4]; 4],
-    map: vk::DeviceAddress,
-    size: u32,
-    pub texel: f32,
+    light_space: [[f32; 4]; 3],
+    origin: [[i32; 2]; LEVELS],
+    level: i32,
+    levels: u32,
+    pixel: f32,
+    link: u32,
+    tiles: vk::DeviceAddress,
+    pool: vk::DeviceAddress,
+}
+
+/// `shaders/shadow.slang`'s `Pages`.
+#[repr(C)]
+struct Pages {
+    unproject: [[f32; 4]; 4],
+    camera: vk::DeviceAddress,
+    casters: vk::DeviceAddress,
+    shadows: vk::DeviceAddress,
+    tiles: vk::DeviceAddress,
+    bounds: vk::DeviceAddress,
+    depth: vk::DeviceAddress,
+    owners: vk::DeviceAddress,
+    state: vk::DeviceAddress,
+    draws: vk::DeviceAddress,
+    pairs: vk::DeviceAddress,
+    pool: vk::DeviceAddress,
+    count: u32,
+    pages: u32,
+    capacity: u32,
+    pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Push {
+    pages: vk::DeviceAddress,
+    first: u32,
+    count: u32,
+    stride: u32,
+    pad: u32,
 }
 
 /// A shadowed distant light, by its index among the view's lights.
@@ -31,11 +74,21 @@ pub struct Caster {
     pub shadow: u32,
 }
 
-struct Map {
-    depth: Buffer,
-    view: View,
-    /// The light's link bit, for the cull.
-    shadow: u32,
+/// What the last frame's shadows held.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Counts {
+    /// Pages the camera's pixels marked, before any level dropped.
+    pub wanted: u32,
+    pub held: u32,
+    /// One per caster instance and page it meets.
+    pub draws: u32,
+}
+
+struct Pool {
+    pages: u32,
+    texels: Buffer,
+    /// Per page: its shadow and its tile.
+    owners: Buffer,
 }
 
 pub struct Shadows {
@@ -43,29 +96,75 @@ pub struct Shadows {
     device: ash::Device,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
+    mark: gpu::Compute,
+    allocate: gpu::Compute,
+    clear: gpu::Compute,
+    cast: gpu::Compute,
+    pool: Option<Pool>,
+    constants: Buffer,
     table: Option<Buffer>,
+    tiles: Option<Buffer>,
+    /// Per shadow and level, its held tiles' bounds.
+    bounds: Option<Buffer>,
+    depth: Option<Buffer>,
+    view: Option<View>,
+    draws: Buffer,
+    pairs: Buffer,
+    /// `Pages`' state, and its host copy.
+    state: Buffer,
+    counts: Buffer,
     shadows: Vec<Shadow>,
-    maps: Vec<Map>,
+    unproject: [[f32; 4]; 4],
+    extent: [u32; 2],
+    recorded: bool,
+    warned: [bool; 2],
 }
 
 impl Shadows {
     pub fn new(device: &gpu::Device, spirv: &[u32]) -> Result<Self, String> {
         let d = &device.raw;
-        let push = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .size(size_of::<vk::DeviceAddress>() as u32)];
-        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `d` is live and `layout_info` outlives the call.
-        let layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
-            .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let compute = |name| gpu::Compute::new(device, spirv, name, size_of::<Push>());
+        let draw_bytes = size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+        let indirect = storage | vk::BufferUsageFlags::INDIRECT_BUFFER;
+        let copied = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
         let mut s = Self {
             device: d.clone(),
-            layout,
+            layout: vk::PipelineLayout::null(),
             pipeline: vk::Pipeline::null(),
+            mark: compute(c"mark")?,
+            allocate: compute(c"allocate")?,
+            clear: compute(c"clear")?,
+            cast: compute(c"cast")?,
+            pool: None,
+            constants: Buffer::device_local(
+                device,
+                size_of::<Pages>() as u64,
+                storage | vk::BufferUsageFlags::TRANSFER_DST,
+            )?,
             table: None,
+            tiles: None,
+            bounds: None,
+            depth: None,
+            view: None,
+            draws: Buffer::device_local(device, CAPACITY as u64 * draw_bytes, indirect)?,
+            pairs: Buffer::device_local(device, CAPACITY as u64 * 8, storage)?,
+            state: Buffer::device_local(device, STATE, indirect | copied)?,
+            counts: Buffer::host(device, STATE, vk::BufferUsageFlags::TRANSFER_DST, host)?,
             shadows: Vec::new(),
-            maps: Vec::new(),
+            unproject: [[0.0; 4]; 4],
+            extent: [0; 2],
+            recorded: false,
+            warned: [false; 2],
         };
+        let push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .size(size_of::<Push>() as u32)];
+        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
+        // SAFETY: `d` is live and `layout_info` outlives the call.
+        s.layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
+            .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
         // SAFETY: `d` is live and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
@@ -73,7 +172,7 @@ impl Shadows {
         let depth = vk::PipelineDepthStencilStateCreateInfo::default();
         let built = gpu::graphics(
             d,
-            layout,
+            s.layout,
             module,
             [c"vs", c"fs"],
             &[],
@@ -86,48 +185,125 @@ impl Shadows {
         Ok(s)
     }
 
-    /// Fits each caster's map and points its light at it; the lights are then ready for
-    /// the camera's view, whose shadows are at `table`.
+    /// Holds a pool of `megabytes` (`pika:shadowPool`) in quarter-megabyte pages. Call before
+    /// textures fit the memory budget, so they fit beside it.
+    pub fn reserve(&mut self, device: &gpu::Device, megabytes: u32) -> Result<(), String> {
+        let pages = megabytes.saturating_mul(4);
+        if self.pool.as_ref().is_some_and(|p| p.pages == pages) {
+            return Ok(());
+        }
+        if pages == 0 {
+            return Err("pika:shadowPool is 0 MB; shadows need at least one 0.25 MB page".into());
+        }
+        let layers = device.limits().max_framebuffer_layers;
+        if pages > layers {
+            return Err(format!(
+                "pika:shadowPool is {megabytes} MB, {pages} pages, but the device draws into \
+                 at most {layers}; set it to {} MB or less",
+                layers / 4
+            ));
+        }
+        // Free the old pool before allocating its replacement.
+        self.pool = None;
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        self.pool = Some(Pool {
+            pages,
+            texels: Buffer::device_local(device, pages as u64 * PAGE_BYTES, storage)?,
+            owners: Buffer::device_local(device, pages as u64 * 8, storage)?,
+        });
+        Ok(())
+    }
+
+    /// Fits each caster's clipmap to the camera and the scene and points its light at it;
+    /// the lights are then ready for the camera's view, whose shadows are at `table`.
+    #[allow(clippy::too_many_arguments)]
     pub fn fit(
         &mut self,
         device: &gpu::Device,
         geometry: &Geometry,
         bound: &Bound,
         camera: &Camera,
+        projection: &[f64; 16],
+        extent: [u32; 2],
         lights: &mut [Light],
         casters: &[Caster],
     ) -> Result<(), String> {
         self.shadows.clear();
-        let mut kept = 0;
+        let pool = (self.pool.as_ref()).ok_or("shadows fit before their pool was reserved")?;
+        let unproject = invert(&camera.view_projection.map(|r| r.map(f64::from)))
+            .ok_or("the camera's view-projection matrix is singular")?;
+        // The clipmaps centre on the eye, or on an orthographic camera's middle.
+        let centre = match camera.eye {
+            [x, y, z, 1.0] => [x, y, z].map(f64::from),
+            _ => {
+                let h = unproject.map(|r| r[2] * 0.5 + r[3]);
+                [h[0] / h[3], h[1] / h[3], h[2] / h[3]]
+            }
+        };
+        // Hydra's projection is row-vector OpenGL: clip w is the view depth of a perspective
+        // camera and 1 for an orthographic one, and [5] scales view y to clip y.
+        let pixel = 2.0 / (extent[1] as f64 * projection[5].abs());
+        let near = match projection[15] {
+            0.0 => projection[14] / (projection[10] - 1.0),
+            _ => 1.0,
+        };
+        let mut fitted = Vec::new();
+        let mut coarsest = i32::MIN;
         for c in casters {
-            let toward = lights[c.light].position;
-            let Some((matrix, texel)) = fit(toward, camera, geometry.instances(), c.shadow) else {
+            let toward = lights[c.light].position.map(f64::from);
+            let instances = geometry.instances();
+            let Some((rows, reach)) = light_space(toward, centre, instances, c.shadow) else {
                 continue;
             };
-            if self.maps.len() == kept {
-                self.maps.push(Map::new(device, bound)?);
-            }
-            let map = &mut self.maps[kept];
-            if !map.view.fits(bound, light::capacity(0, [1, 1])) {
-                map.view = View::new(device, bound, light::capacity(0, [1, 1]))?;
-            }
-            map.shadow = c.shadow;
-            lights[c.light].shadow = kept as u32;
-            self.shadows.push(Shadow {
-                view_projection: matrix,
-                map: map.depth.address,
-                size: SIZE,
-                texel,
+            // A level's tiles reach 15 of its 32 from its centre, which snaps to a tile.
+            let level = (reach * TILES as f64 / 15.0)
+                .max(f64::MIN_POSITIVE)
+                .log2()
+                .ceil();
+            coarsest = coarsest.max(level as i32);
+            fitted.push((c, rows));
+        }
+        // Every shadow has the same levels, as the allocation needs.
+        let want = (near.max(f64::MIN_POSITIVE) * pixel * (TILES * PAGE) as f64).log2();
+        let finest =
+            (want.floor() as i32).clamp(coarsest.saturating_sub(LEVELS as i32 - 1), coarsest);
+        let levels = coarsest.saturating_sub(finest) as u32 + 1;
+        let tile_bytes = LEVELS as u64 * TILES as u64 * TILES as u64 * 4;
+        let count = fitted.len().max(1) as u64;
+        grow(device, &mut self.tiles, count * tile_bytes)?;
+        grow(device, &mut self.bounds, count * LEVELS as u64 * 16)?;
+        grow(device, &mut self.table, count * size_of::<Shadow>() as u64)?;
+        grow(
+            device,
+            &mut self.depth,
+            extent[0] as u64 * extent[1] as u64 * 4,
+        )?;
+        let tiles = self.tiles.as_ref().map_or(0, |t| t.address);
+        for (j, (c, rows)) in fitted.into_iter().enumerate() {
+            let across = [0, 1].map(|k| dot3(&rows[k], centre));
+            let origin = std::array::from_fn(|i| {
+                let width = f64::from(finest + i as i32).exp2() / TILES as f64;
+                across.map(|v| (v / width).floor() as i32 - (TILES / 2) as i32)
             });
-            kept += 1;
+            lights[c.light].shadow = j as u32;
+            self.shadows.push(Shadow {
+                light_space: rows.map(|r| r.map(|v| v as f32)),
+                origin,
+                level: finest,
+                levels,
+                pixel: pixel as f32,
+                link: c.shadow,
+                tiles: tiles + j as u64 * tile_bytes,
+                pool: pool.texels.address,
+            });
         }
-        self.maps.truncate(kept);
-        let bytes = (kept.max(1) * size_of::<Shadow>()) as u64;
-        if self.table.as_ref().is_none_or(|t| t.size < bytes) {
-            self.table = None;
-            let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-            self.table = Some(Buffer::device_local(device, bytes, usage)?);
+        let capacity = light::capacity(0, [1, 1]);
+        if !self.view.as_ref().is_some_and(|v| v.fits(bound, capacity)) {
+            self.view = None;
+            self.view = Some(View::new(device, bound, capacity)?);
         }
+        self.unproject = unproject.map(|r| r.map(|v| v as f32));
+        self.extent = extent;
         Ok(())
     }
 
@@ -136,73 +312,270 @@ impl Shadows {
         self.table.as_ref().map_or(0, |t| t.address)
     }
 
-    /// Records outside rendering, after `fit`, the maps the camera's view reads; no GPU work
-    /// may be pending.
-    pub fn record(&mut self, cb: vk::CommandBuffer, geometry: &Bound, cull: &Cull) {
-        let (Some(table), false) = (&self.table, self.shadows.is_empty()) else {
+    /// Records outside rendering, after `fit` and after the prepass drew `target`'s depth for
+    /// `camera`, before the passes that read the shadows; no GPU work may be pending.
+    pub fn record(
+        &mut self,
+        cb: vk::CommandBuffer,
+        geometry: &Bound,
+        camera: &View,
+        target: &Target,
+    ) {
+        self.recorded = false;
+        let (Some(pool), Some(table), Some(tiles), Some(bounds), Some(depth), Some(view)) = (
+            &self.pool,
+            &self.table,
+            &self.tiles,
+            &self.bounds,
+            &self.depth,
+            &mut self.view,
+        ) else {
             return;
         };
-        let d = &self.device;
-        // SAFETY: `Shadow` is plain `repr(C)` data without padding.
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                self.shadows.as_ptr().cast::<u8>(),
-                size_of_val(&*self.shadows),
+        if self.shadows.is_empty() || geometry.count == 0 {
+            return;
+        }
+        self.recorded = true;
+        let pages = Pages {
+            unproject: self.unproject,
+            camera: camera.constants(),
+            casters: view.constants(),
+            shadows: table.address,
+            tiles: tiles.address,
+            bounds: bounds.address,
+            depth: depth.address,
+            owners: pool.owners.address,
+            state: self.state.address,
+            draws: self.draws.address,
+            pairs: self.pairs.address,
+            pool: pool.texels.address,
+            count: self.shadows.len() as u32,
+            pages: pool.pages,
+            capacity: CAPACITY,
+            pad: 0,
+        };
+        let state = [0, 0, 0, LEVELS as u32, 0];
+        // SAFETY: `Pages`, `Shadow` and the state are plain `repr(C)` data without padding.
+        let (pages, shadows, state) = unsafe {
+            (
+                std::slice::from_raw_parts((&raw const pages).cast::<u8>(), size_of::<Pages>()),
+                std::slice::from_raw_parts(
+                    self.shadows.as_ptr().cast::<u8>(),
+                    size_of_val(&*self.shadows),
+                ),
+                std::slice::from_raw_parts(state.as_ptr().cast::<u8>(), STATE as usize),
             )
         };
-        let cleared = vk::MemoryBarrier2::default()
+        let tile_bytes = self.shadows.len() as u64 * LEVELS as u64 * (TILES * TILES * 4) as u64;
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering; `fit` sized each buffer for these
+        // shadows. The view's begin and the depth's copy below order these writes before the
+        // compute passes.
+        unsafe {
+            d.cmd_update_buffer(cb, self.constants.raw, 0, pages);
+            d.cmd_update_buffer(cb, table.raw, 0, shadows);
+            d.cmd_update_buffer(cb, self.state.raw, 0, state);
+            d.cmd_fill_buffer(cb, tiles.raw, 0, tile_bytes, 0);
+            d.cmd_fill_buffer(
+                cb,
+                bounds.raw,
+                0,
+                self.shadows.len() as u64 * LEVELS as u64 * 16,
+                !0,
+            );
+        }
+        // The casters' view only pulls their vertices and gives their draws.
+        let nowhere = Camera {
+            view_projection: [[0.0; 4]; 4],
+            eye: [0.0; 4],
+        };
+        let screen = Tiles::new(&[], &nowhere, [1, 1]);
+        view.begin(cb, &nowhere, geometry, &[], &screen, [1, 1], table.address);
+        target.copy_depth(cb, depth.raw);
+        let written = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .dst_access_mask(
                 vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             );
-        // SAFETY: `cb` is recording outside rendering; the table holds every shadow (`fit`)
-        // and each map `SIZE`² words. The view's begin orders the table's update before
-        // the shaders that read it.
-        unsafe {
-            d.cmd_update_buffer(cb, table.raw, 0, bytes);
-            for map in &self.maps {
-                d.cmd_fill_buffer(cb, map.depth.raw, 0, vk::WHOLE_SIZE, u32::MAX);
-            }
-            d.cmd_pipeline_barrier2(
-                cb,
-                &vk::DependencyInfo::default().memory_barriers(&[cleared]),
+        barrier(d, cb, written);
+        let push = |first, count, stride| Push {
+            pages: self.constants.address,
+            first,
+            count,
+            stride,
+            pad: 0,
+        };
+        let computed = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             );
-        }
-        let stride = size_of::<Shadow>() as u64;
-        for (i, (map, shadow)) in self.maps.iter_mut().zip(&self.shadows).enumerate() {
-            let camera = Camera {
-                view_projection: shadow.view_projection,
-                eye: [0.0; 4],
-            };
-            let tiles = Tiles::new(&[], &camera, [1, 1]);
-            // A light's view has no screen, so no tiles to speak of.
-            let own = table.address + i as u64 * stride;
-            map.view
-                .begin(cb, &camera, geometry, &[], &tiles, [1, 1], own);
-            cull.record(cb, geometry, &map.view, map.shadow);
-            draw(d, cb, self.layout, self.pipeline, geometry, &map.view);
-        }
+        let [w, h] = self.extent;
+        let pixels = 0..w * h;
+        // One group, as `allocate` expects.
+        let group = 0..64;
+        let texels = 0..pool.pages * PAGE * PAGE;
+        let instances = 0..geometry.instance_count * self.shadows[0].levels;
+        self.mark.record(cb, &[pixels], push);
+        barrier(d, cb, computed);
+        self.allocate.record(cb, &[group], push);
+        barrier(d, cb, computed);
+        self.clear.record(cb, &[texels], push);
+        self.cast.record(cb, &[instances], push);
+        let listed = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::DRAW_INDIRECT
+                    | vk::PipelineStageFlags2::VERTEX_SHADER
+                    | vk::PipelineStageFlags2::FRAGMENT_SHADER
+                    | vk::PipelineStageFlags2::COPY,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::INDIRECT_COMMAND_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                    | vk::AccessFlags2::TRANSFER_READ,
+            );
+        barrier(d, cb, listed);
+        let region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: STATE,
+        };
+        // SAFETY: `cb` is recording outside rendering and both buffers hold the state.
+        unsafe { d.cmd_copy_buffer(cb, self.state.raw, self.counts.raw, &[region]) };
+        let to_host = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ);
+        barrier(d, cb, to_host);
+        self.draw(cb, geometry, pool.pages);
         let drawn = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
             .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-        // SAFETY: `cb` is recording outside rendering.
-        unsafe {
-            d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&[drawn]))
+        barrier(d, cb, drawn);
+    }
+
+    /// Draws the listed casters with no attachments, a pool page per layer: the fragments
+    /// write the pool themselves.
+    fn draw(&self, cb: vk::CommandBuffer, geometry: &Bound, pages: u32) {
+        let area = vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: vk::Extent2D {
+                width: PAGE,
+                height: PAGE,
+            },
         };
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: PAGE as f32,
+            height: PAGE as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let rendering = vk::RenderingInfo::default()
+            .render_area(area)
+            .layer_count(pages);
+        let push = Push {
+            pages: self.constants.address,
+            first: 0,
+            count: 0,
+            stride: 0,
+            pad: 0,
+        };
+        // SAFETY: `Push` is plain `repr(C)` data without padding.
+        let push = unsafe {
+            std::slice::from_raw_parts((&raw const push).cast::<u8>(), size_of::<Push>())
+        };
+        let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, and the pipeline was built for
+        // rendering with no attachments. `Pages` addresses live buffers, the lists hold
+        // `CAPACITY` draws counted by the state's first word, and every listed page is a
+        // layer under `pages`.
+        unsafe {
+            d.cmd_begin_rendering(cb, &rendering);
+            d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
+            d.cmd_set_viewport(cb, 0, &[viewport]);
+            d.cmd_set_scissor(cb, 0, &[area]);
+            let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
+            d.cmd_push_constants(cb, self.layout, stages, 0, push);
+            d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
+            d.cmd_draw_indexed_indirect_count(
+                cb,
+                self.draws.raw,
+                0,
+                self.state.raw,
+                0,
+                CAPACITY,
+                stride,
+            );
+            d.cmd_end_rendering(cb);
+        }
+    }
+
+    /// The last frame's counts, warning once when its pages or draws ran out. Its GPU work
+    /// must be done.
+    pub fn counts(&mut self) -> Counts {
+        if !self.recorded {
+            return Counts::default();
+        }
+        let b = self.counts.bytes();
+        let [draws, held, wanted, dropped, past] =
+            std::array::from_fn(|i| u32::from_ne_bytes(b[4 * i..4 * i + 4].try_into().unwrap()));
+        let pages = self.pool.as_ref().map_or(0, |p| p.pages);
+        if wanted > pages && !self.warned[0] {
+            self.warned[0] = true;
+            let levels = self.shadows.first().map_or(0, |s| s.levels);
+            let consequence = match levels.saturating_sub(dropped) {
+                0 => "some go unshadowed".to_owned(),
+                n => format!("the farthest {n} of their {levels} levels drop a LOD"),
+            };
+            eprintln!(
+                "pika: warning: shadows want {wanted} pages and pika:shadowPool holds {pages}; \
+                 {consequence}"
+            );
+        }
+        if past > 0 && !self.warned[1] {
+            self.warned[1] = true;
+            eprintln!(
+                "pika: warning: shadow casters met pages {draws} times, past the {CAPACITY} \
+                 draws Pika lists; some shadows are missing"
+            );
+        }
+        Counts {
+            wanted,
+            held,
+            draws: draws.min(CAPACITY),
+        }
     }
 
     pub fn memory(&self) -> gpu::Memory {
-        let mut memory = gpu::Memory::default();
-        for map in &self.maps {
-            memory += map.depth.memory();
-            memory += map.view.memory();
+        let mut memory = self.constants.memory();
+        for b in [&self.table, &self.tiles, &self.bounds, &self.depth]
+            .into_iter()
+            .flatten()
+        {
+            memory += b.memory();
         }
-        if let Some(t) = &self.table {
-            memory += t.memory();
+        if let Some(p) = &self.pool {
+            memory += p.texels.memory();
+            memory += p.owners.memory();
+        }
+        if let Some(v) = &self.view {
+            memory += v.memory();
+        }
+        for b in [&self.draws, &self.pairs, &self.state, &self.counts] {
+            memory += b.memory();
         }
         memory
     }
@@ -210,8 +583,8 @@ impl Shadows {
 
 impl Drop for Shadows {
     fn drop(&mut self) {
-        // SAFETY: both handles were created on `device`, and the owner's target waited
-        // for idle before this drops (field order).
+        // SAFETY: both handles were created on `device` or are null, and the owner's target
+        // waited for idle before this drops (field order).
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -219,80 +592,31 @@ impl Drop for Shadows {
     }
 }
 
-impl Map {
-    fn new(device: &gpu::Device, bound: &Bound) -> Result<Self, String> {
-        let words = SIZE as u64 * SIZE as u64;
-        let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
-        Ok(Self {
-            depth: Buffer::device_local(device, words * 4, usage)?,
-            view: View::new(device, bound, light::capacity(0, [1, 1]))?,
-            shadow: 0,
-        })
-    }
+fn barrier(d: &ash::Device, cb: vk::CommandBuffer, b: vk::MemoryBarrier2) {
+    // SAFETY: `cb` is recording outside rendering.
+    unsafe { d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&[b])) };
 }
 
-/// Draws the culled casters with no attachments: the fragments write the map themselves.
-fn draw(
-    d: &ash::Device,
-    cb: vk::CommandBuffer,
-    layout: vk::PipelineLayout,
-    pipeline: vk::Pipeline,
-    geometry: &Bound,
-    view: &View,
-) {
-    if geometry.count == 0 {
-        return;
+/// Replaces `slot` with a device-local storage buffer when it holds fewer than `bytes`.
+fn grow(device: &gpu::Device, slot: &mut Option<Buffer>, bytes: u64) -> Result<(), String> {
+    if slot.as_ref().is_some_and(|b| b.size >= bytes) {
+        return Ok(());
     }
-    let area = vk::Rect2D {
-        offset: vk::Offset2D::default(),
-        extent: vk::Extent2D {
-            width: SIZE,
-            height: SIZE,
-        },
-    };
-    let viewport = vk::Viewport {
-        x: 0.0,
-        y: 0.0,
-        width: SIZE as f32,
-        height: SIZE as f32,
-        min_depth: 0.0,
-        max_depth: 1.0,
-    };
-    let rendering = vk::RenderingInfo::default()
-        .render_area(area)
-        .layer_count(1);
-    let push = view.constants().to_ne_bytes();
-    // SAFETY: `cb` is recording outside rendering, and the pipeline was built for rendering
-    // with no attachments. The view's constants address live buffers, as large as the draws
-    // read, and its shadow's map holds `SIZE`² words.
-    unsafe {
-        d.cmd_begin_rendering(cb, &rendering);
-        d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
-        d.cmd_set_viewport(cb, 0, &[viewport]);
-        d.cmd_set_scissor(cb, 0, &[area]);
-        let stages = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-        d.cmd_push_constants(cb, layout, stages, 0, &push);
-        d.cmd_bind_index_buffer(cb, geometry.indices, 0, vk::IndexType::UINT32);
-        d.cmd_draw_indexed_indirect(
-            cb,
-            view.records(),
-            0,
-            geometry.count,
-            size_of::<vk::DrawIndexedIndirectCommand>() as u32,
-        );
-        d.cmd_end_rendering(cb);
-    }
+    *slot = None;
+    let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+    *slot = Some(Buffer::device_local(device, bytes, usage)?);
+    Ok(())
 }
 
-/// The orthographic world-to-clip rows over the light-space square that holds the boxes of
-/// the casters the camera sees, deep enough for every caster, and a texel's width; `None`
-/// when the camera sees no caster. Depth is 0 toward the light.
-fn fit<'a>(
-    toward: [f32; 3],
-    camera: &Camera,
+/// World-to-light rows: x and y across the light in world units, z over the depth of the
+/// casters carrying `shadow`, 0 toward the light. With them, how far across the light from
+/// `centre` any mesh reaches, which the coarsest level must hold; `None` when nothing casts.
+fn light_space<'a>(
+    toward: [f64; 3],
+    centre: [f64; 3],
     instances: impl Iterator<Item = (&'a Instance, &'a [f32; 6])>,
     shadow: u32,
-) -> Option<([[f32; 4]; 4], f32)> {
+) -> Option<([[f64; 4]; 3], f64)> {
     let forward = toward.map(|v| -v);
     let up = if forward[1].abs() < 0.9 {
         [0.0, 1.0, 0.0]
@@ -302,76 +626,75 @@ fn fit<'a>(
     let right = normalize(cross(up, forward));
     let up = cross(forward, right);
     let axes = [right, up, forward];
-    let mut lo = [f32::INFINITY; 3];
-    let mut hi = [f32::NEG_INFINITY; 3];
-    let mut seen_lo = [f32::INFINITY; 2];
-    let mut seen_hi = [f32::NEG_INFINITY; 2];
+    let c = axes.map(|a| dot(a, centre));
+    let mut depth = [f64::INFINITY, f64::NEG_INFINITY];
+    let mut reach: f64 = 0.0;
     for (instance, b) in instances {
-        if instance.shadow() & shadow != shadow {
-            continue;
-        }
-        let world = instance.world();
-        let corners: [[f32; 3]; 8] = std::array::from_fn(|c| {
-            let p = [0, 1, 2].map(|k| if c >> k & 1 == 1 { b[3 + k] } else { b[k] });
-            world.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3])
-        });
-        let seen = seen(&camera.view_projection, &corners);
-        for p in &corners {
-            let q = axes.map(|a| dot(a, *p));
-            for k in 0..3 {
-                lo[k] = lo[k].min(q[k]);
-                hi[k] = hi[k].max(q[k]);
-            }
-            if seen {
-                for k in 0..2 {
-                    seen_lo[k] = seen_lo[k].min(q[k]);
-                    seen_hi[k] = seen_hi[k].max(q[k]);
-                }
+        let world = instance.world().map(|r| r.map(f64::from));
+        let casts = instance.shadow() & shadow == shadow;
+        for corner in 0..8 {
+            let p = [0, 1, 2].map(|k| f64::from(b[k + 3 * (corner >> k & 1)]));
+            let p = world.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]);
+            let q = axes.map(|a| dot(a, p));
+            reach = reach.max((q[0] - c[0]).abs()).max((q[1] - c[1]).abs());
+            if casts {
+                depth = [depth[0].min(q[2]), depth[1].max(q[2])];
             }
         }
     }
-    if seen_lo[0] > seen_hi[0] {
+    if depth[0] > depth[1] {
         return None;
     }
-    let side = (seen_hi[0] - seen_lo[0]).max(seen_hi[1] - seen_lo[1]);
-    // A texel more each way, so the outermost casters' edges fall inside.
-    let texel = side.max(f32::MIN_POSITIVE) / (SIZE - 2) as f32;
-    let half = side / 2.0 + texel;
-    let centre = [0, 1].map(|k| (seen_lo[k] + seen_hi[k]) / 2.0);
     // Padded so the nearest and farthest casters are not clipped by rounding.
-    let pad = (hi[2] - lo[2]).max(texel) * 1e-3;
-    let (near, depth) = (lo[2] - pad, hi[2] - lo[2] + 2.0 * pad);
+    let pad = (depth[1] - depth[0]).max(1e-6) * 1e-3;
+    let (near, span) = (depth[0] - pad, depth[1] - depth[0] + 2.0 * pad);
     let row =
-        |a: [f32; 3], scale: f32, offset: f32| [a[0] * scale, a[1] * scale, a[2] * scale, offset];
-    let matrix = [
-        row(right, 1.0 / half, -centre[0] / half),
-        row(up, 1.0 / half, -centre[1] / half),
-        row(forward, 1.0 / depth, -near / depth),
-        [0.0, 0.0, 0.0, 1.0],
+        |a: [f64; 3], scale: f64, offset: f64| [a[0] * scale, a[1] * scale, a[2] * scale, offset];
+    let rows = [
+        row(right, 1.0, 0.0),
+        row(up, 1.0, 0.0),
+        row(forward, 1.0 / span, -near / span),
     ];
-    Some((matrix, texel))
+    Some((rows, reach))
 }
 
-/// As `shaders/cull.slang` decides it: false only when every corner is outside one plane.
-fn seen(view_projection: &[[f32; 4]; 4], corners: &[[f32; 3]; 8]) -> bool {
-    let mut inside = 0u32;
-    for p in corners {
-        let [x, y, z, w] = view_projection.map(|r| r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3]);
-        inside |= (x >= -w) as u32
-            | ((x <= w) as u32) << 1
-            | ((y >= -w) as u32) << 2
-            | ((y <= w) as u32) << 3
-            | ((z >= 0.0) as u32) << 4
-            | ((z <= w) as u32) << 5;
+/// Gauss–Jordan with partial pivoting; `None` when `m` is singular.
+fn invert(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
+    let mut a = *m;
+    let mut inverse: [[f64; 4]; 4] =
+        std::array::from_fn(|i| std::array::from_fn(|j| f64::from(u8::from(i == j))));
+    for col in 0..4 {
+        let pivot = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
+        if a[pivot][col] == 0.0 {
+            return None;
+        }
+        a.swap(col, pivot);
+        inverse.swap(col, pivot);
+        let scale = 1.0 / a[col][col];
+        for j in 0..4 {
+            a[col][j] *= scale;
+            inverse[col][j] *= scale;
+        }
+        for row in (0..4).filter(|&r| r != col) {
+            let f = a[row][col];
+            for j in 0..4 {
+                a[row][j] -= f * a[col][j];
+                inverse[row][j] -= f * inverse[col][j];
+            }
+        }
     }
-    inside == 0x3f
+    Some(inverse)
 }
 
-fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+fn dot3(row: &[f64; 4], p: [f64; 3]) -> f64 {
+    row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -379,7 +702,34 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
-fn normalize(a: [f32; 3]) -> [f32; 3] {
+fn normalize(a: [f64; 3]) -> [f64; 3] {
     let l = dot(a, a).sqrt();
     a.map(|v| v / l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inverse_undoes_the_matrix() {
+        let m = [
+            [2.0, 0.0, 1.0, 3.0],
+            [0.0, 0.0, -1.0, 2.0],
+            [0.5, 4.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+        ];
+        let inverse = invert(&m).unwrap();
+        for (i, row) in m.iter().enumerate() {
+            for j in 0..4 {
+                let v: f64 = row.iter().zip(&inverse).map(|(a, r)| a * r[j]).sum();
+                assert!(
+                    (v - f64::from(u8::from(i == j))).abs() < 1e-12,
+                    "{i} {j}: {v}"
+                );
+            }
+        }
+        // Negative control: a repeated row has no inverse.
+        assert!(invert(&[m[0], m[0], m[2], m[3]]).is_none());
+    }
 }
