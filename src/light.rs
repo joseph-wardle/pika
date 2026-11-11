@@ -9,6 +9,9 @@ use crate::transform::Camera;
 
 pub const TILE: u32 = 16;
 
+/// A light's `shadow` when it casts none.
+pub const NO_SHADOW: u32 = u32::MAX;
+
 /// The illuminance at which a light's reach ends: a facing white Lambert
 /// surface loses at most this / π of each light.
 pub const THRESHOLD: f32 = 0.01;
@@ -44,7 +47,9 @@ pub struct Light {
     pub link: u32,
     /// Past this an area light is read as a point; infinite for other lights.
     pub far: f32,
-    pub pad: [u32; 2],
+    /// Its map in the view's shadows, or `NO_SHADOW`.
+    pub shadow: u32,
+    pub pad: u32,
 }
 
 impl Light {
@@ -60,7 +65,8 @@ impl Light {
             fade: 0.0,
             link: 0,
             far: f32::INFINITY,
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 
@@ -78,7 +84,8 @@ impl Light {
             fade: 1.0 / (reach * reach),
             link: 0,
             far: f32::INFINITY,
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 
@@ -107,7 +114,8 @@ impl Light {
             fade: THRESHOLD / brightest,
             link: 0,
             far: far(shape, shown, bound),
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 }

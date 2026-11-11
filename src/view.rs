@@ -29,6 +29,7 @@ struct Constants {
     records: vk::DeviceAddress,
     visible: vk::DeviceAddress,
     drawn: vk::DeviceAddress,
+    shadows: vk::DeviceAddress,
 }
 
 pub struct View {
@@ -89,6 +90,8 @@ impl View {
     }
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
+    /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
         cb: vk::CommandBuffer,
@@ -97,6 +100,7 @@ impl View {
         lights: &[Light],
         tiles: &Tiles,
         extent: [u32; 2],
+        shadows: vk::DeviceAddress,
     ) {
         self.drawn.bytes().fill(0);
         // SAFETY: `Light` and the tiles' integers are plain `repr(C)` data without padding.
@@ -139,6 +143,7 @@ impl View {
             records: self.records.address,
             visible: self.visible.address,
             drawn: self.drawn.address,
+            shadows,
         };
         // SAFETY: `Constants` is plain `repr(C)` data without padding.
         let bytes = unsafe {

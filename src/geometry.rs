@@ -433,6 +433,14 @@ impl Geometry {
         footprints
     }
 
+    /// Each drawn instance with its mesh's box, in the mesh's own space.
+    pub fn instances(&self) -> impl Iterator<Item = (&Instance, &[f32; 6])> {
+        self.draws.iter().flat_map(|d| {
+            let t = &d.tables;
+            (t.instances.iter().zip(&t.owners)).map(|(i, &r)| (i, &t.boxes[r as usize]))
+        })
+    }
+
     pub fn memory(&self) -> gpu::Memory {
         let layout = self.layout.iter().flat_map(|l| {
             [
@@ -1499,7 +1507,7 @@ fn mesh_instances(
             }
         },
     };
-    let link = links.mesh(mesh).light;
+    let link = links.mesh(mesh);
     (matrices.iter())
         .filter_map(|m| Instance::new(m, topology.left_handed, link))
         .collect()

@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crate::link::Mask;
 use crate::store::{Instancer, Instancing};
 
 /// Laid out as the shader's 7 `float4`s per instance.
@@ -11,7 +12,8 @@ use crate::store::{Instancer, Instancing};
 pub struct Instance {
     world: [[f32; 4]; 3],
     normal: [[f32; 4]; 3],
-    /// Bit 0 of [0]: front faces wind clockwise. [1]: the light-link collection bits.
+    /// Bit 0 of [0]: front faces wind clockwise. [1] and [2]: the light- and shadow-link
+    /// collection bits.
     flags: [u32; 4],
 }
 
@@ -21,8 +23,13 @@ impl Instance {
         &self.world
     }
 
+    /// The shadow-link collections the mesh is in.
+    pub fn shadow(&self) -> u32 {
+        self.flags[2]
+    }
+
     /// `None` when the transform flattens the mesh, which then covers no pixels.
-    pub fn new(matrix: &[f64; 16], left_handed: bool, link: u32) -> Option<Self> {
+    pub fn new(matrix: &[f64; 16], left_handed: bool, link: Mask) -> Option<Self> {
         let linear = linear(matrix);
         let det = det3(&linear);
         let inverse = inverse3(&linear, det)?;
@@ -34,7 +41,7 @@ impl Instance {
         Some(Self {
             world,
             normal,
-            flags: [flip as u32, link, 0, 0],
+            flags: [flip as u32, link.light, link.shadow, 0],
         })
     }
 }
@@ -297,7 +304,7 @@ mod tests {
         let m = [
             0.0, 2.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0, 3.0, 1.0,
         ];
-        let i = Instance::new(&m, false, 0).unwrap();
+        let i = Instance::new(&m, false, Mask::default()).unwrap();
         let p = [1.0, 1.0, 0.0, 1.0];
         let world: [f64; 3] = std::array::from_fn(|r| dot(i.world[r], p));
         // Row vector p·M: (1, 1, 0) goes to (0 - 1, 2 + 0, 0) + (1, 2, 3).
@@ -398,7 +405,7 @@ mod tests {
     fn mirroring_and_left_handed_reverse_the_winding() {
         let mut mirror = translate(0.0, 0.0, 0.0);
         mirror[0] = -1.0;
-        let flip = |m: &[f64; 16], left| Instance::new(m, left, 0).unwrap().flags[0];
+        let flip = |m: &[f64; 16], left| Instance::new(m, left, Mask::default()).unwrap().flags[0];
         assert_eq!(flip(&translate(0.0, 0.0, 0.0), false), 0);
         assert_eq!(flip(&mirror, false), 1);
         assert_eq!(flip(&translate(0.0, 0.0, 0.0), true), 1);
@@ -406,6 +413,6 @@ mod tests {
         // A transform that flattens the mesh draws nothing.
         let mut flat = mirror;
         flat[0] = 0.0;
-        assert_eq!(Instance::new(&flat, false, 0), None);
+        assert_eq!(Instance::new(&flat, false, Mask::default()), None);
     }
 }

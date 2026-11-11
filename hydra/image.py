@@ -8,7 +8,7 @@ never Pika's store, so the two cannot share a mistake.
 Run it from a shell set up as hydra/check.sh sets one up. With `usdrecord`,
 it also renders each scene's color through usdrecord (usdview's engine),
 which needs an X display in DISPLAY. The renders run RENDERS at a time and
-the references on every core; the results print in the scenes' order.
+the references REFERENCES at a time; the results print in the scenes' order.
 
 What the reference encodes:
 - The camera is the RenderSettings camera's frustum, conformed to the
@@ -78,7 +78,11 @@ What the reference encodes:
   surface's color, so a scene lights a surface with two at most. A light
   lights only the meshes its lightLink collection includes; Pika links
   per mesh, so a scene's instances must share their prototype's links.
-  Other light types are refused.
+  A distant light, the camera light among them, unless its shadow:enable
+  is off, gives nothing to a hit whose ray toward it, along its axis
+  whatever its angle, meets a triangle of a mesh its shadowLink collection
+  includes (every mesh for the camera light), the hit's own triangle
+  aside. Other lights cast no shadows yet. Other light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -98,7 +102,9 @@ What the reference encodes:
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
-only for coverage, since a rasterizer and a ray decide them differently. Away
+only for coverage, since a rasterizer and a ray decide them differently; so
+are pixels next to a change of which lights' shadows hold them, since a
+shadow map's texels and a ray decide those differently. Away
 from them, values must agree within TOLERANCE, colour also allowed 1/256 of
 its value: the GPU decodes sRGB texels to about nine significant bits (RTX
 4070 Ti SUPER, driver 580), so a sample of a light grey is off by up to
@@ -140,6 +146,9 @@ BLURRED = {"lowered": (0, 1)}
 FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
+# Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
+# renders, under 32 GB.
+REFERENCES = 16
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
@@ -153,6 +162,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sphere light read as a point of its intensity", "sphere light's scale ignored",
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
             "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
+            "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1079,14 +1089,56 @@ def links(prim, paths, control):
     return np.array([included[path] for path in paths], bool)
 
 
-def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
+# Hit-triangle pairs a shadow ray test holds at once, about 100 MB: one per core runs.
+PAIRS = 1 << 20
+
+
+def shadowed(toward, casts, p, own, world, control):
+    """Which hits `p`, on triangles `own`, a distant light toward `toward`
+    (one direction, or one per hit) shadows: their rays toward it meet one
+    of the triangles of `world` that `casts`."""
+    if control == "shadows ignored":
+        return np.zeros(len(p), bool)
+    if control == "shadow rays turned 6°":
+        a = math.radians(6)
+        side = normalize(np.cross(toward, (0.0, 1.0, 0.0)))
+        toward = normalize(toward * math.cos(a) + side * math.sin(a))
+    k = np.nonzero(casts)[0]
+    v0, e1, e2 = world[k, 0], world[k, 1] - world[k, 0], world[k, 2] - world[k, 0]
+    out = np.zeros(len(p), bool)
+    chunk = max(1, PAIRS // max(len(k), 1))
+    for start in range(0, len(p), chunk):
+        d = toward if toward.ndim == 1 else toward[start:start + chunk, None]
+        u, v, t, det = intersect(p[start:start + chunk, None], d, v0, e1, e2)
+        hit = (det != 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+        out[start:start + chunk] = (hit & (k != own[start:start + chunk, None])).any(axis=1)
+    return out
+
+
+def shadow_casters(prim, faces, control):
+    """Which triangles, by `faces`' prim paths, cast the light's shadows:
+    those of the meshes its shadowLink collection includes, or none when
+    its shadow:enable is off."""
+    if prim.GetAttribute("inputs:shadow:enable").Get() is False and control != "shadow:enable ignored":
+        return np.zeros(len(faces), bool)
+    if control == "shadow links ignored":
+        return np.ones(len(faces), bool)
+    query = UsdLux.LightAPI(prim).GetShadowLinkCollectionAPI().ComputeMembershipQuery()
+    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(faces)}
+    return np.array([included[path] for path in faces], bool)
+
+
+def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=None):
     """Each light as the direction toward it, one for every hit or one
-    per hit, the illuminance it gives a surface facing it, likewise, and
-    the sine of the angle it subtends, 0 but for a sphere (see the
-    module's doc). `axis` is the direction the host's camera light shines;
-    `p` holds the hits, `n` their normals, turned toward the eye, and
-    `paths` their prims' paths. A light gives the hits it is not linked to
-    nothing, and is refused only over those it is."""
+    per hit, the illuminance it gives a surface facing it, likewise, the
+    sine of the angle it subtends, 0 but for a sphere, and the hits its
+    shadow holds (see the module's doc). `axis` is the direction the
+    host's camera light shines; `p` holds the hits, `n` their normals,
+    turned toward the eye, and `paths` their prims' paths; `casters` the
+    hits' triangles, the world triangles and their prims' paths. A light
+    gives the hits it is not linked to nothing, and is refused only over
+    those it is."""
+    own, world, faces = casters
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
         if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
@@ -1094,15 +1146,18 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
     if not found and lit:
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
-        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control), 0)]
+        e = illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control)
+        held = shadowed(np.asarray(light, float), np.ones(len(world), bool), p, own, world, control)
+        return [(light, np.where(held[:, None], 0.0, e), 0, held)]
     if not found and control == "Pika's old headlight":
-        return [(-axis, (np.pi,) * 3, 0)]
+        return [(-axis, (np.pi,) * 3, 0, np.zeros(len(p), bool))]
     out = []
     for prim in found:
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
         on = links(prim, paths, control)
+        held = np.zeros(len(p), bool)
         if prim.IsA(UsdLux.SphereLight):
             given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
         elif any(prim.IsA(t) for t in AREA):
@@ -1116,9 +1171,12 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
                             api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
                             api.GetNormalizeAttr().Get(time), control)
             given = (z / np.linalg.norm(z), e, 0)
+            casts = shadow_casters(prim, faces, control)
+            held[on] = shadowed(given[0], casts, p[on], own[on], world, control)
         d, e, sin = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.zeros(len(p))
         d[on], e[on], sin[on] = given
-        out.append((d, e, sin))
+        e[held] = 0
+        out.append((d, e, sin, held))
     return out
 
 
@@ -1161,6 +1219,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
         "depth": np.ones((height, width)),
         "normal": np.zeros((height, width, 3)),
         "face": np.full((height, width), -1),
+        "shadow": np.zeros((height, width), int),
     }
     if not tris:
         return image
@@ -1226,7 +1285,11 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     facing[dot(facing, toward) < 0] *= -1
     shine = np.zeros((len(p), 3))
     paths = [tris[k]["face"][0] for k in i]
-    for d, e, sin in lights(stage, time, axis, toward, p, facing, paths, host, lit, control):
+    faces = [t["face"][0] for t in tris]
+    held = np.zeros(len(p), int)
+    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, world, faces), control)
+    for bit, (d, e, sin, shadow) in enumerate(found):
+        held |= shadow.astype(int) << bit
         cos = dot(facing, d)
         if (abs(cos) < sin).any():
             raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")
@@ -1248,6 +1311,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     image["depth"][hit] = depth
     image["normal"][hit] = n
     image["face"][hit] = face[i]
+    image["shadow"][hit] = held
     return image
 
 
@@ -1360,7 +1424,7 @@ def compare(image, ref, aovs):
     """Why `image` does not match `ref`, or an empty list."""
     problems = []
     covered = ref["face"] >= 0
-    edge = edges(ref["face"])
+    edge = edges(ref["face"]) | edges(ref["shadow"])
     drawn = image["color"][..., 3] > 0.5
     stray = (drawn != covered) & ~edge
     if stray.any():
@@ -1503,7 +1567,7 @@ def main():
     stages = {s: Usd.Stage.Open(s) for s in scenes}
     sizes = {s: tuple(UsdRender.Settings(stages[s].GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get())
              for s in scenes}
-    with (concurrent.futures.ProcessPoolExecutor() as compute,
+    with (concurrent.futures.ProcessPoolExecutor(REFERENCES) as compute,
           concurrent.futures.ThreadPoolExecutor(RENDERS) as render):
         # The pool forks before the render threads start.
         refs = {s: compute.submit(references, s, *sizes[s], HUSK) for s in scenes}

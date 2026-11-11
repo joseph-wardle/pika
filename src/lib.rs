@@ -16,6 +16,7 @@ mod raster;
 mod renderer;
 mod shade;
 pub mod shader;
+mod shadow;
 mod smooth;
 mod stats;
 mod store;

@@ -43,7 +43,23 @@ struct Light
     float fade;
     uint link;
     float far;
-    uint2 pad;
+    // Its map in the view's shadows, or NO_SHADOW.
+    uint shadow;
+    uint pad;
+};
+
+static const uint NO_SHADOW = 0xffffffff;
+
+// A light's plain shadow map (src/shadow.rs Shadow): light depth, 0 toward the light,
+// as float bits, so the nearest caster is the least.
+struct Shadow
+{
+    // World to the map's clip space, orthographic: rows of the column-vector matrix.
+    float4 view_projection[4];
+    Atomic<uint> *map;
+    // Texels a side, and a texel's width in world units.
+    uint size;
+    float texel;
 };
 
 // The side of a light tile in pixels (src/light.rs TILE).
@@ -79,6 +95,8 @@ struct View
     // The instances the cull pass kept, at each record's first instance.
     uint *visible;
     Atomic<uint> *drawn;
+    // The camera's view reads every light's; a light's view draws into its own, the first.
+    Shadow *shadows;
 };
 
 float4 project(View *view, float4 world)

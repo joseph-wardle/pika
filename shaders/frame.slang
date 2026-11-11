@@ -129,8 +129,15 @@ struct Lights
     }
 }
 
+// The geometric normal, which the shadow lookup offsets along. Derivatives need the uniform
+// control flow lights_at() runs in, not the light loop's; the loop gives visibility() only P,
+// and changing the call bake/generate.cpp emits re-bakes every texture.
+static float3 shadow_normal;
+
 Lights lights_at(float3 P, int link)
 {
+    float3 g = cross(ddx(P), ddy(P));
+    shadow_normal = dot(g, g) > 0 ? normalize(g) : float3(0);
     uint2 t = tile(P);
     Lights lights;
     lights.P = P;
@@ -184,8 +191,23 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     return incident;
 }
 
-// How much of light light_index reaches P: all of it, until shadows.
+// How much of light light_index reaches P: none where its map holds a caster nearer the
+// light. Outside the map, all.
 float visibility(uint light_index, float3 P)
 {
-    return 1.0;
+    Light light = view->lights[light_index];
+    if (light.shadow == NO_SHADOW)
+        return 1.0;
+    Shadow *s = view->shadows + light.shadow;
+    // A texel off the surface, toward the light, so the surface does not shadow itself.
+    float3 n = dot(shadow_normal, light.position) < 0 ? -shadow_normal : shadow_normal;
+    float4 q = float4(P + n * s->texel, 1);
+    float3 c = float3(dot(s->view_projection[0], q), dot(s->view_projection[1], q),
+                      dot(s->view_projection[2], q));
+    float2 uv = c.xy * 0.5 + 0.5;
+    if (any(uv < 0) || any(uv >= 1))
+        return 1.0;
+    uint2 t = min(uint2(uv * s->size), s->size - 1);
+    // Negative depth, nearer the light than any caster, would read as a huge integer.
+    return s->map[t.y * s->size + t.x].load() < asuint(max(c.z, 0.0)) ? 0.0 : 1.0;
 }

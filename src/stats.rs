@@ -70,6 +70,7 @@ pub struct Memory {
     pub views: gpu::Memory,
     pub targets: gpu::Memory,
     pub materials: gpu::Memory,
+    pub shadows: gpu::Memory,
     pub vram_used: u64,
     pub vram_budget: u64,
 }
@@ -276,9 +277,10 @@ impl Frame {
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
             ("material_bytes", m.materials.device),
+            ("shadow_bytes", m.shadows.device),
             (
                 "host_bytes",
-                m.geometry.host + m.views.host + m.targets.host + m.materials.host,
+                m.geometry.host + m.views.host + m.targets.host + m.materials.host + m.shadows.host,
             ),
             ("vram_used_bytes", m.vram_used),
             ("vram_budget_bytes", m.vram_budget),
@@ -384,6 +386,10 @@ mod tests {
                     host: 21_000_000,
                 },
                 materials: gpu::Memory::default(),
+                shadows: gpu::Memory {
+                    device: 64 << 20,
+                    host: 8,
+                },
                 vram_used: 2_000_000_000,
                 vram_budget: 15_000_000_000,
             },
@@ -413,7 +419,7 @@ mod tests {
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
              geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
-             material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
+             material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \
              blurred_textures 6\n";

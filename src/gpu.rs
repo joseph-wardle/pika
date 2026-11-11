@@ -259,6 +259,7 @@ impl Instance {
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
             .independent_blend(true)
+            .fragment_stores_and_atomics(true)
             .texture_compression_bc(true);
         let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
         let extensions = &extensions[..usize::from(info.memory_budget)];

@@ -19,7 +19,7 @@ struct Push {
     first: u32,
     count: u32,
     stride: u32,
-    unused: u32,
+    shadow: u32,
 }
 
 impl Cull {
@@ -31,8 +31,9 @@ impl Cull {
         })
     }
 
-    /// Call after `view` began its frame.
-    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View) {
+    /// Call after `view` began its frame. A light's view keeps only the instances carrying
+    /// its `shadow` link bit; the camera's passes 0.
+    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View, shadow: u32) {
         if geometry.count == 0 {
             return;
         }
@@ -42,7 +43,7 @@ impl Cull {
             first,
             count,
             stride,
-            unused: 0,
+            shadow,
         });
         let culled = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)

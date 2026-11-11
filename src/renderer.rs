@@ -16,6 +16,7 @@ use crate::link::Links;
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
+use crate::shadow::{Caster, Shadows};
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
 use crate::target::Target;
@@ -95,6 +96,7 @@ pub struct Renderer {
     view: Option<View>,
     raster: Raster,
     shade: Shade,
+    shadows: Shadows,
     cull: Cull,
     geometry: Geometry,
     device: gpu::Device<'static>,
@@ -187,6 +189,7 @@ impl Renderer {
         let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
         let tangent = shader::compile("tangent")?;
+        let shadow = shader::compile("shadow")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -195,6 +198,7 @@ impl Renderer {
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
             shade: Shade::new(&device)?,
+            shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
@@ -330,17 +334,34 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        let bound = self.geometry.bound();
         // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
-        let lights: Vec<_> = (self.store.lights().values())
-            .filter_map(|l| {
-                let link = links.light(l).light;
-                light::resolve(l).map(|r| light::Light { link, ..r })
-            })
-            .collect();
+        let mut lights = Vec::new();
+        let mut casters = Vec::new();
+        for l in self.store.lights().values() {
+            let Some(resolved) = light::resolve(l) else {
+                continue;
+            };
+            let link = links.light(l);
+            if resolved.shape == light::DISTANT && l.params.is_some_and(|p| p.shadow) {
+                let shadow = link.shadow;
+                casters.push(Caster {
+                    light: lights.len(),
+                    shadow,
+                });
+            }
+            lights.push(light::Light {
+                link: link.light,
+                ..resolved
+            });
+        }
+        if let Some(g) = &bound {
+            let (device, geometry) = (&self.device, &self.geometry);
+            (self.shadows).fit(device, geometry, g, &camera, &mut lights, &casters)?;
+        }
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
-        let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
             (Some(g), Some(v)) if v.fits(g, capacity) => Some(v),
@@ -350,10 +371,15 @@ impl Renderer {
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h]);
-            self.cull.record(cb, geometry, view);
+            let shadows = self.shadows.table();
+            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h], shadows);
+            self.cull.record(cb, geometry, view, 0);
         }
         self.commands.mark("cull")?;
+        if let Some(geometry) = &bound {
+            self.shadows.record(cb, geometry, &self.cull);
+        }
+        self.commands.mark("shadow")?;
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(
             cb,
@@ -458,6 +484,7 @@ impl Renderer {
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
             targets: target.memory(),
             materials: self.shade.memory(),
+            shadows: self.shadows.memory(),
             vram_used,
             vram_budget,
         };
