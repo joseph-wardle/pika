@@ -1,5 +1,5 @@
 """Pika's image check: renders each scene in hydra/images/ in husk, for
-frames 1 and 2, and compares its color, depth and normal AOVs with a ray cast
+each frame of its time range (1 and 2 unless it says), and compares its color, depth and normal AOVs with a ray cast
 from USD, one ray through each pixel centre. The reference reads the stage,
 never Pika's store, so the two cannot share a mistake.
 
@@ -150,9 +150,8 @@ BLURRED = {"lowered": (0, 1)}
 # in one line.
 POOLED = {"receding": 1}
 # Scenes whose lights and camera stay while casters move: husk must keep some pages from frame
-# 1 and draw others anew.
+# 1, draw others anew and give the moving casters' pages a live copy.
 CACHED = {"moving"}
-FRAMES = (1, 2)
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
 # Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
@@ -907,7 +906,7 @@ def triangles(stage, time, host, control=None):
             subdivided = False
         if subdivided or not normals:
             # The points smooth normals are computed from.
-            at = FRAMES[0] if control == "frame 1's smooth normals" else time
+            at = stage.GetStartTimeCode() if control == "frame 1's smooth normals" else time
             normals = smooth_normals(surface(mesh, at, control)[0], counts, indices, left, control)
             interpolation = UsdGeom.Tokens.vertex
         face_of = [face for face, count in enumerate(counts) for _ in range(count)]
@@ -1214,7 +1213,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
     held = host.holds_camera_light != (control == "camera light held as the other host holds it")
-    axis = np.array((frustum(stage, FRAMES[0], width, height, focal, policy) if held else f).ComputeViewDirection())
+    axis = np.array((frustum(stage, stage.GetStartTimeCode(), width, height, focal, policy) if held else f).ComputeViewDirection())
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
@@ -1245,9 +1244,9 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     world = np.array([[list(v) for v in t["points"]] for t in tris])
     faces = [t["face"][0] for t in tris]
     casting = world
-    if control == "moved casters' old shadows kept" and time != FRAMES[0]:
+    if control == "moved casters' old shadows kept" and time != stage.GetStartTimeCode():
         # The triangles that moved since frame 1, where they were then.
-        old = triangles(stage, FRAMES[0], host)
+        old = triangles(stage, stage.GetStartTimeCode(), host)
         stage.GetSessionLayer().Clear()
         moved = old if len(old) != len(tris) else [o for o, t in zip(old, tris) if o["points"] != t["points"]]
         if moved:
@@ -1479,7 +1478,12 @@ def budget(name):
     return env
 
 
-def husk(scene, out):
+def frames(stage):
+    """The frames of the stage's time range."""
+    return tuple(range(int(stage.GetStartTimeCode()), int(stage.GetEndTimeCode()) + 1))
+
+
+def husk(scene, out, frames):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.husk.log")
     env = budget(name)
@@ -1487,10 +1491,10 @@ def husk(scene, out):
     headlight = [] if name in CAMERA_LIT else ["--headlight", "none"]
     with open(log, "w") as f:
         subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur", *headlight,
-                        "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
+                        "-f", str(frames[0]), "-n", str(len(frames)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=env)
-    return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in FRAMES}, log
+    return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in frames}, log
 
 
 def blurred(stats, name):
@@ -1510,31 +1514,32 @@ def blurred(stats, name):
 
 
 def cached(stats, name):
-    """Failures unless the `stats` husk wrote show, past the first frame, a frame that kept
-    some of its shadow pages and drew others anew, when the scene is CACHED."""
-    frames = []
+    """Failures unless the `stats` husk wrote show, past the first frame, each frame keeping
+    some of its shadow pages, drawing others anew and giving some a live copy, when the scene
+    is CACHED."""
+    seen = []
     with open(stats) as f:
         for line in f:
             words = line.split()
             if words and words[0] == "frame":
                 pairs = dict(zip(words[2::2], words[3::2]))
-                frames.append((int(pairs["shadow_pages_drawn"]), int(pairs["shadow_pages"])))
-    if name in CACHED and not any(0 < drawn < held for drawn, held in frames[1:]):
-        return [f"{name}: shadow pages drawn of those held past the first frame {frames[1:]}"]
+                seen.append(tuple(int(pairs[k]) for k in ("shadow_pages_drawn", "shadow_pages_live", "shadow_pages")))
+    if name in CACHED and not all(0 < drawn < held and live > 0 for drawn, live, held in seen[1:]):
+        return [f"{name}: shadow pages drawn, live and held past the first frame {seen[1:]}"]
     return []
 
 
-def usdrecord(scene, out, width):
+def usdrecord(scene, out, width, frames):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
     off = [] if name in CAMERA_LIT else ["--disableCameraLight"]
     with open(log, "w") as f:
         subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off,
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
-                        "--frames", f"{FRAMES[0]}:{FRAMES[-1]}",
+                        "--frames", f"{frames[0]}:{frames[-1]}",
                         scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
-    return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
+    return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in frames}, log
 
 
 def references(scene, width, height, host):
@@ -1544,7 +1549,7 @@ def references(scene, width, height, host):
     name = os.path.splitext(os.path.basename(scene))[0]
     lowered, lit = name in BUDGET, name in CAMERA_LIT
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in frames(stage)}
 
 
 def differs(stage, host):
@@ -1586,13 +1591,14 @@ def check(name, renders, references, aovs):
     Returns (failures, the controls that changed a reference)."""
     failures = []
     changed = set()
-    for t in FRAMES:
+    times = sorted(renders)
+    for t in times:
         problems = compare(renders[t], references[t][None], aovs)
         print(f"  frame {t}: {'; '.join(problems) or 'matches'}")
         failures += [f"{name} frame {t}: {p}" for p in problems]
-    t = FRAMES[-1]
+    t = times[-1]
     for control in CONTROLS:
-        frame = FRAMES[0] if control == "frame 1's reference" else t
+        frame = times[0] if control == "frame 1's reference" else t
         perturbed = references[frame][None if frame != t else control]
         if not compare(perturbed, references[t][None], aovs):
             continue
@@ -1616,12 +1622,12 @@ def main():
           concurrent.futures.ThreadPoolExecutor(RENDERS) as render):
         # The pool forks before the render threads start.
         refs = {s: compute.submit(references, s, *sizes[s], HUSK) for s in scenes}
-        husks = {s: render.submit(husk, s, out) for s in scenes}
-        records = {s: render.submit(usdrecord, s, out, sizes[s][0]) for s in scenes} if record else {}
+        husks = {s: render.submit(husk, s, out, frames(stages[s])) for s in scenes}
+        records = {s: render.submit(usdrecord, s, out, sizes[s][0], frames(stages[s])) for s in scenes} if record else {}
         recorded = {}
         for s, job in records.items():
             # usdrecord takes the image's height from the camera's aspect.
-            shape = job.result()[0][FRAMES[0]]["color"].shape
+            shape = next(iter(job.result()[0].values()))["color"].shape
             host = usdrecord_host()
             if shape[:2] != sizes[s][::-1] or differs(stages[s], host) or os.path.basename(s)[:-5] in CAMERA_LIT:
                 recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
