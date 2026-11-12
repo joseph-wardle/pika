@@ -6,6 +6,7 @@ instancer /world/scatter
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  categories none
   instance_translations 2
     1 0 0
     2 0 0
@@ -16,6 +17,7 @@ instancer /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  categories none
   instance_transforms 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 3 0 1
 mesh /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri
@@ -46,6 +48,7 @@ instancer /world/scatter
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  categories none
   instance_translations 2
     1 0 0
     2 0 0
@@ -56,6 +59,7 @@ instancer /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  categories none
   instance_transforms 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 5 0 1
 mesh /world/scatter/prototypes/leaf/ForInstancer#/UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer/UsdNiPrototype/tri

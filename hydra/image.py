@@ -76,8 +76,8 @@ What the reference encodes:
   stage drawn without lights is black: Pika has no headlight of its own.
   Pika's threshold takes up to 0.01 lux off each light, 5.7e-4 of a clay
   surface's color, so a scene lights a surface with two at most. A light
-  lights only the meshes its lightLink collection includes; Pika links
-  per mesh, so a scene's instances must share their prototype's links.
+  lights only the meshes its lightLink collection includes, a native
+  instance's mesh by its instance proxy's path.
   A light, the camera light among them, unless its shadow:enable is off,
   gives nothing to a hit whose ray toward it meets a triangle of a mesh its
   shadowLink collection includes (every mesh for the camera light), the
@@ -170,6 +170,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sphere light read as a point of its intensity", "sphere light's scale ignored",
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
             "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
+            "instance links ignored",
             "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
             "shadow rays past local lights", "moved casters' old shadows kept",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
@@ -1094,7 +1095,21 @@ def links(prim, paths, control):
     if control == "light links ignored":
         return np.ones(len(paths), bool)
     query = UsdLux.LightAPI(prim).GetLightLinkCollectionAPI().ComputeMembershipQuery()
-    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(paths)}
+    return member(prim, query, paths, control)
+
+
+def member(light, query, paths, control):
+    """Which `paths` the collection `query` includes. Under the control, a
+    native instance's mesh is in no collection, as Pika once held it: a light
+    whose collection is not everything gives no instance its light or shadow."""
+    stage = light.GetStage()
+    everything = dict(query.GetAsPathExpansionRuleMap()) == {Sdf.Path.absoluteRootPath: "expandPrims"}
+    def included(path):
+        proxy = stage.GetPrimAtPath(path).IsInstanceProxy()
+        if control == "instance links ignored" and proxy and not everything:
+            return False
+        return query.IsPathIncluded(Sdf.Path(path))
+    included = {path: included(path) for path in set(paths)}
     return np.array([included[path] for path in paths], bool)
 
 
@@ -1136,8 +1151,7 @@ def shadow_casters(prim, faces, control):
     if control == "shadow links ignored":
         return np.ones(len(faces), bool)
     query = UsdLux.LightAPI(prim).GetShadowLinkCollectionAPI().ComputeMembershipQuery()
-    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(faces)}
-    return np.array([included[path] for path in faces], bool)
+    return member(prim, query, faces, control)
 
 
 def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=None):

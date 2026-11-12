@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::link::Mask;
+use crate::link::{Links, Mask};
 use crate::store::{Instancer, Instancing};
 
 /// Laid out as the shader's 7 `float4`s per instance.
@@ -89,35 +89,50 @@ impl Camera {
     }
 }
 
-/// The transforms a prototype is drawn at, composed as Hydra does: per instancer level, each
-/// instance's primvars then the instancer's transform, outer levels repeating per instance.
-pub fn instance_transforms(
+/// The instances a prototype is drawn at: each one's transform, composed as Hydra does (per
+/// instancer level, each instance's primvars then the instancer's transform, outer levels
+/// repeating per instance), and the link collections its instances at every level are in.
+pub fn instances(
     instancers: &HashMap<&str, &Instancer>,
+    links: &Links,
     instancing: &Instancing,
-) -> Result<Vec<[f64; 16]>, String> {
-    let mut matrices = vec![IDENTITY];
+) -> Result<Vec<([f64; 16], Mask)>, String> {
+    let mut instances = vec![(IDENTITY, Mask::default())];
     let mut at = instancing;
     for _ in 0..=instancers.len() {
         let instancer = instancers
             .get(at.instancer.as_str())
             .ok_or_else(|| format!("no instancer {} in the store", at.instancer))?;
-        let level = level(instancer, &at.indices)?;
+        let level = level(instancer, links, &at.indices)?;
         // Outer instances first, as Hydra orders them.
-        matrices = (level.iter())
-            .flat_map(|outer| matrices.iter().map(|inner| multiply(inner, outer)))
+        instances = (level.iter())
+            .flat_map(|(outer, o)| {
+                (instances.iter()).map(move |(inner, i)| (multiply(inner, outer), *i | *o))
+            })
             .collect();
         let Some(Some(parent)) = &instancer.parent else {
-            return Ok(matrices);
+            return Ok(instances);
         };
         at = parent;
     }
     Err(format!("instancer {} is nested in itself", at.instancer))
 }
 
-fn level(instancer: &Instancer, indices: &[i32]) -> Result<Vec<[f64; 16]>, String> {
-    let (Some(transform), Some(primvars)) = (&instancer.transform, &instancer.primvars) else {
+fn level(
+    instancer: &Instancer,
+    links: &Links,
+    indices: &[i32],
+) -> Result<Vec<([f64; 16], Mask)>, String> {
+    let (Some(transform), Some(primvars), Some(categories)) = (
+        &instancer.transform,
+        &instancer.primvars,
+        &instancer.categories,
+    ) else {
         return Err(format!("instancer {} is not synced", instancer.path));
     };
+    let masks: Vec<Mask> = (categories.sets.iter())
+        .map(|c| links.categories(c))
+        .collect();
     let get = |name: &str, count: usize, index: i32| {
         usize::try_from(index)
             .ok()
@@ -153,7 +168,12 @@ fn level(instancer: &Instancer, indices: &[i32]) -> Result<Vec<[f64; 16]>, Strin
                     &[1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0., x, y, z, 1.],
                 );
             }
-            Ok(multiply(&m, transform))
+            let s = &categories.set;
+            let mask = match s.is_empty() {
+                true => Mask::default(),
+                false => masks[s[get("category sets", s.len(), index)?] as usize],
+            };
+            Ok((multiply(&m, transform), mask))
         })
         .collect()
 }
@@ -223,7 +243,11 @@ fn inverse3(m: &[[f64; 3]; 3], det: f64) -> Option<[[f64; 3]; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::InstancePrimvars;
+    use crate::store::{InstanceCategories, InstancePrimvars, Link, Store};
+
+    fn unlinked() -> Links {
+        Links::new(&Store::new())
+    }
 
     fn dot(a: [f32; 4], b: [f64; 4]) -> f64 {
         (0..4).map(|i| a[i] as f64 * b[i]).sum()
@@ -337,6 +361,7 @@ mod tests {
                 translations: Some(vec![[0.0; 3], [0.0, 100.0, 0.0]]),
                 ..Default::default()
             }),
+            categories: Some(InstanceCategories::default()),
         };
         let inner = Instancer {
             path: "/inner".into(),
@@ -352,6 +377,7 @@ mod tests {
                 rotations: Some(vec![[0.1, 0.5, -0.3, 0.8]]),
                 scales: Some(vec![[1.0, 2.0, -3.0]]),
             }),
+            categories: Some(InstanceCategories::default()),
         };
         (outer, inner)
     }
@@ -364,7 +390,11 @@ mod tests {
             instancer: "/inner".into(),
             indices: vec![0],
         };
-        let m = instance_transforms(&instancers, &at).unwrap();
+        let m: Vec<_> = (instances(&instancers, &unlinked(), &at)
+            .unwrap()
+            .into_iter())
+        .map(|(m, _)| m)
+        .collect();
         // (1, 1, 1) as Gf moves it through M S R T Ti, then O To for each outer instance O.
         let expected = [[11.0, -2.0, 9.0], [11.0, 98.0, 9.0]];
         assert_eq!(m.len(), 2);
@@ -380,6 +410,46 @@ mod tests {
         assert!((0..3).any(|k| (wrong[k] - e[k]).abs() > 0.1));
     }
 
+    /// ALab's walls: native instances whose shadow-link collections are their own, not their
+    /// prototype's.
+    #[test]
+    fn instances_are_in_their_own_and_their_holders_collections() {
+        let (mut outer, mut inner) = nested();
+        let mut store = Store::new();
+        for (path, light, shadow) in [("/sun", "", "sun_casters"), ("/key", "key_lit", "")] {
+            let id = store.insert_light(path.into());
+            let link = Link {
+                light: light.into(),
+                shadow: shadow.into(),
+            };
+            store.set_light_link(id, link).unwrap();
+        }
+        let links = Links::new(&store);
+        let sun = links.categories(&["sun_casters".into()]);
+        let key = links.categories(&["key_lit".into()]);
+        let tokens = |t: &[&str]| t.iter().map(|&t| t.to_owned()).collect();
+        outer.categories = Some(InstanceCategories::new(vec![
+            tokens(&["sun_casters"]),
+            tokens(&[]),
+        ]));
+        inner.categories = Some(InstanceCategories::new(vec![tokens(&["key_lit"])]));
+        let at = Instancing {
+            instancer: "/inner".into(),
+            indices: vec![0],
+        };
+        let masks = |outer: &Instancer, inner: &Instancer| {
+            let instancers = HashMap::from([("/outer", outer), ("/inner", inner)]);
+            (instances(&instancers, &links, &at).unwrap().into_iter())
+                .map(|(_, mask)| mask)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(masks(&outer, &inner), [key | sun, key]);
+        // Negative control: instances without categories of their own are in no collection.
+        outer.categories = Some(InstanceCategories::default());
+        inner.categories = Some(InstanceCategories::default());
+        assert_eq!(masks(&outer, &inner), [Mask::default(); 2]);
+    }
+
     #[test]
     fn broken_instancers_are_refused() {
         let (outer, mut inner) = nested();
@@ -388,17 +458,30 @@ mod tests {
             indices: vec![index],
         };
         let instancers = HashMap::from([("/outer", &outer), ("/inner", &inner)]);
-        let error = instance_transforms(&instancers, &at("/inner", 1)).unwrap_err();
+        let error = instances(&instancers, &unlinked(), &at("/inner", 1)).unwrap_err();
         assert!(
             error.contains("index 1 is not one of /inner's 1 transforms"),
             "{error}"
         );
-        let error = instance_transforms(&instancers, &at("/lost", 0)).unwrap_err();
+        let error = instances(&instancers, &unlinked(), &at("/lost", 0)).unwrap_err();
+        assert!(error.contains("no instancer /lost"), "{error}");
+        let error = instances(&instancers, &unlinked(), &at("/lost", 0)).unwrap_err();
         assert!(error.contains("no instancer /lost"), "{error}");
         inner.parent = Some(Some(at("/inner", 0)));
         let instancers = HashMap::from([("/inner", &inner)]);
-        let error = instance_transforms(&instancers, &at("/inner", 0)).unwrap_err();
+        let error = instances(&instancers, &unlinked(), &at("/inner", 0)).unwrap_err();
         assert!(error.contains("nested in itself"), "{error}");
+        let (outer, mut inner) = nested();
+        let p = inner.primvars.as_mut().unwrap();
+        (p.translations, p.rotations, p.scales) = (None, None, None);
+        p.transforms = Some(vec![IDENTITY; 2]);
+        inner.categories = Some(InstanceCategories::new(vec![vec!["a".into()]]));
+        let instancers = HashMap::from([("/outer", &outer), ("/inner", &inner)]);
+        let error = instances(&instancers, &unlinked(), &at("/inner", 1)).unwrap_err();
+        assert!(
+            error.contains("index 1 is not one of /inner's 1 category sets"),
+            "{error}"
+        );
     }
 
     #[test]

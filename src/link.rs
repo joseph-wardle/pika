@@ -4,6 +4,7 @@
 //! lacking its bit.
 
 use std::collections::BTreeMap;
+use std::ops::BitOr;
 use std::sync::Once;
 
 use crate::store::{Light, Mesh, Store};
@@ -15,6 +16,18 @@ const BITS: usize = 32;
 pub struct Mask {
     pub light: u32,
     pub shadow: u32,
+}
+
+/// An instance is in its prototype's collections and in those of each instance holding it.
+impl BitOr for Mask {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self {
+            light: self.light | other.light,
+            shadow: self.shadow | other.shadow,
+        }
+    }
 }
 
 pub struct Links {
@@ -44,8 +57,13 @@ impl Links {
     }
 
     pub fn mesh(&self, mesh: &Mesh) -> Mask {
+        self.categories(mesh.categories.as_deref().unwrap_or_default())
+    }
+
+    /// The collections of Hydra's category tokens, a mesh's or an instance's.
+    pub fn categories(&self, categories: &[String]) -> Mask {
         let mask = |bits: &BTreeMap<String, u32>| {
-            (mesh.categories.iter().flatten())
+            (categories.iter())
                 .filter_map(|c| bits.get(c))
                 .fold(0, |mask, bit| mask | bit)
         };

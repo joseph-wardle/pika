@@ -224,6 +224,10 @@ int pika_instancer_free(const pika_renderer *renderer, uint64_t id);
 // The parent's instance indices this instancer repeats at.
 int pika_instancer_parent(const pika_renderer *renderer, uint64_t id, const char *parent,
                           const int32_t *indices, size_t count);
+// Each instance's categories, as pika_mesh_categories takes a mesh's: `counts[i]` tokens per
+// instance, in instance order, all in `categories`.
+int pika_instancer_categories(const pika_renderer *renderer, uint64_t id, const size_t *counts,
+                              size_t count, const char *const *categories);
 int pika_instancer_transform(const pika_renderer *renderer, uint64_t id,
                              const double matrix[16]);
 int pika_instancer_primvars(const pika_renderer *renderer, uint64_t id,

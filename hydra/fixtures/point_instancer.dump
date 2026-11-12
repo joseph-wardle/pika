@@ -6,6 +6,7 @@ instancer /world/scatter
     0 1 0 0
     0 0 1 0
     0 0 7 1
+  categories none
   instance_translations 2
     1 0 0
     2 0 0
@@ -43,6 +44,7 @@ instancer /world/scatter
     0 1 0 0
     0 0 1 0
     0 0 7 1
+  categories none
   instance_translations 2
     1 0 0
     3 0 0

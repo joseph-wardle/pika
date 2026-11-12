@@ -6,6 +6,9 @@ instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  category_set ["group_2"]
+  category_set []
+  instance_category_sets 0 1
   instance_transforms 2
     1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1
@@ -117,6 +120,9 @@ instancer /UsdNiPropagatedPrototypes/#/__Prototype_1/UsdNiInstancer
     0 1 0 0
     0 0 1 0
     0 0 0 1
+  category_set ["group_2"]
+  category_set []
+  instance_category_sets 0 1
   instance_transforms 2
     1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1
     1 0 0 0 0 1 0 0 0 0 1 0 0 2 0 1

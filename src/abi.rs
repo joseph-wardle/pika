@@ -9,8 +9,8 @@ use std::sync::{Mutex, MutexGuard};
 use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
-    InstancePrimvars, Instancing, Interpolation, LightParams, Link, Normals, Refined,
-    RefinedTexcoord, Scheme, Shape, Stencils, Subset, Texcoord, Topology,
+    InstanceCategories, InstancePrimvars, Instancing, Interpolation, LightParams, Link, Normals,
+    Refined, RefinedTexcoord, Scheme, Shape, Stencils, Subset, Texcoord, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -730,6 +730,35 @@ pub unsafe extern "C" fn pika_instancer_parent(
             indices: unsafe { slice(indices, count) }.to_vec(),
         });
         lock(handle)?.store.set_instancer_parent(id, parent)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, `counts` valid for `count` reads and `categories` for their sum.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_instancer_categories(
+    renderer: *const Handle,
+    id: u64,
+    counts: *const usize,
+    count: usize,
+    categories: *const *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the arrays.
+        let (handle, counts) = unsafe { (&*renderer, slice(counts, count)) };
+        // SAFETY: as above.
+        let tokens = unsafe { slice(categories, counts.iter().sum()) };
+        let mut instances = Vec::with_capacity(count);
+        let mut rest = tokens;
+        for &n in counts {
+            let (now, later) = rest.split_at(n);
+            rest = later;
+            // SAFETY: as above.
+            let set = (now.iter()).map(|&c| unsafe { string(c) });
+            instances.push(set.collect::<Result<_, _>>()?);
+        }
+        let categories = InstanceCategories::new(instances);
+        lock(handle)?.store.set_instance_categories(id, categories)
     })
 }
 

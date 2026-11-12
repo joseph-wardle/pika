@@ -13,10 +13,10 @@
 # from the left triangle, and the others' unauthored ones are everything.
 # Collections of the same prims share a token whatever their kind, so the
 # fill's shadowLink is the key's lightLink token.
-# Pika links per mesh, so the instances the spot links one of are lit as
-# their prototype is, which is warned of. Frame 2 links the key to both
-# triangles, the rim to everything, and the fill's shadows to the right
-# triangle.
+# The spot links one of two native instances: the instancer holds a
+# category set per instance, the prototype's mesh none. Frame 2 links the
+# key to both triangles, the rim to everything, and the fill's shadows to
+# the right triangle.
 def Xform "world"
 {
     def Camera "camera" {}

@@ -7,7 +7,7 @@ use ash::vk;
 
 use crate::commands::Commands;
 use crate::gpu::{self, Buffer};
-use crate::link::Links;
+use crate::link::{Links, Mask};
 use crate::need::{self, Footprint};
 use crate::smooth::{self, Smooth};
 use crate::store::{
@@ -16,7 +16,7 @@ use crate::store::{
 };
 use crate::subdiv::{self, Subdiv};
 use crate::tangent::{self, Tangent};
-use crate::transform::{Instance, instance_transforms, multiply};
+use crate::transform::{Instance, instances, multiply};
 
 /// A vertex's normal index when its normal is its point's smooth normal.
 const SMOOTH: u32 = u32::MAX;
@@ -1514,10 +1514,12 @@ fn mesh_instances(
     if range.index_count == 0 || !(tagged || tags.is_empty()) {
         return Vec::new();
     }
-    let matrices = match instancing {
-        None => vec![*transform],
-        Some(i) => match instance_transforms(instancers, i) {
-            Ok(m) => m.iter().map(|m| multiply(transform, m)).collect(),
+    let placed = match instancing {
+        None => vec![(*transform, Mask::default())],
+        Some(i) => match instances(instancers, links, i) {
+            Ok(p) => (p.iter())
+                .map(|(m, l)| (multiply(transform, m), *l))
+                .collect(),
             Err(e) => {
                 eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
                 return Vec::new();
@@ -1525,8 +1527,8 @@ fn mesh_instances(
         },
     };
     let link = links.mesh(mesh);
-    (matrices.iter())
-        .filter_map(|m| Instance::new(m, topology.left_handed, link))
+    (placed.iter())
+        .filter_map(|(m, l)| Instance::new(m, topology.left_handed, link | *l))
         .collect()
 }
 

@@ -64,6 +64,35 @@ pub struct Instancer {
     pub parent: Option<Option<Instancing>>,
     pub transform: Option<[f64; 16]>,
     pub primvars: Option<InstancePrimvars>,
+    pub categories: Option<InstanceCategories>,
+}
+
+/// Hydra's light-link categories per instance, indexed as the primvars are. Instances mostly
+/// share theirs, so each distinct set is held once. Empty when no instance has any.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct InstanceCategories {
+    pub sets: Vec<Vec<String>>,
+    /// Each instance's index into `sets`.
+    pub set: Vec<u32>,
+}
+
+impl InstanceCategories {
+    pub fn new(instances: Vec<Vec<String>>) -> Self {
+        if instances.iter().all(Vec::is_empty) {
+            return Self::default();
+        }
+        let mut categories = Self::default();
+        let mut seen: HashMap<Vec<String>, u32> = HashMap::new();
+        for c in instances {
+            let next = seen.len() as u32;
+            let set = *seen.entry(c).or_insert_with_key(|c| {
+                categories.sets.push(c.clone());
+                next
+            });
+            categories.set.push(set);
+        }
+        categories
+    }
 }
 
 /// Each `None` when absent: native instances arrive as matrices, point instancers as parts.
@@ -616,6 +645,7 @@ impl Store {
             parent: None,
             transform: None,
             primvars: None,
+            categories: None,
         };
         self.instancers.insert(id, instancer);
         self.moved.draws = true;
@@ -686,6 +716,28 @@ impl Store {
             &mut self.stats.instancer,
             &mut instancer.primvars,
             primvars,
+            bytes,
+        );
+        Ok(())
+    }
+
+    pub fn set_instance_categories(
+        &mut self,
+        id: u64,
+        categories: InstanceCategories,
+    ) -> Result<(), String> {
+        let bytes = 4 * categories.set.len()
+            + (categories.sets.iter().flatten())
+                .map(String::len)
+                .sum::<usize>();
+        let instancer = self
+            .instancers
+            .get_mut(&id)
+            .ok_or_else(|| stale("instancer", id))?;
+        self.moved.draws |= write(
+            &mut self.stats.instancer,
+            &mut instancer.categories,
+            categories,
             bytes,
         );
         Ok(())
@@ -1042,6 +1094,16 @@ impl fmt::Display for Instancer {
             None => writeln!(f, "  parent {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())?;
+        match &self.categories {
+            Some(c) if c.sets.is_empty() => writeln!(f, "  categories none")?,
+            Some(c) => {
+                for set in &c.sets {
+                    writeln!(f, "  category_set {set:?}")?;
+                }
+                writeln!(f, "  instance_category_sets{}", List(&c.set))?;
+            }
+            None => writeln!(f, "  categories {UNSYNCED}")?,
+        }
         let Some(p) = &self.primvars else {
             return writeln!(f, "  primvars {UNSYNCED}");
         };
@@ -1660,6 +1722,45 @@ mod tests {
     }
 
     #[test]
+    fn instances_share_their_category_sets() {
+        let tokens = |t: &[&str]| t.iter().map(|&t| t.to_owned()).collect::<Vec<_>>();
+        let c = InstanceCategories::new(vec![
+            tokens(&["a", "b"]),
+            tokens(&[]),
+            tokens(&["a", "b"]),
+            tokens(&["a"]),
+        ]);
+        assert_eq!(c.sets, [tokens(&["a", "b"]), tokens(&[]), tokens(&["a"])]);
+        assert_eq!(c.set, [0, 1, 0, 2]);
+        // Instances with none hold nothing, as an instancer Hydra gives no categories does.
+        let none = InstanceCategories::new(vec![tokens(&[]); 3]);
+        assert_eq!(none, InstanceCategories::default());
+        assert_eq!(InstanceCategories::new(Vec::new()), none);
+        // Negative control: a changed set is told apart.
+        let changed = InstanceCategories::new(vec![tokens(&["a", "b"]), tokens(&["b"])]);
+        assert_ne!(changed.sets[1], c.sets[1]);
+    }
+
+    #[test]
+    fn instance_categories_move_the_draws() {
+        let mut store = Store::new();
+        let i = store.insert_instancer("/i".into());
+        store.take_moved();
+        let one = || InstanceCategories::new(vec![vec!["group_0".into()]]);
+        store.set_instance_categories(i, one()).unwrap();
+        assert!(store.take_moved().draws);
+        store.set_instance_categories(i, one()).unwrap();
+        assert!(
+            !store.take_moved().draws,
+            "unchanged categories move nothing"
+        );
+        store
+            .set_instance_categories(i, InstanceCategories::default())
+            .unwrap();
+        assert!(store.take_moved().draws);
+    }
+
+    #[test]
     fn dump_is_sorted_by_path_and_exact() {
         let mut store = Store::new();
         let b = store.insert_mesh("/world/b".into());
@@ -1749,6 +1850,8 @@ mod tests {
             ..Default::default()
         };
         store.set_instance_primvars(i, primvars).unwrap();
+        let categories = InstanceCategories::new(vec![vec!["group_1".into()]]);
+        store.set_instance_categories(i, categories).unwrap();
         let c = store.insert_curves("/world/c".into());
         store.pulled_curves(c, 68).unwrap();
         store.insert_counted("sphereLight".into(), "/world/aa".into());
@@ -1798,6 +1901,8 @@ curves /world/c
 instancer /world/i
   parent /world/j indices 2
   transform not synced
+  category_set [\"group_1\"]
+  instance_category_sets 0
   instance_translations 1
     1 0 0
   instance_rotations 1

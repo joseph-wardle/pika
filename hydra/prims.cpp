@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -476,14 +475,17 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
         _SyncPrimvars(delegate, renderer);
-    // Pika links lights per mesh, so it ignores categories that differ between instances.
-    static std::atomic<bool> warned{false};
     if (bits & HdChangeTracker::DirtyCategories) {
+        std::vector<size_t> counts;
+        std::vector<const char *> tokens;
         for (VtArray<TfToken> const &c : delegate->GetInstanceCategories(GetId())) {
-            if (!c.empty() && !warned.exchange(true))
-                warn(path + ": its instances have light links of their own, which Pika ignores; "
-                            "each instance is lit as its prototype is (warned once)");
+            counts.push_back(c.size());
+            for (TfToken const &t : c)
+                tokens.push_back(t.GetText());
         }
+        _pika.report(pika_instancer_categories(renderer, _id, counts.data(), counts.size(),
+                                               tokens.data()),
+                     path + " categories");
     }
 }
 
