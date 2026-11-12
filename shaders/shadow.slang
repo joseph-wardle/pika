@@ -27,8 +27,9 @@ struct Pages
     uint *live;
     // Per tile, this frame's flags: MARK to PAINTED.
     Atomic<uint> *marks;
-    // Per shadow, level and face, the bounds of the tiles drawn this frame: least x and y,
-    // then least across - 1 - x and y, so all four start at 0xffffffff and fall by min.
+    // Per shadow, level and face, the bounds of the pages drawn this frame, then of the live
+    // copies: least x and y, then least across - 1 - x and y, so all four start at 0xffffffff
+    // and fall by min.
     Atomic<uint> *bounds;
     // The camera's depth AOV: 1 - clip depth, 1 where nothing was drawn.
     float *depth;
@@ -112,9 +113,11 @@ ConstantBuffer<Push> push;
 // Faces' bounds per shadow and level.
 static const uint FACES = 6;
 
-Atomic<uint> *bounds(uint j, uint i, uint face)
+// Apart, so a caster that is not moving walks only the pages drawn, which most frames have
+// none of, not the live copies around the moving ones.
+Atomic<uint> *bounds(uint j, uint i, uint face, bool live)
 {
-    return push.pages->bounds + 4 * ((j * LEVELS + i) * FACES + face);
+    return push.pages->bounds + 4 * (((j * LEVELS + i) * FACES + face) * 2 + uint(live));
 }
 
 // Shadow j's tiles, their pages this frame and their flags.
@@ -352,12 +355,12 @@ void choose(uint3 thread : SV_DispatchThreadID)
     p->state[3].store(dropped);
 }
 
-// Widens the bounds of shadow j's tiles drawn this frame to tile t.
-void widen(uint j, Tile t)
+// Widens the bounds of shadow j's pages or live copies drawn this frame to tile t.
+void widen(uint j, Tile t, bool live)
 {
     Shadow *s = push.pages->shadows + j;
     uint across = tiles_across(s, t.level);
-    Atomic<uint> *b = bounds(j, t.level, t.face);
+    Atomic<uint> *b = bounds(j, t.level, t.face, live);
     b[0].min(t.at.x);
     b[1].min(t.at.y);
     b[2].min(across - 1 - t.at.x);
@@ -368,7 +371,7 @@ void widen(uint j, Tile t)
 void draw_page(uint j, Tile t, uint page)
 {
     push.pages->drawn[push.pages->state[DRAWN].increment()] = page;
-    widen(j, t);
+    widen(j, t, false);
 }
 
 // Gives shadow j's tile e, t, the page, drawn anew.
@@ -596,7 +599,7 @@ void enliven(uint j, uint i, uint face, int2 a, int2 b)
             t.level = i;
             t.face = face;
             t.at = int2(x, y);
-            widen(j, t);
+            widen(j, t, true);
         }
     }
 }
@@ -700,22 +703,31 @@ void clear(uint3 thread : SV_DispatchThreadID)
         p->pool[p->drawn[k / (PAGE * PAGE)] * PAGE * PAGE + k % (PAGE * PAGE)].store(0xffffffff);
 }
 
-// Lists one draw of the instance into each page to draw of shadow j's level i and face its
-// tiles from a to b meet.
+// A moving instance draws only into live copies, the others only into pages.
+bool moves(uint instance)
+{
+    return asuint(push.pages->last[8 * instance + 6]) == push.pages->frame;
+}
+
+// Whether shadow j's level i draws, on the face this frame, a page (or a live copy) the
+// instance draws into.
+bool touched(uint j, uint i, uint face, uint instance)
+{
+    return bounds(j, i, face, moves(instance))[0].load() < TILES;
+}
+
+// Lists one draw of the instance into each page or live copy to draw of shadow j's touched
+// level i and face its tiles from a to b meet.
 void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
 {
     Pages *p = push.pages;
     View *v = p->casters;
     Shadow *s = p->shadows + j;
-    Atomic<uint> *bound = bounds(j, i, face);
-    // Untouched, the level draws no page there.
-    if (bound[0].load() >= TILES)
-        return;
+    bool moving = moves(instance);
+    Atomic<uint> *bound = bounds(j, i, face, moving);
     int across = int(tiles_across(s, i));
     a = max(a, int2(bound[0].load(), bound[1].load()));
     b = min(b, across - 1 - int2(bound[2].load(), bound[3].load()));
-    // A moving instance draws only into live copies, the others only into pages.
-    bool moving = asuint(p->last[8 * instance + 6]) == p->frame;
     for (int y = a.y; y <= b.y; y++)
     {
         for (int x = a.x; x <= b.x; x++)
@@ -758,12 +770,19 @@ void cast(uint3 thread : SV_DispatchThreadID)
         Shadow *s = p->shadows + j;
         if (i >= s->levels || !casts(instance, s))
             continue;
+        // Most frames draw no page, so most levels are untouched for a caster not moving.
+        uint faces = max(s->faces, 1);
+        bool any = false;
+        for (uint face = 0; face < faces; face++)
+            any = any || touched(j, i, face, instance);
+        if (!any)
+            continue;
         float3 corners[8];
         uint r = corners_of(instance, corners);
-        for (uint face = 0; face < max(s->faces, 1); face++)
+        for (uint face = 0; face < faces; face++)
         {
             int2 a, b;
-            if (covers(s, i, face, corners, a, b))
+            if (touched(j, i, face, instance) && covers(s, i, face, corners, a, b))
                 list(j, i, face, a, b, instance, r);
         }
     }

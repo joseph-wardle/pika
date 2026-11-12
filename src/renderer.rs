@@ -412,9 +412,18 @@ impl Renderer {
         // Between the prepass and shading, which reads them: pages follow the depth drawn.
         if let Some((geometry, view)) = drawn {
             let still = (!update.draws).then(|| self.geometry.moved_instances(&moved));
-            (self.shadows).record(&self.device, cb, geometry, view, target, still.as_deref())?;
+            let commands = &mut self.commands;
+            (self.shadows).record(
+                &self.device,
+                commands,
+                geometry,
+                view,
+                target,
+                still.as_deref(),
+            )?;
+        } else {
+            Shadows::skip(&mut self.commands)?;
         }
-        self.commands.mark("shadow")?;
         target.resume_rendering(cb);
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();

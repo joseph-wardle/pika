@@ -10,6 +10,7 @@
 
 use ash::vk;
 
+use crate::commands::Commands;
 use crate::geometry::{Bound, Geometry};
 use crate::gpu::{self, Buffer};
 use crate::light::{self, Light, Tiles};
@@ -36,6 +37,9 @@ const READ: u64 = 11 * 4;
 /// Moved entries a frame lists, as one `vkCmdUpdateBuffer` writes them; past it, every page
 /// is drawn anew.
 const MOVED: usize = 65536 / 4;
+/// The record's spans, in order: listing pages and casters, drawing pages, copying them into
+/// live copies, drawing the moving casters into those.
+const MARKS: [&str; 4] = ["shadow_list", "shadow_pages", "shadow_copy", "shadow_live"];
 /// `shaders/shadow.slang`'s moved entry flags.
 const STARTED: u32 = 0x8000_0000;
 const STOPPED: u32 = 0x4000_0000;
@@ -188,7 +192,8 @@ pub struct Shadows {
     tiles: Option<Buffer>,
     live: Option<Buffer>,
     marks: Option<Buffer>,
-    /// Per shadow, level and face, the bounds of the tiles drawn this frame.
+    /// Per shadow, level and face, the bounds of the pages drawn this frame and of the live
+    /// copies.
     bounds: Option<Buffer>,
     depth: Option<Buffer>,
     /// Per instance, its box when it last moved.
@@ -421,7 +426,7 @@ impl Shadows {
         self.clean |= grow(device, &mut self.tiles, count * tile_bytes)?;
         grow(device, &mut self.live, count * tile_bytes)?;
         grow(device, &mut self.marks, count * tile_bytes)?;
-        grow(device, &mut self.bounds, count * LEVELS as u64 * FACES * 16)?;
+        grow(device, &mut self.bounds, count * LEVELS as u64 * FACES * 32)?;
         grow(device, &mut self.table, count * size_of::<Shadow>() as u64)?;
         grow(
             device,
@@ -527,11 +532,12 @@ impl Shadows {
     /// Records outside rendering, after `fit` and after the prepass drew `target`'s depth for
     /// `camera`, before the passes that read the shadows; no GPU work may be pending. `moved`
     /// lists, ascending, the instances whose transform or points moved since the last frame,
-    /// `None` when the draws were rewritten, and every page is drawn anew.
+    /// `None` when the draws were rewritten, and every page is drawn anew. Times each of
+    /// `MARKS`, as `skip` does when there is nothing to draw.
     pub fn record(
         &mut self,
         device: &gpu::Device,
-        cb: vk::CommandBuffer,
+        commands: &mut Commands,
         geometry: &Bound,
         camera: &View,
         target: &Target,
@@ -539,7 +545,7 @@ impl Shadows {
     ) -> Result<(), String> {
         self.recorded = false;
         if self.shadows.is_empty() || geometry.count == 0 {
-            return Ok(());
+            return Self::skip(commands);
         }
         let instances = geometry.instance_count as u64;
         let grown = grow(device, &mut self.last, instances.max(1) * 32)?;
@@ -551,15 +557,16 @@ impl Shadows {
             &self.marks,
             &self.bounds,
         ) else {
-            return Ok(());
+            return Self::skip(commands);
         };
         let Some(depth) = &self.depth else {
-            return Ok(());
+            return Self::skip(commands);
         };
         let (Some(view), Some(last)) = (&mut self.view, &self.last) else {
-            return Ok(());
+            return Self::skip(commands);
         };
         self.recorded = true;
+        let cb = commands.buffer();
         // 0 marks an instance not moving since a fresh frame.
         self.frame = self.frame.wrapping_add(1).max(1);
         let listed = moved
@@ -639,7 +646,7 @@ impl Shadows {
                 cb,
                 bounds.raw,
                 0,
-                self.shadows.len() as u64 * LEVELS as u64 * FACES * 16,
+                self.shadows.len() as u64 * LEVELS as u64 * FACES * 32,
                 !0,
             );
         }
@@ -739,8 +746,10 @@ impl Shadows {
             .dst_stage_mask(vk::PipelineStageFlags2::HOST)
             .dst_access_mask(vk::AccessFlags2::HOST_READ);
         barrier(d, cb, to_host);
+        commands.mark(MARKS[0])?;
         // The pages, then their live copies from them and the moving casters.
         self.draw(cb, geometry, pool.pages, 0, 0);
+        commands.mark(MARKS[1])?;
         let pages_drawn = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
@@ -748,6 +757,7 @@ impl Shadows {
             .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
         barrier(d, cb, pages_drawn);
         self.copy.record(cb, &[texels], push);
+        commands.mark(MARKS[2])?;
         let copied = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
@@ -757,6 +767,7 @@ impl Shadows {
             );
         barrier(d, cb, copied);
         self.draw(cb, geometry, pool.pages, CAPACITY, LIVE_DRAWS);
+        commands.mark(MARKS[3])?;
         let drawn = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
@@ -764,6 +775,11 @@ impl Shadows {
             .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
         barrier(d, cb, drawn);
         Ok(())
+    }
+
+    /// Times `record`'s spans at zero, so every frame has the same ones.
+    pub fn skip(commands: &mut Commands) -> Result<(), String> {
+        MARKS.iter().try_for_each(|m| commands.mark(m))
     }
 
     /// Draws the casters listed from draw `first`, as many as the state's word `counted`, with

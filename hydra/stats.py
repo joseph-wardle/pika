@@ -22,8 +22,9 @@ BUDGET_MS = 41.67
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
     ("shade", ("gpu_shade_ms",), 8.0),
-    # Marking, allocating and drawing shadow pages; their lookups are in shade.
-    ("shadow", ("gpu_shadow_ms",), 3.0),
+    # Listing, drawing and copying shadow pages; their lookups are in shade.
+    ("shadow", ("gpu_shadow_list_ms", "gpu_shadow_pages_ms", "gpu_shadow_copy_ms",
+                "gpu_shadow_live_ms"), 3.0),
     ("update", ("gpu_upload_ms", "gpu_subdiv_ms", "gpu_smooth_ms", "gpu_tangent_ms",
                 "gpu_texture_ms"), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
