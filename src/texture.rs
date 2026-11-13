@@ -7,6 +7,8 @@ use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use ash::vk;
@@ -54,13 +56,17 @@ impl Texture {
 
     pub fn read_at(&self, from: usize, into: &mut [u8]) -> std::io::Result<()> {
         match &self.contents {
-            Contents::File(path) => File::open(path)?.read_exact_at(into, from as u64),
+            Contents::File(path) => read_file(path, from as u64, into),
             Contents::Memory(file) => {
                 into.copy_from_slice(&file[from..from + into.len()]);
                 Ok(())
             }
         }
     }
+}
+
+fn read_file(path: &Path, from: u64, into: &mut [u8]) -> std::io::Result<()> {
+    File::open(path)?.read_exact_at(into, from)
 }
 
 const HOST: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::from_raw(
@@ -248,6 +254,18 @@ fn copies(
 /// 0.8 ms a MiB (RTX 4070 Ti SUPER). Larger raises span frames.
 pub const UPLOAD: u64 = 32 << 20;
 
+/// Bytes a swap's read asks for, so a frame's `UPLOAD` takes several, read from
+/// different files at once.
+const CHUNK: u64 = 8 << 20;
+
+/// Bytes asked of the readers and not yet uploaded: the most their reads hold in
+/// host memory.
+const AHEAD: u64 = 2 * UPLOAD;
+
+/// The file server answers parallel reads faster than one (hypothesis: four are
+/// enough on NFS).
+const READERS: usize = 4;
+
 /// Longest side of the coarsest level kept: one 4×4 block, since each coarser
 /// level takes a block too.
 pub const TAIL: u32 = 4;
@@ -303,6 +321,8 @@ impl Loaded {
 struct Incoming {
     image: Image,
     done: u64,
+    /// The readers hold or will hold its bytes from `done`.
+    asked: bool,
 }
 
 /// Counts of loaded textures, within `need::WINDOW`.
@@ -688,37 +708,157 @@ impl Staging {
     }
 }
 
+/// Stages the level bytes `part`, as `copies` cuts them, from `fill`; the time it took.
 fn upload(
     device: &gpu::Device,
     cb: vk::CommandBuffer,
-    texture: &Texture,
-    image: &Image,
-    (done, budget): (u64, u64),
+    (texture, image): (&Texture, &Image),
+    part: Range<u64>,
     staging: &mut Staging,
-) -> Result<(u64, Duration), String> {
-    let (mut copies, end) = copies(texture, image.first, done, budget);
-    if end == done {
-        return Ok((done, Duration::ZERO));
-    }
+    fill: impl FnOnce(&mut [u8]) -> Result<(), String>,
+) -> Result<Duration, String> {
+    let size = part.end - part.start;
+    let (mut copies, end) = copies(texture, image.first, part.start, size);
+    debug_assert_eq!(end, part.end, "a part not cut by `copies`");
     // Stage the levels alone: the header would misalign the block-size offsets.
-    let size = end - done;
     let (buffer, at) = staging.room(device, size)?;
     let start = Instant::now();
-    let into = &mut buffer.bytes()[at as usize..(at + size) as usize];
-    let from = texture.levels[image.first].start + done as usize;
-    (texture.read_at(from, into)).map_err(|e| format!("cannot read its levels: {e}"))?;
-    let read = start.elapsed();
+    fill(&mut buffer.bytes()[at as usize..(at + size) as usize])?;
+    let fill = start.elapsed();
     for copy in &mut copies {
         copy.buffer_offset += at;
     }
-    if done == 0 {
+    if part.start == 0 {
         image.to_copy(cb, texture);
     }
     image.copy(cb, buffer, &copies);
     if end == texture.bytes(image.first) {
         image.to_sample(cb, texture);
     }
-    Ok((end, read))
+    Ok(fill)
+}
+
+/// A part of a swap's levels, `part` of them from file offset `from`.
+struct Read {
+    key: String,
+    first: usize,
+    part: Range<u64>,
+    from: u64,
+}
+
+impl Read {
+    fn size(&self) -> u64 {
+        self.part.end - self.part.start
+    }
+}
+
+type Arrived = (Read, Result<Vec<u8>, String>);
+
+/// Reads swaps' levels on worker threads, so a frame never waits on a file;
+/// the render thread copies what arrived into staging.
+struct Reads {
+    jobs: Sender<(Read, PathBuf)>,
+    done: Receiver<Arrived>,
+    /// By texture, first level and start: a stale read must not take a current one's place.
+    arrived: BTreeMap<(String, usize, u64), Arrived>,
+    /// Bytes asked for and not yet taken or dropped.
+    ahead: u64,
+}
+
+impl Reads {
+    fn new() -> Self {
+        let (jobs, queue) = mpsc::channel::<(Read, PathBuf)>();
+        let queue = Arc::new(Mutex::new(queue));
+        let (finished, done) = mpsc::channel();
+        for _ in 0..READERS {
+            let (queue, finished) = (queue.clone(), finished.clone());
+            // Exits once `jobs` drops with its owner.
+            std::thread::spawn(move || {
+                loop {
+                    let job = queue.lock().unwrap_or_else(PoisonError::into_inner).recv();
+                    let Ok((read, path)) = job else {
+                        return;
+                    };
+                    let mut bytes = vec![0; read.size() as usize];
+                    let result = (read_file(&path, read.from, &mut bytes))
+                        .map(|()| bytes)
+                        .map_err(|e| format!("cannot read its levels: {e}"));
+                    if finished.send((read, result)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Self {
+            jobs,
+            done,
+            arrived: BTreeMap::new(),
+            ahead: 0,
+        }
+    }
+
+    /// Asks for the part of the levels from `first` that starts at byte `done`,
+    /// unless `AHEAD` bytes are out; whether it asked.
+    fn ask(&mut self, key: &str, texture: &Texture, (first, done): (usize, u64)) -> bool {
+        if self.ahead >= AHEAD {
+            return false;
+        }
+        let (_, end) = copies(texture, first, done, CHUNK);
+        let read = Read {
+            key: key.to_owned(),
+            first,
+            part: done..end,
+            from: texture.levels[first].start as u64 + done,
+        };
+        self.ahead += read.size();
+        let path = match &texture.contents {
+            Contents::File(path) => path.clone(),
+            Contents::Memory(_) => {
+                let mut bytes = vec![0; read.size() as usize];
+                let result = (texture.read_at(read.from as usize, &mut bytes))
+                    .map(|()| bytes)
+                    .map_err(|e| format!("cannot read its levels: {e}"));
+                self.land(read, result);
+                return true;
+            }
+        };
+        if let Err(mpsc::SendError((read, _))) = self.jobs.send((read, path)) {
+            self.land(read, Err("the texture readers have exited".into()));
+        }
+        true
+    }
+
+    fn land(&mut self, read: Read, bytes: Result<Vec<u8>, String>) {
+        let at = (read.key.clone(), read.first, read.part.start);
+        if let Some((old, _)) = self.arrived.insert(at, (read, bytes)) {
+            self.ahead -= old.size();
+        }
+    }
+
+    /// Lands the finished reads and drops those no swap waits for.
+    fn gather(&mut self, wanted: impl Fn(&Read) -> bool) {
+        while let Ok((read, bytes)) = self.done.try_recv() {
+            self.land(read, bytes);
+        }
+        let mut dropped = 0;
+        self.arrived.retain(|_, (read, _)| {
+            let keep = wanted(read);
+            dropped += if keep { 0 } else { read.size() };
+            keep
+        });
+        self.ahead -= dropped;
+    }
+
+    /// The end of the part asked for at `(first, done)`, once it arrived.
+    fn ready(&self, key: &str, (first, done): (usize, u64)) -> Option<u64> {
+        Some(self.arrived.get(&(key.to_owned(), first, done))?.0.part.end)
+    }
+
+    fn take(&mut self, key: &str, (first, done): (usize, u64)) -> Option<Arrived> {
+        let arrived = self.arrived.remove(&(key.to_owned(), first, done))?;
+        self.ahead -= arrived.0.size();
+        Some(arrived)
+    }
 }
 
 fn fail(key: &str, loaded: &mut Loaded, room: u64, e: &str) {
@@ -742,6 +882,7 @@ pub struct Textures {
     loaded: BTreeMap<String, Loaded>,
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
     staging: Staging,
+    reads: Reads,
     /// Kept until the next frame begins, when every material binding them is rebound.
     retired: Vec<Image>,
     /// Texels a side; 0 is no cap.
@@ -768,6 +909,7 @@ impl Textures {
             loaded: BTreeMap::new(),
             samplers: BTreeMap::new(),
             staging: Staging::new(device)?,
+            reads: Reads::new(),
             retired: Vec::new(),
             cap: 0,
             heaps: Vec::new(),
@@ -819,8 +961,13 @@ impl Textures {
         let chain = Chain::new(device, &texture, self.cap).map_err(|e| format!("{key}: {e}"))?;
         let first = chain.floor;
         let image = Image::new(device, &texture, first).map_err(|e| format!("{key}: {e}"))?;
-        let all = (0, u64::MAX);
-        let (size, read) = upload(device, cb, &texture, &image, all, &mut self.staging)
+        // A load is a few blocks, read here: its image is drawn this frame.
+        let (size, from) = (texture.bytes(first), texture.levels[first].start);
+        let read = |into: &mut [u8]| {
+            (texture.read_at(from, into)).map_err(|e| format!("cannot read its levels: {e}"))
+        };
+        let both = (&texture, &image);
+        let read = upload(device, cb, both, 0..size, &mut self.staging, read)
             .map_err(|e| format!("{key}: {e}"))?;
         let loaded = Loaded {
             seen: vec![0; texture.levels.len()],
@@ -888,6 +1035,11 @@ impl Textures {
     ) -> (BTreeSet<String>, u64, Duration) {
         let (mut keys, mut bytes, mut read) = (BTreeSet::new(), 0, Duration::ZERO);
         let mut added = vec![0; heaps.len()];
+        let loaded = &self.loaded;
+        self.reads.gather(|read| {
+            let incoming = loaded.get(&read.key).and_then(|l| l.incoming.as_ref());
+            (incoming).is_some_and(|i| i.image.first == read.first && i.done == read.part.start)
+        });
         let order: Vec<String> = {
             let loaded: Vec<(&String, &Loaded)> = self.loaded.iter().collect();
             let chains: Vec<&Chain> = loaded.iter().map(|(_, l)| &l.chain).collect();
@@ -948,20 +1100,45 @@ impl Textures {
                     keys.insert(key);
                     continue;
                 }
-                loaded.incoming = Some(Incoming { image, done: 0 });
+                let (done, asked) = (0, false);
+                loaded.incoming = Some(Incoming { image, done, asked });
             }
             let incoming = loaded.incoming.as_mut().expect("begun above");
-            let part = (incoming.done, self.staging.free());
-            let image = &incoming.image;
-            match upload(device, cb, &loaded.texture, image, part, &mut self.staging) {
-                Ok((end, _)) if end == incoming.done => break,
-                Ok((end, time)) => {
-                    (bytes, read) = (bytes + end - incoming.done, read + time);
+            let at = (incoming.image.first, incoming.done);
+            if !incoming.asked {
+                incoming.asked = self.reads.ask(&key, &loaded.texture, at);
+            }
+            let Some(end) = self.reads.ready(&key, at) else {
+                continue;
+            };
+            if end - incoming.done > self.staging.free() {
+                continue;
+            }
+            let (asked, arrived) = self.reads.take(&key, at).expect("ready above");
+            let fill = |into: &mut [u8]| {
+                into.copy_from_slice(&arrived?);
+                Ok(())
+            };
+            let both = (&loaded.texture, &incoming.image);
+            match upload(
+                device,
+                cb,
+                both,
+                asked.part.clone(),
+                &mut self.staging,
+                fill,
+            ) {
+                Ok(time) => {
+                    (bytes, read) = (bytes + asked.size(), read + time);
                     incoming.done = end;
+                    incoming.asked = false;
                     if end == loaded.texture.bytes(incoming.image.first) {
                         let new = loaded.incoming.take().expect("begun above").image;
                         self.retired.push(std::mem::replace(&mut loaded.image, new));
                         keys.insert(key);
+                    } else {
+                        let at = (incoming.image.first, end);
+                        incoming.asked = self.reads.ask(&key, &loaded.texture, at);
                     }
                 }
                 Err(e) => {
@@ -1225,6 +1402,56 @@ pub mod tests {
             "a header and no levels: {why}"
         );
         std::fs::remove_file(&path).unwrap();
+    }
+
+    /// The readers' parts carry the file's levels; a part no swap waits for is dropped.
+    #[test]
+    fn readers_read_parts_of_the_levels() {
+        let path = std::env::temp_dir().join(format!("pika_reads_{}", std::process::id()));
+        std::fs::write(&path, RAMP).unwrap();
+        let t = read(&path).unwrap();
+        let mut reads = Reads::new();
+        let arrive = |reads: &mut Reads, at| {
+            for _ in 0..2000 {
+                reads.gather(|_| true);
+                if let Some(end) = reads.ready("ramp", at) {
+                    return end;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            panic!("the part at {at:?} never arrived");
+        };
+        assert!(reads.ask("ramp", &t, (0, 0)));
+        assert_eq!(
+            arrive(&mut reads, (0, 0)),
+            t.bytes(0),
+            "the ramp is one part"
+        );
+        let (_, bytes) = reads.take("ramp", (0, 0)).unwrap();
+        assert_eq!(bytes.unwrap(), RAMP[40..], "the levels, not the header");
+        assert_eq!(reads.ahead, 0);
+
+        assert!(reads.ask("ramp", &t, (1, 0)));
+        arrive(&mut reads, (1, 0));
+        assert_eq!(reads.ready("ramp", (0, 0)), None, "a part of other levels");
+        reads.gather(|read| read.first == 0);
+        assert_eq!(
+            reads.ready("ramp", (1, 0)),
+            None,
+            "a part no swap waits for"
+        );
+        assert_eq!(reads.ahead, 0);
+
+        reads.ahead = AHEAD;
+        assert!(!reads.ask("ramp", &t, (0, 0)), "past the bytes ahead");
+        reads.ahead = 0;
+
+        // Negative control: a file gone since its header was read.
+        std::fs::remove_file(&path).unwrap();
+        assert!(reads.ask("ramp", &t, (0, 0)));
+        arrive(&mut reads, (0, 0));
+        let why = reads.take("ramp", (0, 0)).unwrap().1.unwrap_err();
+        assert!(why.contains("cannot read its levels"), "{why}");
     }
 
     #[test]

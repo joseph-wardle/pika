@@ -81,6 +81,8 @@ pub struct Update {
     pub compiled: usize,
     pub baked: usize,
     pub loaded: u64,
+    /// The render thread's time filling staging: loads' reads, and swaps' copies of
+    /// what the readers read.
     pub read: Duration,
     pub pending: usize,
     pub pending_textures: usize,
