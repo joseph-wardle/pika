@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 use std::fs::File;
 use std::ops::Range;
 use std::os::unix::fs::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ash::vk;
@@ -28,8 +28,9 @@ pub struct Texture {
 }
 
 pub enum Contents {
-    /// Kept open so a build holds no level bytes in memory.
-    Open(File),
+    /// Opened for each read, so a build holds no level bytes in memory. Not kept open:
+    /// a scene holds thousands of textures, past hosts' usual limit of 1024 open files.
+    File(PathBuf),
     Memory(Vec<u8>),
 }
 
@@ -53,7 +54,7 @@ impl Texture {
 
     pub fn read_at(&self, from: usize, into: &mut [u8]) -> std::io::Result<()> {
         match &self.contents {
-            Contents::Open(file) => file.read_exact_at(into, from as u64),
+            Contents::File(path) => File::open(path)?.read_exact_at(into, from as u64),
             Contents::Memory(file) => {
                 into.copy_from_slice(&file[from..from + into.len()]);
                 Ok(())
@@ -95,7 +96,7 @@ pub fn read(path: &Path) -> Result<Texture, String> {
     let len = file.metadata().map_err(cannot)?.len() as usize;
     let mut head = vec![0; len.min(HEADER)];
     file.read_exact_at(&mut head, 0).map_err(cannot)?;
-    header(&head, len, Contents::Open(file)).map_err(|e| format!("{} {e}", path.display()))
+    header(&head, len, Contents::File(path.into())).map_err(|e| format!("{} {e}", path.display()))
 }
 
 #[cfg(test)]
@@ -1193,12 +1194,22 @@ pub mod tests {
     }
 
     #[test]
-    fn reads_the_levels_from_the_open_file() {
+    fn reads_the_levels_from_the_file_without_keeping_it_open() {
         let path = std::env::temp_dir().join(format!("pika_texture_{}", std::process::id()));
         std::fs::write(&path, RAMP).unwrap();
         let t = read(&path).unwrap();
-        assert!(matches!(t.contents, Contents::Open(_)));
         assert_eq!(levels(&t, 0), RAMP[40..], "the levels, not the header");
+        let open = |path: &Path| {
+            (std::fs::read_dir("/proc/self/fd").unwrap())
+                .filter_map(|fd| std::fs::read_link(fd.unwrap().path()).ok())
+                .filter(|target| *target == path.canonicalize().unwrap())
+                .count()
+        };
+        assert_eq!(open(&path), 0, "the texture keeps its file open");
+        // Negative control: the count sees a file held open.
+        let held = File::open(&path).unwrap();
+        assert_eq!(open(&path), 1);
+        drop(held);
 
         let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(RAMP.len() as u64 - 8).unwrap();
