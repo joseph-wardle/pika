@@ -32,10 +32,13 @@ const PAGE_BYTES: u64 = PAGE as u64 * PAGE as u64 * 4;
 /// Draws a frame lists into pages, and as many into live copies, one per caster instance and
 /// level face it meets with pages to draw: 38 MB of lists.
 const CAPACITY: u32 = 1 << 19;
-/// `Pages`' state words (`shaders/shadow.slang` `MARKED`): the eleven the host reads, then the
-/// counts per level.
-const STATE: usize = 11 + 2 * LEVELS * LEVELS + 3 * LEVELS;
+/// `Pages`' state words (`shaders/shadow.slang` `MARKED`): the eleven the host reads, the tile
+/// walks listed, then the counts per level.
+const STATE: usize = 12 + 2 * LEVELS * LEVELS + 3 * LEVELS;
 const READ: u64 = 11 * 4;
+/// Tile walks the moving pass lists a frame (`shaders/shadow.slang` `WALKS_HELD`), 1 MB; past
+/// them, it walks the tiles itself.
+const WALKS: u64 = 1 << 16;
 /// Moved entries a frame lists, as one `vkCmdUpdateBuffer` writes them; past it, every page
 /// is drawn anew.
 const MOVED: usize = 65536 / 4;
@@ -105,6 +108,7 @@ struct Pages {
     copies: vk::DeviceAddress,
     last: vk::DeviceAddress,
     moved: vk::DeviceAddress,
+    walks: vk::DeviceAddress,
     count: u32,
     pages: u32,
     capacity: u32,
@@ -186,6 +190,7 @@ pub struct Shadows {
     clear: gpu::Compute,
     cast: gpu::Compute,
     cast_moving: gpu::Compute,
+    walk: gpu::Compute,
     copy: gpu::Compute,
     pool: Option<Pool>,
     constants: Buffer,
@@ -202,6 +207,7 @@ pub struct Shadows {
     /// Per instance, its box when it last moved.
     last: Option<Buffer>,
     moved: Buffer,
+    walks: Buffer,
     /// The instances moving in the last recorded frame, which its pages do not hold.
     movers: Vec<u32>,
     view: Option<View>,
@@ -260,6 +266,7 @@ impl Shadows {
             clear: compute(c"clear")?,
             cast: compute(c"cast")?,
             cast_moving: compute(c"cast_moving")?,
+            walk: compute(c"walk")?,
             copy: compute(c"copy")?,
             pool: None,
             constants: Buffer::device_local(
@@ -279,6 +286,7 @@ impl Shadows {
                 (MOVED * 4) as u64,
                 storage | vk::BufferUsageFlags::TRANSFER_DST,
             )?,
+            walks: Buffer::device_local(device, WALKS * 16, storage)?,
             movers: Vec::new(),
             view: None,
             draws: Buffer::device_local(device, 2 * CAPACITY as u64 * draw_bytes, indirect)?,
@@ -616,6 +624,7 @@ impl Shadows {
             copies: pool.copies.address,
             last: last.address,
             moved: self.moved.address,
+            walks: self.walks.address,
             count: self.shadows.len() as u32,
             pages: pool.pages,
             capacity: CAPACITY,
@@ -702,6 +711,8 @@ impl Shadows {
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
         let casting = 0..geometry.instance_count * LEVELS as u32 * self.shadows.len() as u32;
+        // A group per tile walk.
+        let walks = 0..WALKS as u32 * 64;
         let entries_moved = 0..moved.len() as u32 * LEVELS as u32 * self.shadows.len() as u32;
         let remembered = 0..if fresh {
             geometry.instance_count
@@ -725,6 +736,8 @@ impl Shadows {
         if !entries_moved.is_empty() {
             self.moving
                 .record(cb, std::slice::from_ref(&entries_moved), push);
+            barrier(d, cb, computed);
+            self.walk.record(cb, std::slice::from_ref(&walks), push);
             barrier(d, cb, computed);
         }
         self.remember.record(cb, &[remembered], push);
@@ -939,6 +952,7 @@ impl Shadows {
             &self.state,
             &self.counts,
             &self.moved,
+            &self.walks,
         ] {
             memory += b.memory();
         }

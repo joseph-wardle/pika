@@ -54,6 +54,9 @@ struct Pages
     // The instances moving this frame, then those that stopped, each with STARTED or
     // STOPPED.
     uint *moved;
+    // The tile walks the moving pass lists: shadow, level | face << 8 | flag << 16, and
+    // tiles a to b, 8 bits each.
+    uint4 *walks;
     uint count;
     // Pool pages, as many live copies, and draws each list holds.
     uint pages;
@@ -83,16 +86,20 @@ static const uint FREE = 0xffffffff;
 // The state's words (src/shadow.rs STATE): draws listed into pages, pages wanted once levels
 // drop, pages marked, the first level dropped (LEVELS for none), draws past the capacity,
 // pages drawn, triangles drawn (wrapping past 2^32), draws listed into live copies, the free
-// pages and those taken, live copies; then, by the coarsest level of the shadows counted and
-// by level, tiles marked and tiles that are a finer mark's parent; by coarsest level, its
-// tiles both; and by level, pages ranked and where the level's ranks start.
+// pages and those taken, live copies, tile walks listed; then, by the coarsest level of the
+// shadows counted and by level, tiles marked and tiles that are a finer mark's parent; by
+// coarsest level, its tiles both; and by level, pages ranked and where the level's ranks
+// start.
 static const uint DRAWN = 5;
 static const uint TRIANGLES = 6;
 static const uint LIVE_DRAWS = 7;
 static const uint FREED = 8;
 static const uint TAKEN = 9;
 static const uint LIVES = 10;
-static const uint MARKED = 11;
+static const uint WALKS = 11;
+static const uint MARKED = 12;
+// Tile walks a frame lists (src/shadow.rs WALKS).
+static const uint WALKS_HELD = 1 << 16;
 static const uint PARENTS = MARKED + LEVELS * LEVELS;
 static const uint BOTH = PARENTS + LEVELS * LEVELS;
 static const uint NEXT = BOTH + LEVELS;
@@ -555,52 +562,69 @@ bool covers(Shadow *s, uint i, uint face, float3 corners[8], out int2 a, out int
     return true;
 }
 
-// Lists shadow j's held pages from tile a to b of level i and face to be drawn.
-void dirty(uint j, uint i, uint face, int2 a, int2 b)
+// Lists shadow j's held page at tile at of level i and face to be drawn.
+void dirty(uint j, uint i, uint face, int2 at)
 {
     Shadow *s = push.pages->shadows + j;
-    for (int y = a.y; y <= b.y; y++)
-    {
-        for (int x = a.x; x <= b.x; x++)
-        {
-            uint e = tile_index(s, i, face, int2(x, y));
-            uint page = entries(j)[e];
-            if (page == NO_PAGE || (marks(j)[e].or(DRAW) & DRAW) != 0)
-                continue;
-            Tile t;
-            t.level = i;
-            t.face = face;
-            t.at = int2(x, y);
-            draw_page(j, t, page);
-        }
-    }
+    uint e = tile_index(s, i, face, at);
+    uint page = entries(j)[e];
+    if (page == NO_PAGE || (marks(j)[e].or(DRAW) & DRAW) != 0)
+        return;
+    Tile t;
+    t.level = i;
+    t.face = face;
+    t.at = at;
+    draw_page(j, t, page);
 }
 
-// Gives shadow j's held pages from tile a to b of level i and face a live copy, drawn this
-// frame from the page and the moving casters.
-void enliven(uint j, uint i, uint face, int2 a, int2 b)
+// Gives shadow j's held page at tile at of level i and face a live copy, drawn this frame from
+// the page and the moving casters.
+void enliven(uint j, uint i, uint face, int2 at)
 {
     Pages *p = push.pages;
     Shadow *s = p->shadows + j;
+    uint e = tile_index(s, i, face, at);
+    uint page = entries(j)[e];
+    if (page == NO_PAGE || (marks(j)[e].or(LIVE) & LIVE) != 0)
+        return;
+    // A tile has at most one, so they fit the pool's second half.
+    uint c = p->state[LIVES].increment();
+    p->copies[c] = page;
+    p->owners[p->pages + c] = p->owners[page];
+    live(j)[e] = p->pages + c;
+    Tile t;
+    t.level = i;
+    t.face = face;
+    t.at = at;
+    widen(j, t, true);
+}
+
+// Dirties (flag DRAW) or enlivens (LIVE) shadow j's tile at of level i and face.
+void visit(uint j, uint i, uint face, int2 at, uint flag)
+{
+    if (flag == LIVE)
+        enliven(j, i, face, at);
+    else
+        dirty(j, i, face, at);
+}
+
+// Lists tiles a to b of shadow j's level i and face for the walk pass to visit, a thread per
+// tile: a thread per box would hold its group until the largest box is done. Past the list's
+// end, visits them here.
+void walk_tiles(uint j, uint i, uint face, int2 a, int2 b, uint flag)
+{
+    Pages *p = push.pages;
+    uint w = p->state[WALKS].increment();
+    if (w < WALKS_HELD)
+    {
+        uint tiles = uint(a.x) | uint(a.y) << 8 | uint(b.x) << 16 | uint(b.y) << 24;
+        p->walks[w] = uint4(j, i | face << 8 | flag << 16, tiles, 0);
+        return;
+    }
     for (int y = a.y; y <= b.y; y++)
     {
         for (int x = a.x; x <= b.x; x++)
-        {
-            uint e = tile_index(s, i, face, int2(x, y));
-            uint page = entries(j)[e];
-            if (page == NO_PAGE || (marks(j)[e].or(LIVE) & LIVE) != 0)
-                continue;
-            // A tile has at most one, so they fit the pool's second half.
-            uint c = p->state[LIVES].increment();
-            p->copies[c] = page;
-            p->owners[p->pages + c] = p->owners[page];
-            live(j)[e] = p->pages + c;
-            Tile t;
-            t.level = i;
-            t.face = face;
-            t.at = int2(x, y);
-            widen(j, t, true);
-        }
+            visit(j, i, face, int2(x, y), flag);
     }
 }
 
@@ -634,14 +658,32 @@ void moving(uint3 thread : SV_DispatchThreadID)
         {
             int2 a, b;
             if ((entry & STARTED) != 0 && covers(s, i, face, then, a, b))
-                dirty(j, i, face, a, b);
+                walk_tiles(j, i, face, a, b, DRAW);
             if (!covers(s, i, face, now, a, b))
                 continue;
-            if ((entry & STOPPED) != 0)
-                dirty(j, i, face, a, b);
-            else
-                enliven(j, i, face, a, b);
+            walk_tiles(j, i, face, a, b, (entry & STOPPED) != 0 ? DRAW : LIVE);
         }
+    }
+}
+
+// Per listed walk, a group, a thread per tile.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void walk(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
+{
+    Pages *p = push.pages;
+    uint count = min(p->state[WALKS].load(), WALKS_HELD);
+    for (uint w = group.x; w < count; w += push.stride / 64)
+    {
+        uint4 k = p->walks[w];
+        uint i = k.y & 0xff;
+        uint face = k.y >> 8 & 0xff;
+        int2 a = int2(k.z & 0xff, k.z >> 8 & 0xff);
+        int2 b = int2(k.z >> 16 & 0xff, k.z >> 24);
+        uint across = uint(b.x - a.x + 1);
+        uint tiles = across * uint(b.y - a.y + 1);
+        for (uint n = lane.x; n < tiles; n += 64)
+            visit(k.x, i, face, a + int2(n % across, n / across), k.y >> 16);
     }
 }
 
