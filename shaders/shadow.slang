@@ -820,36 +820,58 @@ void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
     }
 }
 
-// Per caster instance, level and shadow: one draw for each face with pages to draw its box
-// meets.
+// Lists the instance's draws into shadow j's level i: for each face with tiles to draw its box
+// meets, one per rectangle of them.
+void cast_one(uint instance, uint j, uint i)
+{
+    Shadow *s = push.pages->shadows + j;
+    if (i >= s->levels || !casts(instance, s))
+        return;
+    // A level with nothing to draw on any of its faces costs no box.
+    uint faces = max(s->faces, 1);
+    bool any = false;
+    for (uint face = 0; face < faces; face++)
+        any = any || touched(j, i, face, instance);
+    if (!any)
+        return;
+    float3 corners[8];
+    uint r = corners_of(instance, corners);
+    for (uint face = 0; face < faces; face++)
+    {
+        int2 a, b;
+        if (touched(j, i, face, instance) && covers(s, i, face, corners, a, b))
+            list(j, i, face, a, b, instance, r);
+    }
+}
+
+// Per caster instance, level and shadow: the draws into pages, of the instances not moving. A
+// frame that draws no page lists none, so the scene's size costs only frames that draw pages.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cast(uint3 thread : SV_DispatchThreadID)
 {
     Pages *p = push.pages;
+    if (p->state[DRAWN].load() == 0)
+        return;
     for (uint k = thread.x; k < push.count; k += push.stride)
     {
-        uint j = k % p->count;
         uint instance = k / (LEVELS * p->count);
-        uint i = k / p->count % LEVELS;
-        Shadow *s = p->shadows + j;
-        if (i >= s->levels || !casts(instance, s))
-            continue;
-        // Most frames draw no page, so most levels are untouched for a caster not moving.
-        uint faces = max(s->faces, 1);
-        bool any = false;
-        for (uint face = 0; face < faces; face++)
-            any = any || touched(j, i, face, instance);
-        if (!any)
-            continue;
-        float3 corners[8];
-        uint r = corners_of(instance, corners);
-        for (uint face = 0; face < faces; face++)
-        {
-            int2 a, b;
-            if (touched(j, i, face, instance) && covers(s, i, face, corners, a, b))
-                list(j, i, face, a, b, instance, r);
-        }
+        if (!moves(instance))
+            cast_one(instance, k % p->count, k / p->count % LEVELS);
+    }
+}
+
+// Per moved entry, level and shadow: the draws into live copies, of the instances moving.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cast_moving(uint3 thread : SV_DispatchThreadID)
+{
+    Pages *p = push.pages;
+    for (uint k = thread.x; k < push.count; k += push.stride)
+    {
+        uint instance = p->moved[k / (LEVELS * p->count)] & INSTANCE;
+        if (moves(instance))
+            cast_one(instance, k % p->count, k / p->count % LEVELS);
     }
 }
 

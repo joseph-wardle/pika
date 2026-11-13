@@ -185,6 +185,7 @@ pub struct Shadows {
     remember: gpu::Compute,
     clear: gpu::Compute,
     cast: gpu::Compute,
+    cast_moving: gpu::Compute,
     copy: gpu::Compute,
     pool: Option<Pool>,
     constants: Buffer,
@@ -258,6 +259,7 @@ impl Shadows {
             remember: compute(c"remember")?,
             clear: compute(c"clear")?,
             cast: compute(c"cast")?,
+            cast_moving: compute(c"cast_moving")?,
             copy: compute(c"copy")?,
             pool: None,
             constants: Buffer::device_local(
@@ -700,6 +702,7 @@ impl Shadows {
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
         let casting = 0..geometry.instance_count * LEVELS as u32 * self.shadows.len() as u32;
+        let entries_moved = 0..moved.len() as u32 * LEVELS as u32 * self.shadows.len() as u32;
         let remembered = 0..if fresh {
             geometry.instance_count
         } else {
@@ -719,15 +722,16 @@ impl Shadows {
         barrier(d, cb, computed);
         self.assign.record(cb, &[entries], push);
         barrier(d, cb, computed);
-        if !moved.is_empty() {
-            let moving = 0..moved.len() as u32 * LEVELS as u32 * self.shadows.len() as u32;
-            self.moving.record(cb, std::slice::from_ref(&moving), push);
+        if !entries_moved.is_empty() {
+            self.moving
+                .record(cb, std::slice::from_ref(&entries_moved), push);
             barrier(d, cb, computed);
         }
         self.remember.record(cb, &[remembered], push);
         barrier(d, cb, computed);
         self.clear.record(cb, std::slice::from_ref(&texels), push);
         self.cast.record(cb, &[casting], push);
+        self.cast_moving.record(cb, &[entries_moved], push);
         let listed = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
             .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
