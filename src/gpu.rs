@@ -255,13 +255,13 @@ impl Instance {
         let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default()
             .buffer_device_address(true)
             .scalar_block_layout(true)
-            .draw_indirect_count(true)
-            .shader_output_layer(true);
+            .draw_indirect_count(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
             .independent_blend(true)
             .fragment_stores_and_atomics(true)
+            .shader_clip_distance(true)
             .texture_compression_bc(true);
         let extensions = [vk::EXT_MEMORY_BUDGET_NAME.as_ptr()];
         let extensions = &extensions[..usize::from(info.memory_budget)];
@@ -277,8 +277,8 @@ impl Instance {
                 format!(
                     "vkCreateDevice on {} failed: {e}. Pika needs multiDrawIndirect, \
                  drawIndirectFirstInstance, independentBlend, textureCompressionBC, \
-                 fragmentStoresAndAtomics, scalarBlockLayout, drawIndirectCount and \
-                 shaderOutputLayer.",
+                 fragmentStoresAndAtomics, shaderClipDistance, scalarBlockLayout and \
+                 drawIndirectCount.",
                     info.name
                 )
             })?;

@@ -25,10 +25,12 @@ const TILES: u32 = 32;
 /// Faces' bounds per shadow and level.
 const FACES: u64 = 6;
 const PAGE: u32 = 256;
+/// A level's or face's texels across, which each draw's viewport spans.
+const SPAN: u32 = TILES * PAGE;
 /// A pool page's bytes, as `pika:shadowPool` counts them.
 const PAGE_BYTES: u64 = PAGE as u64 * PAGE as u64 * 4;
 /// Draws a frame lists into pages, and as many into live copies, one per caster instance and
-/// page it meets: 28 MB of lists.
+/// level face it meets with pages to draw: 38 MB of lists.
 const CAPACITY: u32 = 1 << 19;
 /// `Pages`' state words (`shaders/shadow.slang` `MARKED`): the eleven the host reads, then the
 /// counts per level.
@@ -96,7 +98,7 @@ struct Pages {
     owners: vk::DeviceAddress,
     state: vk::DeviceAddress,
     draws: vk::DeviceAddress,
-    pairs: vk::DeviceAddress,
+    targets: vk::DeviceAddress,
     pool: vk::DeviceAddress,
     free: vk::DeviceAddress,
     drawn: vk::DeviceAddress,
@@ -141,7 +143,7 @@ pub struct Counts {
     pub drawn: u32,
     /// Pages a moving caster met, copied and drawn into.
     pub live: u32,
-    /// One per caster instance and page or live copy it meets.
+    /// One per caster instance and level face it meets with pages or live copies to draw.
     pub draws: u32,
     pub triangles: u32,
 }
@@ -203,7 +205,7 @@ pub struct Shadows {
     movers: Vec<u32>,
     view: Option<View>,
     draws: Buffer,
-    pairs: Buffer,
+    targets: Buffer,
     /// `Pages`' state, and its host copy.
     state: Buffer,
     counts: Buffer,
@@ -225,6 +227,16 @@ pub struct Shadows {
 
 impl Shadows {
     pub fn new(device: &gpu::Device, spirv: &[u32]) -> Result<Self, String> {
+        let limits = device.limits();
+        let most = (limits
+            .max_framebuffer_width
+            .min(limits.max_framebuffer_height))
+        .min(limits.max_viewport_dimensions[0].min(limits.max_viewport_dimensions[1]));
+        if most < SPAN {
+            return Err(format!(
+                "the device draws at most {most} pixels across; shadows need {SPAN}"
+            ));
+        }
         let d = &device.raw;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -268,7 +280,7 @@ impl Shadows {
             movers: Vec::new(),
             view: None,
             draws: Buffer::device_local(device, 2 * CAPACITY as u64 * draw_bytes, indirect)?,
-            pairs: Buffer::device_local(device, 2 * CAPACITY as u64 * 8, storage)?,
+            targets: Buffer::device_local(device, 2 * CAPACITY as u64 * 16, storage)?,
             state: Buffer::device_local(device, (STATE * 4) as u64, indirect | copied)?,
             counts: Buffer::host(device, READ, vk::BufferUsageFlags::TRANSFER_DST, host)?,
             shadows: Vec::new(),
@@ -320,12 +332,11 @@ impl Shadows {
         if pages == 0 {
             return Err("pika:shadowPool is 0 MB; shadows need at least one 0.25 MB page".into());
         }
-        let layers = device.limits().max_framebuffer_layers;
-        if pages > layers {
+        // The shaders index the pool and its live copies' texels in 32 bits.
+        if u64::from(pages) * 2 * u64::from(PAGE * PAGE) > 1 << 32 {
             return Err(format!(
-                "pika:shadowPool is {megabytes} MB, {pages} pages, but the device draws into \
-                 at most {layers}; set it to {} MB or less",
-                layers / 4
+                "pika:shadowPool is {megabytes} MB, but Pika addresses at most {} MB",
+                (1u64 << 32) / (2 * u64::from(PAGE * PAGE)) / 4
             ));
         }
         // Free the old pool before allocating its replacement.
@@ -596,7 +607,7 @@ impl Shadows {
             owners: pool.owners.address,
             state: self.state.address,
             draws: self.draws.address,
-            pairs: self.pairs.address,
+            targets: self.targets.address,
             pool: pool.texels.address,
             free: pool.free.address,
             drawn: pool.drawn.address,
@@ -748,7 +759,7 @@ impl Shadows {
         barrier(d, cb, to_host);
         commands.mark(MARKS[0])?;
         // The pages, then their live copies from them and the moving casters.
-        self.draw(cb, geometry, pool.pages, 0, 0);
+        self.draw(cb, geometry, 0, 0);
         commands.mark(MARKS[1])?;
         let pages_drawn = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
@@ -766,7 +777,7 @@ impl Shadows {
                 vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             );
         barrier(d, cb, copied);
-        self.draw(cb, geometry, pool.pages, CAPACITY, LIVE_DRAWS);
+        self.draw(cb, geometry, CAPACITY, LIVE_DRAWS);
         commands.mark(MARKS[3])?;
         let drawn = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
@@ -783,27 +794,27 @@ impl Shadows {
     }
 
     /// Draws the casters listed from draw `first`, as many as the state's word `counted`, with
-    /// no attachments, a pool page or live copy per layer: the fragments write the pool
-    /// themselves.
-    fn draw(&self, cb: vk::CommandBuffer, geometry: &Bound, pages: u32, first: u32, counted: u64) {
+    /// no attachments, each into a level or face: the fragments find their pages and write
+    /// the pool themselves.
+    fn draw(&self, cb: vk::CommandBuffer, geometry: &Bound, first: u32, counted: u64) {
         let area = vk::Rect2D {
             offset: vk::Offset2D::default(),
             extent: vk::Extent2D {
-                width: PAGE,
-                height: PAGE,
+                width: SPAN,
+                height: SPAN,
             },
         };
         let viewport = vk::Viewport {
             x: 0.0,
             y: 0.0,
-            width: PAGE as f32,
-            height: PAGE as f32,
+            width: SPAN as f32,
+            height: SPAN as f32,
             min_depth: 0.0,
             max_depth: 1.0,
         };
         let rendering = vk::RenderingInfo::default()
             .render_area(area)
-            .layer_count(pages);
+            .layer_count(1);
         let push = Push {
             pages: self.constants.address,
             first: 0,
@@ -818,9 +829,9 @@ impl Shadows {
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering, and the pipeline was built for
-        // rendering with no attachments. `Pages` addresses live buffers, each list holds
-        // `CAPACITY` draws counted by its state word, and every listed page's layer, its index
-        // modulo `pages`, is under `pages`.
+        // rendering with no attachments, which `new` checked the device draws `SPAN` across.
+        // `Pages` addresses live buffers, and each list holds `CAPACITY` draws counted by its
+        // state word.
         unsafe {
             d.cmd_begin_rendering(cb, &rendering);
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -882,8 +893,8 @@ impl Shadows {
         if past > 0 && !self.warned[1] {
             self.warned[1] = true;
             eprintln!(
-                "pika: warning: shadow casters met pages {draws} times, past the {CAPACITY} \
-                 draws Pika lists; some shadows are missing"
+                "pika: warning: shadow casters met levels to draw {draws} times, past the \
+                 {CAPACITY} draws Pika lists; some shadows are missing"
             );
         }
         Counts {
@@ -920,7 +931,7 @@ impl Shadows {
         }
         for b in [
             &self.draws,
-            &self.pairs,
+            &self.targets,
             &self.state,
             &self.counts,
             &self.moved,

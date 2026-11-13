@@ -2,9 +2,9 @@
 // them, choose which levels the pool holds, release the pages of tiles no longer held, gather
 // the free pages, assign them to the tiles that need one, find the held pages under the
 // casters that move, start or stop moving, remember each moving caster's box, clear the pages
-// to draw, list each caster instance once per page to draw that it meets, and draw that list
-// by atomic min, so the pool needs no depth attachment; then copy each page a moving caster
-// meets into its live copy and draw the moving casters into those.
+// to draw, list each caster instance once per level and face with pages to draw that it meets,
+// and draw that list by atomic min, so the pool needs no depth attachment; then copy each page
+// a moving caster meets into its live copy and draw the moving casters into those.
 //
 // A page holds only the casters that are not moving, and is drawn again only when its light
 // changes or a caster starts or stops moving over it. The pages a moving caster meets get a
@@ -39,9 +39,9 @@ struct Pages
     uint4 *owners;
     // State: see STATE.
     Atomic<uint> *state;
-    // vk::DrawIndexedIndirectCommand, 5 words each, and per draw its instance and page.
+    // vk::DrawIndexedIndirectCommand, 5 words each, and per draw its target.
     uint *draws;
-    uint2 *pairs;
+    uint4 *targets;
     Atomic<uint> *pool;
     // The pages free once tiles let theirs go, the pages drawn this frame, and per live copy
     // its page.
@@ -703,6 +703,39 @@ void clear(uint3 thread : SV_DispatchThreadID)
         p->pool[p->drawn[k / (PAGE * PAGE)] * PAGE * PAGE + k % (PAGE * PAGE)].store(0xffffffff);
 }
 
+// What one draw draws, and where: an instance into shadow j's level and face, its pages or
+// live copies from tile lo to hi.
+struct Target
+{
+    uint instance;
+    uint shadow;
+    uint level;
+    uint face;
+    bool live;
+    int2 lo;
+    int2 hi;
+};
+
+uint4 pack(Target t)
+{
+    uint place = t.level | t.face << 8 | uint(t.live) << 16;
+    uint tiles = uint(t.lo.x) | uint(t.lo.y) << 8 | uint(t.hi.x) << 16 | uint(t.hi.y) << 24;
+    return uint4(t.instance, t.shadow, place, tiles);
+}
+
+Target unpack(uint4 w)
+{
+    Target t;
+    t.instance = w.x;
+    t.shadow = w.y;
+    t.level = w.z & 0xff;
+    t.face = w.z >> 8 & 0xff;
+    t.live = (w.z >> 16) != 0;
+    t.lo = int2(w.w & 0xff, w.w >> 8 & 0xff);
+    t.hi = int2(w.w >> 16 & 0xff, w.w >> 24);
+    return t;
+}
+
 // A moving instance draws only into live copies, the others only into pages.
 bool moves(uint instance)
 {
@@ -716,47 +749,79 @@ bool touched(uint j, uint i, uint face, uint instance)
     return bounds(j, i, face, moves(instance))[0].load() < TILES;
 }
 
-// Lists one draw of the instance into each page or live copy to draw of shadow j's touched
-// level i and face its tiles from a to b meet.
-void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
+// Lists the draw of t, whose instance draws record r.
+void emit(Target t, uint r)
 {
     Pages *p = push.pages;
     View *v = p->casters;
-    Shadow *s = p->shadows + j;
+    uint d = p->state[t.live ? LIVE_DRAWS : 0].increment();
+    if (d >= p->capacity)
+    {
+        p->state[4].increment();
+        return;
+    }
+    // Live copies' draws follow the pages'.
+    d += t.live ? p->capacity : 0;
+    uint indices = v->records[5 * r].load();
+    p->state[TRIANGLES].add(indices / 3);
+    p->draws[5 * d] = indices;
+    p->draws[5 * d + 1] = 1;
+    p->draws[5 * d + 2] = v->records[5 * r + 2].load();
+    p->draws[5 * d + 3] = v->records[5 * r + 3].load();
+    p->draws[5 * d + 4] = d;
+    p->targets[d] = pack(t);
+}
+
+// Lists one draw of the instance into shadow j's touched level i and face for each rectangle
+// of the tiles from a to b whose pages (or live copies) are drawn this frame, rows of them
+// merged downward, so its fragments fall only in tiles drawn.
+void list(uint j, uint i, uint face, int2 a, int2 b, uint instance, uint r)
+{
+    Shadow *s = push.pages->shadows + j;
     bool moving = moves(instance);
     Atomic<uint> *bound = bounds(j, i, face, moving);
     int across = int(tiles_across(s, i));
     a = max(a, int2(bound[0].load(), bound[1].load()));
     b = min(b, across - 1 - int2(bound[2].load(), bound[3].load()));
+    // Per row, a bit per tile drawn, from a.x.
+    uint rows[TILES];
     for (int y = a.y; y <= b.y; y++)
     {
+        rows[y] = 0;
         for (int x = a.x; x <= b.x; x++)
         {
             uint e = tile_index(s, i, face, int2(x, y));
-            if ((marks(j)[e].load() & (moving ? LIVE : DRAW)) == 0)
-                continue;
-            uint d = p->state[moving ? LIVE_DRAWS : 0].increment();
-            if (d >= p->capacity)
-            {
-                p->state[4].increment();
-                continue;
-            }
-            // Live copies' draws follow the pages'.
-            d += moving ? p->capacity : 0;
-            uint page = moving ? live(j)[e] : entries(j)[e];
-            uint indices = v->records[5 * r].load();
-            p->state[TRIANGLES].add(indices / 3);
-            p->draws[5 * d] = indices;
-            p->draws[5 * d + 1] = 1;
-            p->draws[5 * d + 2] = v->records[5 * r + 2].load();
-            p->draws[5 * d + 3] = v->records[5 * r + 3].load();
-            p->draws[5 * d + 4] = d;
-            p->pairs[d] = uint2(instance, page);
+            if ((marks(j)[e].load() & (moving ? LIVE : DRAW)) != 0)
+                rows[y] |= 1u << uint(x - a.x);
+        }
+    }
+    for (int y = a.y; y <= b.y; y++)
+    {
+        while (rows[y] != 0)
+        {
+            uint first = firstbitlow(rows[y]);
+            // The run of tiles from first, then the rows below holding all of it.
+            uint above = rows[y] + (1u << first);
+            uint run = (above & (~above + 1)) - (1u << first);
+            int last = y;
+            while (last < b.y && (rows[last + 1] & run) == run)
+                rows[++last] &= ~run;
+            rows[y] &= ~run;
+            Target t;
+            t.instance = instance;
+            t.shadow = j;
+            t.level = i;
+            t.face = face;
+            t.live = moving;
+            t.lo = int2(a.x + int(first), y);
+            t.hi = int2(a.x + int(firstbithigh(run)), last);
+            emit(t, r);
         }
     }
 }
 
-// Per caster instance, level and shadow: one draw for each page to draw its box meets.
+// Per caster instance, level and shadow: one draw for each face with pages to draw its box
+// meets.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cast(uint3 thread : SV_DispatchThreadID)
@@ -791,55 +856,64 @@ void cast(uint3 thread : SV_DispatchThreadID)
 struct Varyings
 {
     float4 position : SV_Position;
+    // The draw's tiles' edges, so no fragment falls outside them.
+    float clip[4] : SV_ClipDistance;
     // Interpolated perspective-correct, so a local light's depth along its face is exact.
     float depth : DEPTH;
-    nointerpolation uint page : PAGE;
-    uint layer : SV_RenderTargetArrayIndex;
+    nointerpolation uint draw : DRAW;
 };
 
-// Each draw is one instance into one page or live copy, a layer each, its tile filling clip
-// space.
+// Each draw is one instance into one level or face, which fills a viewport TILES pages
+// across, its first tile at the top left.
 [shader("vertex")]
 Varyings vs(uint vertex : SV_VulkanVertexID, uint draw : SV_VulkanInstanceID)
 {
     Pages *p = push.pages;
     View *v = p->casters;
-    uint2 pair = p->pairs[draw];
-    uint4 owner = p->owners[pair.y];
-    Shadow *s = p->shadows + owner.x;
-    Tile tile = tile_of(s, owner.y);
+    Target t = unpack(p->targets[draw]);
+    Shadow *s = p->shadows + t.shadow;
     uint point = v->vertices[vertex].x;
     float4 local = float4(v->points[3 * point], v->points[3 * point + 1], v->points[3 * point + 2], 1);
-    float4 *m = v->instances + 7 * pair.x;
+    float4 *m = v->instances + 7 * t.instance;
     float3 world = float3(dot(m[0], local), dot(m[1], local), dot(m[2], local));
     float3 q = to_light(s, world);
     Varyings o;
-    if (s->faces == 0)
+    // In tiles across the level or face, times clip w.
+    float2 at = q.xy / tile_width(s, t.level) - float2(s->origin[t.level]);
+    float w = 1;
+    float z = q.z;
+    o.depth = q.z;
+    if (s->faces > 0)
     {
-        int2 t = asint(owner.zw);
-        o.position = float4((q.xy / tile_width(s, tile.level) - float2(t)) * 2 - 1, q.z, 1);
-        o.depth = q.z;
-    }
-    else
-    {
-        // Across the face, (f.xy / f.z + 1) × n - 2t - 1 spans the tile; clip z runs from
-        // near to far.
-        float3 f = on_face(tile.face, q);
-        float n = float(tiles_across(s, tile.level));
-        float2 xy = (f.xy + f.z) * n - (2 * float2(tile.at) + 1) * f.z;
-        float z = s->far * (f.z - s->near) / (s->far - s->near);
-        o.position = float4(xy, z, f.z);
+        // Across the face, (f.xy / f.z + 1) × n / 2 in tiles; clip z runs from near to far.
+        float3 f = on_face(t.face, q);
+        at = (f.xy + f.z) * float(tiles_across(s, t.level)) / 2;
+        w = f.z;
+        z = s->far * (f.z - s->near) / (s->far - s->near);
         o.depth = f.z;
     }
-    o.page = pair.y;
-    o.layer = pair.y % p->pages;
+    o.position = float4(at / TILES * 2 - w, z, w);
+    float2 low = at - float2(t.lo) * w;
+    float2 high = float2(t.hi + 1) * w - at;
+    o.clip = { low.x, low.y, high.x, high.y };
+    o.draw = draw;
     return o;
 }
 
+// The draw's clip distances keep it to tiles drawn this frame; the flag is checked again,
+// since a moving caster written into a tile without a live copy would stay in its page.
 [shader("fragment")]
 void fs(Varyings v)
 {
+    Pages *p = push.pages;
+    Target t = unpack(p->targets[v.draw]);
+    Shadow *s = p->shadows + t.shadow;
     uint2 x = uint2(v.position.xy);
+    uint e = tile_index(s, t.level, t.face, int2(x / PAGE));
+    if ((marks(t.shadow)[e].load() & (t.live ? LIVE : DRAW)) == 0)
+        return;
+    uint page = t.live ? live(t.shadow)[e] : entries(t.shadow)[e];
+    uint2 texel = x % PAGE;
     // Depth is positive, where float bits order as integers do.
-    push.pages->pool[(v.page * PAGE + x.y) * PAGE + x.x].min(asuint(v.depth));
+    p->pool[(page * PAGE + texel.y) * PAGE + texel.x].min(asuint(v.depth));
 }
