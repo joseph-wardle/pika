@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use ash::vk;
 
 use crate::commands::Commands;
-use crate::gpu::{self, Buffer};
+use crate::gpu::{self, Buffer, bytes};
 use crate::link::{Links, Mask};
 use crate::need::{self, Footprint};
 use crate::smooth::{self, Smooth};
@@ -1545,12 +1545,6 @@ fn by_path(store: &Store) -> HashMap<&str, &Instancer> {
 
 fn size<T>(values: &[T]) -> u64 {
     size_of_val(values) as u64
-}
-
-/// Only for padding-free plain values: floats, integers, the shaders' `repr(C)` records.
-fn bytes<T: Copy>(values: &[T]) -> &[u8] {
-    // SAFETY: callers pass padding-free plain data, so every byte is initialized.
-    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), size_of_val(values)) }
 }
 
 #[cfg(test)]

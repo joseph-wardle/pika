@@ -227,7 +227,7 @@ void mark(uint3 thread : SV_DispatchThreadID)
             uint j = light.shadow;
             Shadow *s = p->shadows + j;
             float3 q = to_light(s, P);
-            if (s->faces > 0)
+            if (!distant(s))
             {
                 mark_faces(j, q, lod_at(s, on_face(face_of(q), q).z, w));
                 continue;
@@ -259,7 +259,7 @@ Tile tile_of(Shadow *s, uint e)
     t.face = r / (n * n);
     t.at = int2(r % n, r / n % n);
     // Unwrapped; tile_index wraps it again.
-    if (s->faces == 0)
+    if (distant(s))
         t.at = (t.at - s->origin[t.level]) & int(TILES - 1);
     return t;
 }
@@ -267,7 +267,7 @@ Tile tile_of(Shadow *s, uint e)
 // Where a tile lies from its light-space origin, which a page's content depends on.
 int2 place_of(Shadow *s, Tile t)
 {
-    return s->faces == 0 ? t.at + s->origin[t.level] : t.at;
+    return distant(s) ? t.at + s->origin[t.level] : t.at;
 }
 
 // The level i + 1 tile holding level i's tile t; a local light's LODs have no origin.
@@ -521,7 +521,7 @@ bool covers(Shadow *s, uint i, uint face, float3 corners[8], out int2 a, out int
 {
     a = 0;
     b = -1;
-    if (s->faces == 0)
+    if (distant(s))
     {
         float2 lo = float2(1e38);
         float2 hi = float2(-1e38);
@@ -658,7 +658,7 @@ void moving(uint3 thread : SV_DispatchThreadID)
             bool3 high = (c & uint3(1, 2, 4)) != 0;
             then[c] = select(high, float3(box[3], box[4], box[5]), float3(box[0], box[1], box[2]));
         }
-        for (uint face = 0; face < max(s->faces, 1); face++)
+        for (uint face = 0; face < face_count(s); face++)
         {
             int2 a, b;
             if ((entry & STARTED) != 0 && covers(s, i, face, then, a, b))
@@ -877,7 +877,7 @@ void cast_one(uint instance, uint j, uint i)
     if (i >= s->levels || !casts(instance, s))
         return;
     // A level with nothing to draw on any of its faces costs no box.
-    uint faces = max(s->faces, 1);
+    uint faces = face_count(s);
     bool any = false;
     for (uint face = 0; face < faces; face++)
         any = any || touched(j, i, face, instance);
@@ -953,7 +953,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint draw : SV_VulkanInstanceID)
     float w = 1;
     float z = q.z;
     o.depth = q.z;
-    if (s->faces > 0)
+    if (!distant(s))
     {
         // Across the face, (f.xy / f.z + 1) × n / 2 in tiles; clip z runs from near to far.
         float3 f = on_face(t.face, q);

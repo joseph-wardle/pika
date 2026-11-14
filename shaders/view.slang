@@ -100,10 +100,21 @@ float3 to_light(Shadow *s, float3 P)
     return float3(dot(s->light_space[0], p), dot(s->light_space[1], p), dot(s->light_space[2], p));
 }
 
+bool distant(Shadow *s)
+{
+    return s->faces == 0;
+}
+
+// The faces of a shadow's map: a distant light's level is one.
+uint face_count(Shadow *s)
+{
+    return max(s->faces, 1);
+}
+
 // Tiles across level i, or a local light's LOD i.
 uint tiles_across(Shadow *s, uint i)
 {
-    return s->faces == 0 ? TILES : TILES >> i;
+    return distant(s) ? TILES : TILES >> i;
 }
 
 // Where level i's tiles start in a shadow's tiles: a distant light's level by level, a local
@@ -111,7 +122,7 @@ uint tiles_across(Shadow *s, uint i)
 // level is wrapped.
 uint start(Shadow *s, uint i)
 {
-    if (s->faces == 0)
+    if (distant(s))
         return i * TILEMAP;
     // 6 × the tiles of LODs 0 to i - 1: 4096 (1 - 4^-i) / 3 × 6.
     return 8192 - (8192 >> (2 * i));
@@ -120,7 +131,7 @@ uint start(Shadow *s, uint i)
 uint tile_index(Shadow *s, uint i, uint face, int2 t)
 {
     uint across = tiles_across(s, i);
-    if (s->faces == 0)
+    if (distant(s))
         t = (t + s->origin[i]) & int(TILES - 1);
     return start(s, i) + (face * across + t.y) * across + t.x;
 }
@@ -196,7 +207,7 @@ uint lod_at(Shadow *s, float depth, float w)
 // A texel's world width at level i; for a local light, at a point depth along its face.
 float texel_width(Shadow *s, uint i, float depth)
 {
-    return s->faces == 0 ? tile_width(s, i) / PAGE : 2 * depth * exp2(float(i)) / (TILES * PAGE);
+    return distant(s) ? tile_width(s, i) / PAGE : 2 * depth * exp2(float(i)) / (TILES * PAGE);
 }
 
 // Past its reach it has faded to 0; a rect or disk lights only the cross(u, v) side.

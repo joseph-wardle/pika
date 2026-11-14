@@ -16,8 +16,9 @@ use crate::commands::Commands;
 use crate::geometry::{Bound, Geometry};
 use crate::gpu::{self, Buffer};
 use crate::light::{self, Light};
+use crate::link;
 use crate::target::Target;
-use crate::transform::{Camera, Instance};
+use crate::transform::{Camera, Instance, invert};
 use crate::view::View;
 
 /// `shaders/view.slang`'s constants, which `tests::the_shaders_mirror_the_constants` checks,
@@ -95,6 +96,7 @@ impl Shadow {
 
 /// `shaders/shadow.slang`'s `Constants`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Constants {
     unproject: [[f32; 4]; 4],
     camera: vk::DeviceAddress,
@@ -650,18 +652,8 @@ impl Shadows {
             fresh: u32::from(fresh),
             frame: self.frame,
         };
-        // SAFETY: `Constants`, `Shadow` and the instances are plain `repr(C)` data without
-        // padding.
-        let (constants, table, moved_bytes) = unsafe {
-            (
-                std::slice::from_raw_parts(
-                    (&raw const constants).cast::<u8>(),
-                    size_of::<Constants>(),
-                ),
-                std::slice::from_raw_parts(shadows.as_ptr().cast::<u8>(), size_of_val(&*shadows)),
-                std::slice::from_raw_parts(moved.as_ptr().cast::<u8>(), size_of_val(moved)),
-            )
-        };
+        let constants = gpu::bytes(std::slice::from_ref(&constants));
+        let (table, moved_bytes) = (gpu::bytes(&shadows), gpu::bytes(moved));
         let tile_bytes = shadows.len() as u64 * TILE_BYTES;
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering; `fit` and this sized each buffer for
@@ -844,10 +836,7 @@ impl Shadows {
             stride: 0,
             pad: 0,
         };
-        // SAFETY: `Push` is plain `repr(C)` data without padding.
-        let push = unsafe {
-            std::slice::from_raw_parts((&raw const push).cast::<u8>(), size_of::<Push>())
-        };
+        let push = gpu::bytes(std::slice::from_ref(&push));
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering, and the pipeline was built for
@@ -1055,7 +1044,7 @@ fn light_space<'a>(
     let mut reach: f64 = 0.0;
     for (instance, b) in instances {
         let world = instance.world().map(|r| r.map(f64::from));
-        let casts = instance.shadow_link() & link == link;
+        let casts = link::reaches(link, instance.shadow_link());
         for corner in 0..8 {
             let p = [0, 1, 2].map(|k| f64::from(b[k + 3 * (corner >> k & 1)]));
             let p = world.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]);
@@ -1087,34 +1076,6 @@ fn local_space(l: &Light) -> [[f64; 4]; 3] {
     axes.map(|a| [a[0], a[1], a[2], -dot(a, c)])
 }
 
-/// Gauss–Jordan with partial pivoting; `None` when `m` is singular.
-fn invert(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
-    let mut a = *m;
-    let mut inverse: [[f64; 4]; 4] =
-        std::array::from_fn(|i| std::array::from_fn(|j| f64::from(u8::from(i == j))));
-    for col in 0..4 {
-        let pivot = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
-        if a[pivot][col] == 0.0 {
-            return None;
-        }
-        a.swap(col, pivot);
-        inverse.swap(col, pivot);
-        let scale = 1.0 / a[col][col];
-        for j in 0..4 {
-            a[col][j] *= scale;
-            inverse[col][j] *= scale;
-        }
-        for row in (0..4).filter(|&r| r != col) {
-            let f = a[row][col];
-            for j in 0..4 {
-                a[row][j] -= f * a[col][j];
-                inverse[row][j] -= f * inverse[col][j];
-            }
-        }
-    }
-    Some(inverse)
-}
-
 fn dot3(row: &[f64; 4], p: [f64; 3]) -> f64 {
     row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]
 }
@@ -1139,28 +1100,6 @@ fn normalize(a: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn inverse_undoes_the_matrix() {
-        let m = [
-            [2.0, 0.0, 1.0, 3.0],
-            [0.0, 0.0, -1.0, 2.0],
-            [0.5, 4.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0, 0.0],
-        ];
-        let inverse = invert(&m).unwrap();
-        for (i, row) in m.iter().enumerate() {
-            for j in 0..4 {
-                let v: f64 = row.iter().zip(&inverse).map(|(a, r)| a * r[j]).sum();
-                assert!(
-                    (v - f64::from(u8::from(i == j))).abs() < 1e-12,
-                    "{i} {j}: {v}"
-                );
-            }
-        }
-        // Negative control: a repeated row has no inverse.
-        assert!(invert(&[m[0], m[0], m[2], m[3]]).is_none());
-    }
 
     /// Pages hold the casters not moving, so an instance's start and stop must each be listed
     /// once, and one moving both frames neither.
