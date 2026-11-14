@@ -190,7 +190,7 @@ bool locate(Shadow *s, float3 q, uint i, out uint tile, out float2 across, out f
     tile = 0;
     across = 0;
     depth = 0;
-    if (s->faces == 0)
+    if (distant(s))
     {
         int2 t = tile_at(s, q.xy, i);
         if (!inside(t))
@@ -250,7 +250,7 @@ bool lookup(Shadow *s, float3 q, float3 nq, float w, out uint caster, out float 
     texel = 0;
     // A local light's texels widen with the depth along q's own face.
     float along = on_face(face_of(q), q).z;
-    uint first = s->faces == 0 ? level_at(s, q, w) : lod_at(s, along, w);
+    uint first = distant(s) ? level_at(s, q, w) : lod_at(s, along, w);
     for (uint i = first; i < s->levels; i++)
     {
         if (read(s, q, nq, i, along, caster, depth, texel))
@@ -274,7 +274,7 @@ float hard(Shadow *s, float3 q, float3 nq, float w)
 // from the light through q.
 float2 from_light(Shadow *s, float3 q, float depth, float caster)
 {
-    if (s->faces == 0)
+    if (distant(s))
         return float2(depth, caster) / length(s->light_space[2].xyz);
     float d = length(q);
     return float2(d, d * caster / max(depth, 1e-30));

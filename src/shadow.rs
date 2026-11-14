@@ -16,8 +16,9 @@ use crate::commands::Commands;
 use crate::geometry::{Bound, Geometry};
 use crate::gpu::{self, Buffer};
 use crate::light::{self, Light};
+use crate::link;
 use crate::target::Target;
-use crate::transform::{Camera, Instance};
+use crate::transform::{Camera, Instance, invert};
 use crate::view::View;
 
 /// `shaders/view.slang`'s constants, which `tests::the_shaders_mirror_the_constants` checks,
@@ -39,9 +40,11 @@ const OWNER_BYTES: u64 = 12;
 /// level face it meets with pages to draw: 38 MB of lists (`shaders/shadow.slang`
 /// `CAPACITY`).
 const CAPACITY: u32 = 1 << 19;
-/// Tile walks the moving pass lists a frame, 4 MB; past `walk_bound`'s for its moved entries,
-/// every page is drawn anew.
-const WALKS: u64 = 1 << 18;
+/// Tile walks the moving pass lists a frame, 4 MB (`shaders/shadow.slang` `WALKS`); past
+/// them, it walks the tiles itself. A bound on the CPU would have to assume every moving
+/// instance meets every face of every shadow, which ALab's 330 movers and 49 shadows put at
+/// four times this, so every frame would be drawn anew.
+const WALKS: u32 = 1 << 18;
 /// Moved entries a frame lists, as one `vkCmdUpdateBuffer` writes them; past it, every page
 /// is drawn anew.
 const MOVED: u32 = 65536 / 4;
@@ -95,6 +98,7 @@ impl Shadow {
 
 /// `shaders/shadow.slang`'s `Constants`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Constants {
     unproject: [[f32; 4]; 4],
     camera: vk::DeviceAddress,
@@ -344,7 +348,7 @@ impl Shadows {
                 u64::from(MOVED) * 4,
                 storage | vk::BufferUsageFlags::TRANSFER_DST,
             )?,
-            walks: Buffer::device_local(device, WALKS * 16, storage)?,
+            walks: Buffer::device_local(device, u64::from(WALKS) * 16, storage)?,
             movers: Vec::new(),
             indirect: Buffer::device_local(device, 2 * CAPACITY as u64 * draw_bytes, indirect)?,
             draws: Buffer::device_local(device, 2 * CAPACITY as u64 * 16, storage)?,
@@ -418,6 +422,7 @@ impl Shadows {
         let list = |device| Buffer::device_local(device, pages as u64 * 4, storage);
         self.pool = Some(Pool {
             pages,
+            // Twice pika:shadowPool: the second half holds the live copies.
             texels: Buffer::device_local(device, 2 * pages as u64 * PAGE_BYTES, storage)?,
             owners: Buffer::device_local(device, pages as u64 * OWNER_BYTES, filled)?,
             free: list(device)?,
@@ -494,7 +499,6 @@ impl Shadows {
             self.maps = Some(Maps::new(device, count, pixels, instances)?);
             self.clean = true;
         }
-        // Shading reads each tile's page this frame.
         let tiles = self.maps.as_ref().map_or(0, |m| m.tiles.address);
         // A local light's, which a distant one's levels then replace.
         let shadow = |j: usize, rows: [[f64; 4]; 3], c: &Caster| Shadow {
@@ -604,7 +608,7 @@ impl Shadows {
         let listed = moved
             .filter(|_| !clean)
             .map(|m| (m, moved_entries(m, &self.movers)))
-            .filter(|(_, e)| e.len() <= MOVED as usize && walk_bound(e, faces) <= WALKS);
+            .filter(|(_, e)| e.len() <= MOVED as usize);
         // A fresh frame draws every caster into every page.
         let fresh = listed.is_none();
         let (moving, moved) = listed.unwrap_or((&[], Vec::new()));
@@ -650,18 +654,8 @@ impl Shadows {
             fresh: u32::from(fresh),
             frame: self.frame,
         };
-        // SAFETY: `Constants`, `Shadow` and the instances are plain `repr(C)` data without
-        // padding.
-        let (constants, table, moved_bytes) = unsafe {
-            (
-                std::slice::from_raw_parts(
-                    (&raw const constants).cast::<u8>(),
-                    size_of::<Constants>(),
-                ),
-                std::slice::from_raw_parts(shadows.as_ptr().cast::<u8>(), size_of_val(&*shadows)),
-                std::slice::from_raw_parts(moved.as_ptr().cast::<u8>(), size_of_val(moved)),
-            )
-        };
+        let constants = gpu::bytes(std::slice::from_ref(&constants));
+        let (table, moved_bytes) = (gpu::bytes(&shadows), gpu::bytes(moved));
         let tile_bytes = shadows.len() as u64 * TILE_BYTES;
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering; `fit` and this sized each buffer for
@@ -714,8 +708,8 @@ impl Shadows {
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
         let casting = 0..geometry.instance_count * LEVELS * shadows.len() as u32;
-        // A group per tile walk.
-        let walks = 0..walk_bound(moved, faces) as u32 * 64;
+        // A group per tile walk listed.
+        let walks = 0..walk_bound(moved, faces).min(WALKS.into()) as u32 * 64;
         let entries_moved = 0..moved.len() as u32 * LEVELS * shadows.len() as u32;
         let remembered = 0..if fresh {
             geometry.instance_count
@@ -741,8 +735,12 @@ impl Shadows {
         barrier(d, cb, computed);
         self.walk.record(cb, &[walks], push);
         barrier(d, cb, computed);
+        // After `moving`, which reads the boxes it replaces, and before the casts, which read
+        // the frame it stamps; it reads the moved entries' first `moving.len()`, the instances
+        // moving now (`moved_entries`).
         self.remember.record(cb, &[remembered], push);
         barrier(d, cb, computed);
+        // These three write apart, the casts by atomic counts: no barrier between them.
         self.clear.record(cb, std::slice::from_ref(&texels), push);
         self.cast.record(cb, &[casting], push);
         self.cast_moving.record(cb, &[entries_moved], push);
@@ -840,10 +838,7 @@ impl Shadows {
             stride: 0,
             pad: 0,
         };
-        // SAFETY: `Push` is plain `repr(C)` data without padding.
-        let push = unsafe {
-            std::slice::from_raw_parts((&raw const push).cast::<u8>(), size_of::<Push>())
-        };
+        let push = gpu::bytes(std::slice::from_ref(&push));
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
         // SAFETY: `cb` is recording outside rendering, and the pipeline was built for
@@ -1018,9 +1013,9 @@ fn clip_levels(held: Option<i32>, need: i32, near: f64, pixel: f64) -> [i32; 2] 
     [coarsest, finest]
 }
 
-/// The tile walks the moving pass may list for `moved` entries, which bounds its list: per
-/// entry and each of the shadows' `faces` (levels times faces), one for the tiles its box
-/// covers, and one more for those it covered when it starts.
+/// The tile walks the moving pass may list for `moved` entries, which bounds the walk pass's
+/// groups: per entry and each of the shadows' `faces` (levels times faces), one for the tiles
+/// its box covers, and one more for those it covered when it starts.
 fn walk_bound(moved: &[u32], faces: u32) -> u64 {
     let walks: u64 = (moved.iter())
         .map(|e| 1 + u64::from(e & STARTED != 0))
@@ -1051,7 +1046,7 @@ fn light_space<'a>(
     let mut reach: f64 = 0.0;
     for (instance, b) in instances {
         let world = instance.world().map(|r| r.map(f64::from));
-        let casts = instance.shadow_link() & link == link;
+        let casts = link::reaches(link, instance.shadow_link());
         for corner in 0..8 {
             let p = [0, 1, 2].map(|k| f64::from(b[k + 3 * (corner >> k & 1)]));
             let p = world.map(|row| row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]);
@@ -1083,34 +1078,6 @@ fn local_space(l: &Light) -> [[f64; 4]; 3] {
     axes.map(|a| [a[0], a[1], a[2], -dot(a, c)])
 }
 
-/// Gauss–Jordan with partial pivoting; `None` when `m` is singular.
-fn invert(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
-    let mut a = *m;
-    let mut inverse: [[f64; 4]; 4] =
-        std::array::from_fn(|i| std::array::from_fn(|j| f64::from(u8::from(i == j))));
-    for col in 0..4 {
-        let pivot = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
-        if a[pivot][col] == 0.0 {
-            return None;
-        }
-        a.swap(col, pivot);
-        inverse.swap(col, pivot);
-        let scale = 1.0 / a[col][col];
-        for j in 0..4 {
-            a[col][j] *= scale;
-            inverse[col][j] *= scale;
-        }
-        for row in (0..4).filter(|&r| r != col) {
-            let f = a[row][col];
-            for j in 0..4 {
-                a[row][j] -= f * a[col][j];
-                inverse[row][j] -= f * inverse[col][j];
-            }
-        }
-    }
-    Some(inverse)
-}
-
 fn dot3(row: &[f64; 4], p: [f64; 3]) -> f64 {
     row[0] * p[0] + row[1] * p[1] + row[2] * p[2] + row[3]
 }
@@ -1135,28 +1102,6 @@ fn normalize(a: [f64; 3]) -> [f64; 3] {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn inverse_undoes_the_matrix() {
-        let m = [
-            [2.0, 0.0, 1.0, 3.0],
-            [0.0, 0.0, -1.0, 2.0],
-            [0.5, 4.0, 0.0, 0.0],
-            [0.0, 0.0, -1.0, 0.0],
-        ];
-        let inverse = invert(&m).unwrap();
-        for (i, row) in m.iter().enumerate() {
-            for j in 0..4 {
-                let v: f64 = row.iter().zip(&inverse).map(|(a, r)| a * r[j]).sum();
-                assert!(
-                    (v - f64::from(u8::from(i == j))).abs() < 1e-12,
-                    "{i} {j}: {v}"
-                );
-            }
-        }
-        // Negative control: a repeated row has no inverse.
-        assert!(invert(&[m[0], m[0], m[2], m[3]]).is_none());
-    }
 
     /// Pages hold the casters not moving, so an instance's start and stop must each be listed
     /// once, and one moving both frames neither.
@@ -1210,6 +1155,7 @@ mod tests {
             (view, "PAGE", PAGE),
             (shadow, "FACES", FACES),
             (shadow, "CAPACITY", CAPACITY),
+            (shadow, "WALKS", WALKS),
             (shadow, "STARTED", STARTED),
             (shadow, "STOPPED", STOPPED),
         ];
@@ -1222,7 +1168,7 @@ mod tests {
         assert_eq!(slang_const(view, "MOVED"), None);
     }
 
-    /// The walk list is sized by this bound alone, so it must count a start's two walks.
+    /// The walk pass's groups are sized by this bound, so it must count a start's two walks.
     #[test]
     fn walk_bound_counts_a_starts_two_walks() {
         // A sun of 16 levels and a sphere light of 6 LODs, 6 faces each.

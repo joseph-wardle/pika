@@ -474,6 +474,12 @@ impl std::ops::AddAssign for Memory {
 }
 
 /// Handles start null so a failed `new` can drop a partly built buffer.
+/// Only for padding-free plain values: floats, integers, the shaders' `repr(C)` records.
+pub fn bytes<T: Copy>(values: &[T]) -> &[u8] {
+    // SAFETY: callers pass padding-free plain data, so every byte is initialized.
+    unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), size_of_val(values)) }
+}
+
 pub struct Buffer {
     // Owners keep the `Device` alive longer than their buffers (field order).
     device: ash::Device,
@@ -738,11 +744,8 @@ impl Compute {
                 .div_ceil(Self::GROUP_SIZE)
                 .min(Self::MAX_GROUPS);
             let constants = push(r.start, count, (groups * Self::GROUP_SIZE) as u32);
-            // SAFETY: `P` has no padding, so all its bytes are initialized.
-            let bytes = unsafe {
-                std::slice::from_raw_parts((&raw const constants).cast::<u8>(), size_of::<P>())
-            };
-            // SAFETY: as above, and the layout was created on `d`.
+            let bytes = bytes(std::slice::from_ref(&constants));
+            // SAFETY: the layout was created on `d`.
             unsafe {
                 d.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, bytes);
                 d.cmd_dispatch(cb, groups as u32, 1, 1);

@@ -1,12 +1,4 @@
-// Virtual shadow pages, in the frame's order: mark the tiles the camera's pixels read, count
-// them, choose which levels the pool holds, release the pages of tiles no longer held, gather
-// the free pages, assign them to the tiles that need one, find the held pages under the
-// casters that move, start or stop moving, remember each moving caster's box, clear the pages
-// to draw, list each caster instance once per level and face with pages to draw that it meets,
-// and draw that list by atomic min, so the pool needs no depth attachment; then copy each page
-// a moving caster meets into its live copy and draw the moving casters into those.
-//
-// A page holds only the casters that are not moving, and is drawn again only when its light
+// Virtual shadow pages, the passes in src/shadow.rs `record`'s order. A page holds only the casters that are not moving, and is drawn again only when its light
 // changes or a caster starts or stops moving over it. The pages a moving caster meets get a
 // live copy each frame, from the second half of the pool, which shading reads instead.
 
@@ -31,7 +23,7 @@ struct Constants
     // live copy or the page, which each Shadow's tiles points into.
     uint *pages;
     uint *tiles;
-    // Per tile, this frame's flags: MARK to PAINTED.
+    // Per tile, this frame's flags, MARK to LIVE.
     Atomic<uint> *flags;
     // Per shadow, level and face, the bounds of the pages drawn this frame, then of the live
     // copies: least x and y, then least across - 1 - x and y, so all four start at 0xffffffff
@@ -125,6 +117,8 @@ struct State
 
 // Draws each list holds (src/shadow.rs CAPACITY).
 static const uint CAPACITY = 1 << 19;
+// Tile walks a frame lists (src/shadow.rs WALKS).
+static const uint WALKS = 1 << 18;
 
 struct Push
 {
@@ -235,7 +229,7 @@ void mark(uint3 thread : SV_DispatchThreadID)
             uint j = light.shadow;
             Shadow *s = p->shadows + j;
             float3 q = to_light(s, P);
-            if (s->faces > 0)
+            if (!distant(s))
             {
                 mark_faces(j, q, lod_at(s, on_face(face_of(q), q).z, w));
                 continue;
@@ -267,7 +261,7 @@ Tile tile_of(Shadow *s, uint e)
     t.face = r / (n * n);
     t.at = int2(r % n, r / n % n);
     // Unwrapped; tile_index wraps it again.
-    if (s->faces == 0)
+    if (distant(s))
         t.at = (t.at - s->origin[t.level]) & int(TILES - 1);
     return t;
 }
@@ -275,7 +269,7 @@ Tile tile_of(Shadow *s, uint e)
 // Where a tile lies from its light-space origin, which a page's content depends on.
 int2 place_of(Shadow *s, Tile t)
 {
-    return s->faces == 0 ? t.at + s->origin[t.level] : t.at;
+    return distant(s) ? t.at + s->origin[t.level] : t.at;
 }
 
 // The level i + 1 tile holding level i's tile t; a local light's LODs have no origin.
@@ -529,7 +523,7 @@ bool covers(Shadow *s, uint i, uint face, float3 corners[8], out int2 a, out int
 {
     a = 0;
     b = -1;
-    if (s->faces == 0)
+    if (distant(s))
     {
         float2 lo = float2(1e38);
         float2 hi = float2(-1e38);
@@ -630,14 +624,23 @@ void visit(uint j, uint i, uint face, int2 at, uint flag)
 }
 
 // Lists tiles a to b of shadow j's level i and face for the walk pass to visit, a thread per
-// tile: a thread per box would hold its group until the largest box is done. The list holds
-// every walk this pass can list (src/shadow.rs walk_bound).
+// tile: a thread per box would hold its group until the largest box is done. Past the list's
+// end, visits them here.
 void walk_tiles(uint j, uint i, uint face, int2 a, int2 b, uint flag)
 {
     Constants *p = push.constants;
     uint w = p->state->walked.increment();
-    uint span = uint(a.x) | uint(a.y) << 8 | uint(b.x) << 16 | uint(b.y) << 24;
-    p->walks[w] = uint4(j, i | face << 8 | flag << 16, span, 0);
+    if (w < WALKS)
+    {
+        uint span = uint(a.x) | uint(a.y) << 8 | uint(b.x) << 16 | uint(b.y) << 24;
+        p->walks[w] = uint4(j, i | face << 8 | flag << 16, span, 0);
+        return;
+    }
+    for (int y = a.y; y <= b.y; y++)
+    {
+        for (int x = a.x; x <= b.x; x++)
+            visit(j, i, face, int2(x, y), flag);
+    }
 }
 
 // Per moved entry, level and shadow. The held pages a moving instance's box covers get a live
@@ -666,7 +669,7 @@ void moving(uint3 thread : SV_DispatchThreadID)
             bool3 high = (c & uint3(1, 2, 4)) != 0;
             then[c] = select(high, float3(box[3], box[4], box[5]), float3(box[0], box[1], box[2]));
         }
-        for (uint face = 0; face < max(s->faces, 1); face++)
+        for (uint face = 0; face < face_count(s); face++)
         {
             int2 a, b;
             if ((entry & STARTED) != 0 && covers(s, i, face, then, a, b))
@@ -684,7 +687,7 @@ void moving(uint3 thread : SV_DispatchThreadID)
 void walk(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
 {
     Constants *p = push.constants;
-    uint count = p->state->walked.load();
+    uint count = min(p->state->walked.load(), WALKS);
     for (uint w = group.x; w < count; w += push.stride / 64)
     {
         uint4 k = p->walks[w];
@@ -885,7 +888,7 @@ void cast_one(uint instance, uint j, uint i)
     if (i >= s->levels || !casts(instance, s))
         return;
     // A level with nothing to draw on any of its faces costs no box.
-    uint faces = max(s->faces, 1);
+    uint faces = face_count(s);
     bool any = false;
     for (uint face = 0; face < faces; face++)
         any = any || touched(j, i, face, instance);
@@ -961,7 +964,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint draw : SV_VulkanInstanceID)
     float w = 1;
     float z = q.z;
     o.depth = q.z;
-    if (s->faces > 0)
+    if (!distant(s))
     {
         // Across the face, (f.xy / f.z + 1) × n / 2 in tiles; clip z runs from near to far.
         float3 f = on_face(t.face, q);

@@ -10,6 +10,7 @@ use crate::transform::Camera;
 
 /// `shaders/view.slang`'s `View`.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Constants {
     camera: Camera,
     lights: vk::DeviceAddress,
@@ -107,17 +108,11 @@ impl View {
         shadows: vk::DeviceAddress,
     ) {
         self.drawn.bytes().fill(0);
-        // SAFETY: `Light` and the tiles' integers are plain `repr(C)` data without padding.
-        let parts = unsafe {
-            [
-                std::slice::from_raw_parts(lights.as_ptr().cast::<u8>(), size_of_val(lights)),
-                std::slice::from_raw_parts(tiles.tiles.as_ptr().cast(), size_of_val(&*tiles.tiles)),
-                std::slice::from_raw_parts(
-                    tiles.lights.as_ptr().cast(),
-                    size_of_val(&*tiles.lights),
-                ),
-            ]
-        };
+        let parts = [
+            gpu::bytes(lights),
+            gpu::bytes(&tiles.tiles),
+            gpu::bytes(&tiles.lights),
+        ];
         // Each part's offset is a multiple of 8, as its addresses need.
         let staging = self.staging.bytes();
         let mut offsets = [0; 3];
@@ -151,10 +146,7 @@ impl View {
             drawn: self.drawn.address,
             shadows,
         };
-        // SAFETY: `Constants` is plain `repr(C)` data without padding.
-        let bytes = unsafe {
-            std::slice::from_raw_parts((&raw const constants).cast::<u8>(), size_of::<Constants>())
-        };
+        let bytes = gpu::bytes(std::slice::from_ref(&constants));
         let light_region = vk::BufferCopy {
             src_offset: 0,
             dst_offset: 0,

@@ -97,15 +97,16 @@ fn bits<'a>(
         .collect()
 }
 
+/// Whether a light (or its shadow) with link bits `light` reaches a mesh with bits `mesh`, as
+/// `shaders/view.slang` and `shaders/shadow.slang` decide it too.
+pub fn reaches(light: u32, mesh: u32) -> bool {
+    light & mesh == light
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::Link;
-
-    /// As the light loop decides it, and as shadows will.
-    fn reaches(light: u32, mesh: u32) -> bool {
-        light & mesh == light
-    }
 
     fn store(links: &[&str], categories: &[&[&str]]) -> (Store, Vec<u64>, Vec<u64>) {
         let mut store = Store::new();

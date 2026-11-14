@@ -169,9 +169,10 @@ fn level(
                 );
             }
             let s = &categories.set;
-            let mask = match s.is_empty() {
-                true => Mask::default(),
-                false => masks[s[get("category sets", s.len(), index)?] as usize],
+            let mask = if s.is_empty() {
+                Mask::default()
+            } else {
+                masks[s[get("category sets", s.len(), index)?] as usize]
             };
             Ok((multiply(&m, transform), mask))
         })
@@ -240,9 +241,59 @@ fn inverse3(m: &[[f64; 3]; 3], det: f64) -> Option<[[f64; 3]; 3]> {
     }))
 }
 
+/// Gauss–Jordan with partial pivoting; `None` when `m` is singular.
+pub fn invert(m: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
+    let mut a = *m;
+    let mut inverse: [[f64; 4]; 4] =
+        std::array::from_fn(|i| std::array::from_fn(|j| f64::from(u8::from(i == j))));
+    for col in 0..4 {
+        let pivot = (col..4).max_by(|&x, &y| a[x][col].abs().total_cmp(&a[y][col].abs()))?;
+        if a[pivot][col] == 0.0 {
+            return None;
+        }
+        a.swap(col, pivot);
+        inverse.swap(col, pivot);
+        let scale = 1.0 / a[col][col];
+        for j in 0..4 {
+            a[col][j] *= scale;
+            inverse[col][j] *= scale;
+        }
+        for row in (0..4).filter(|&r| r != col) {
+            let f = a[row][col];
+            for j in 0..4 {
+                a[row][j] -= f * a[col][j];
+                inverse[row][j] -= f * inverse[col][j];
+            }
+        }
+    }
+    Some(inverse)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inverse_undoes_the_matrix() {
+        let m = [
+            [2.0, 0.0, 1.0, 3.0],
+            [0.0, 0.0, -1.0, 2.0],
+            [0.5, 4.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0, 0.0],
+        ];
+        let inverse = invert(&m).unwrap();
+        for (i, row) in m.iter().enumerate() {
+            for j in 0..4 {
+                let v: f64 = row.iter().zip(&inverse).map(|(a, r)| a * r[j]).sum();
+                assert!(
+                    (v - f64::from(u8::from(i == j))).abs() < 1e-12,
+                    "{i} {j}: {v}"
+                );
+            }
+        }
+        // Negative control: a repeated row has no inverse.
+        assert!(invert(&[m[0], m[0], m[2], m[3]]).is_none());
+    }
     use crate::store::{InstanceCategories, InstancePrimvars, Link, Store};
 
     fn unlinked() -> Links {
@@ -463,8 +514,6 @@ mod tests {
             error.contains("index 1 is not one of /inner's 1 transforms"),
             "{error}"
         );
-        let error = instances(&instancers, &unlinked(), &at("/lost", 0)).unwrap_err();
-        assert!(error.contains("no instancer /lost"), "{error}");
         let error = instances(&instancers, &unlinked(), &at("/lost", 0)).unwrap_err();
         assert!(error.contains("no instancer /lost"), "{error}");
         inner.parent = Some(Some(at("/inner", 0)));

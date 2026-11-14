@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = """Clay quads, one facing the camera and one turned away, under distant lights: the sun's size normalized at frame 1 and unnormalized at frame 2, a coloured parallel light with exposure that turns at frame 2, and a hidden one."""
+    doc = """Clay quads, one facing the camera and one turned away, under distant lights: a 20° sun, normalized at frame 1 and unnormalized at frame 2, whose penumbrae fall on the facing quad from a caster out of view, a coloured parallel light with exposure that turns at frame 2, and a hidden one."""
     subLayers = [@settings.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -35,13 +35,23 @@ def Mesh "turned"
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:rotateXYZ"]
 }
 
+# Left of the view, a metre before the facing quad, so the key's penumbrae on it are about
+# 0.45 wide round a narrower umbra, and the fill's shadow misses it.
+def Mesh "caster"
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(-3, -0.2, -4), (-2.1, -0.2, -4), (-2.1, 0.6, -4), (-3, 0.6, -4)]
+}
+
 # 2.5 lux, 5 at frame 2.
 def DistantLight "key"
 {
-    float inputs:angle = 0.53
+    float inputs:angle = 20
     float inputs:intensity.timeSamples = {
         1: 2.5,
-        2: 74800,
+        2: 52.8,
     }
     bool inputs:normalize.timeSamples = {
         1: 1,
