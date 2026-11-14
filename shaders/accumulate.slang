@@ -1,4 +1,5 @@
 // Adds a still view's frame to the sum of its frames so far and writes their mean in its place.
+// Half floats are packed in pairs: half types would need the shaderFloat16 feature.
 
 struct Push
 {
@@ -28,7 +29,7 @@ void cs(uint3 thread : SV_DispatchThreadID)
         uint *c = push.color + p * push.words;
         float4 color;
         if (push.words == 2)
-            color = float4(f16tof32(c[0]), f16tof32(c[0] >> 16), f16tof32(c[1]), f16tof32(c[1] >> 16));
+            color = float4(unpackHalf2x16ToFloat(c[0]), unpackHalf2x16ToFloat(c[1]));
         else
             color = asfloat(uint4(c[0], c[1], c[2], c[3]));
         float4 sum = push.sample == 0 ? color : push.sum[p] + color;
@@ -36,8 +37,8 @@ void cs(uint3 thread : SV_DispatchThreadID)
         float4 mean = sum / float(push.sample + 1);
         if (push.words == 2)
         {
-            c[0] = f32tof16(mean.x) | f32tof16(mean.y) << 16;
-            c[1] = f32tof16(mean.z) | f32tof16(mean.w) << 16;
+            c[0] = packHalf2x16(mean.xy);
+            c[1] = packHalf2x16(mean.zw);
             continue;
         }
         uint4 bits = asuint(mean);

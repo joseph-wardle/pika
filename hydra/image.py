@@ -114,13 +114,13 @@ What the reference encodes:
 Pixels next to a change of face (silhouettes, face boundaries) are compared
 only for coverage, since a rasterizer and a ray decide them differently; so
 are pixels next to a change of which lights' shadows hold them, wholly or
-in part, since a shadow map's texels and a ray decide those differently. Away
+in part, or within two of one at a penumbra's end, since a shadow map's texels and a ray decide those differently. Away
 from them, values must agree within TOLERANCE, colour also allowed 1/256 of
 its value: the GPU decodes sRGB texels to about nine significant bits (RTX
 4070 Ti SUPER, driver 580), so a sample of a light grey is off by up to
 half of 1/256 before it is filtered. Pika gives a pixel in a penumbra, where
-a light's share is between 0 and 1, one ray, the same for each frame, so
-penumbra pixels are compared otherwise: each colour must lie between its
+a light's share is between 0 and 1, one ray a frame, averaged over a still
+view's frames, so penumbra pixels are compared otherwise: each colour must lie between its
 partly held lights wholly held and wholly lit, and over the pixels whose
 share of their light is within each of BANDS, the mean share Pika shows
 must be the reference's within PENUMBRA.
@@ -173,8 +173,9 @@ REFERENCES = 16
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 # Penumbra pixels' bands of the reference's share of their light, the pixels a band needs to
 # be compared, and how far Pika's mean share over one may be from the reference's. Pika marches
-# EEVEE's 1 ray × 6 steps through one map from the light's centre, which misses lamps.usda's
-# dark band by 0.10; a hard shadow misses by 0.25, a light of half the size by 0.18.
+# EEVEE's 6 steps through one map from the light's centre, which narrows penumbrae: converged,
+# lamps.usda misses by up to 0.10, and a light of a quarter of the size by 0.30. Half the size
+# misses by 0.13, too near to tell apart.
 BANDS = ((0, 0.1), (0.1, 0.4), (0.4, 0.6), (0.6, 0.9), (0.9, 1))
 BAND_PIXELS = 16
 PENUMBRA = 0.15
@@ -192,7 +193,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "instance links ignored",
             "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
             "shadow rays past local lights", "moved casters' old shadows kept",
-            "shadows of the light's centre alone", "shadows of half the light's size",
+            "shadows of the light's centre alone", "shadows of a quarter of the light's size",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1177,7 +1178,7 @@ def aims(prim, time, toward, angle, control):
     edge's grid points. None for a light with no size."""
     if control == "shadows of the light's centre alone":
         return None
-    scale = 0.5 if control == "shadows of half the light's size" else 1.0
+    scale = 0.25 if control == "shadows of a quarter of the light's size" else 1.0
 
     def disk(u):
         return scale * np.sqrt(u[:, :1]) * np.c_[np.cos(2 * np.pi * u[:, 1]), np.sin(2 * np.pi * u[:, 1])]
@@ -1581,13 +1582,13 @@ def read(path):
     return image
 
 
-def edges(face):
-    """Pixels whose 3×3 neighbourhood holds more than one face (or none)."""
-    padded = np.pad(face, 1, mode="edge")
+def edges(face, reach=1):
+    """Pixels whose neighbourhood `reach` pixels each way holds more than one face (or none)."""
+    padded = np.pad(face, reach, mode="edge")
     h, w = face.shape
     out = np.zeros(face.shape, bool)
-    for dy in range(3):
-        for dx in range(3):
+    for dy in range(2 * reach + 1):
+        for dx in range(2 * reach + 1):
             out |= padded[dy:dy + h, dx:dx + w] != face
     return out
 
@@ -1596,7 +1597,9 @@ def compare(image, ref, aovs):
     """Why `image` does not match `ref`, or an empty list."""
     problems = []
     covered = ref["face"] >= 0
-    edge = edges(ref["face"]) | edges(ref["shadow"])
+    # Each of a still frame's samples rounds to a map texel, so a penumbra's ends stray a pixel
+    # further than one ray's.
+    edge = edges(ref["face"]) | edges(ref["shadow"]) | (edges(ref["shadow"], 2) & edges(ref["soft"], 2))
     drawn = image["color"][..., 3] > 0.5
     stray = (drawn != covered) & ~edge
     if stray.any():
@@ -1684,18 +1687,23 @@ def blurred(stats, name):
 
 
 def cached(stats, name):
-    """Failures unless the `stats` husk wrote show, past the first frame, each frame keeping
-    some of its shadow pages, drawing others anew and giving some a live copy, when the scene
-    is CACHED."""
+    """Failures unless the `stats` husk wrote show each frame the time moved to past the first
+    keeping some of its shadow pages, drawing others anew and giving some a live copy, when the
+    scene is CACHED. Husk accumulates each time's samples before moving on, so the time moved
+    where a frame starts the samples again after one that had begun them."""
     seen = []
+    sample = 0
     with open(stats) as f:
         for line in f:
             words = line.split()
-            if words and words[0] == "frame":
-                pairs = dict(zip(words[2::2], words[3::2]))
+            if not words or words[0] != "frame":
+                continue
+            pairs = dict(zip(words[2::2], words[3::2]))
+            if sample > 0 and int(pairs["sample"]) == 0:
                 seen.append(tuple(int(pairs[k]) for k in ("shadow_pages_drawn", "shadow_pages_live", "shadow_pages")))
-    if name in CACHED and not all(0 < drawn < held and live > 0 for drawn, live, held in seen[1:]):
-        return [f"{name}: shadow pages drawn, live and held past the first frame {seen[1:]}"]
+            sample = int(pairs["sample"])
+    if name in CACHED and not (seen and all(0 < drawn < held and live > 0 for drawn, live, held in seen)):
+        return [f"{name}: shadow pages drawn, live and held at the times past the first {seen}"]
     return []
 
 
