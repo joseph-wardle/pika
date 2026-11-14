@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
+use crate::accumulation::{self, Accumulation};
 use crate::commands::Commands;
 use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
@@ -100,6 +101,7 @@ pub struct Renderer {
     shade: Shade,
     shadows: Shadows,
     cull: Cull,
+    accumulation: Accumulation,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
@@ -108,6 +110,10 @@ pub struct Renderer {
     syncs: usize,
     pending: Option<Pending>,
     placed: Option<(Buffers, Inputs)>,
+    /// Frames the target's sum holds, drawn while nothing changed.
+    samples: u32,
+    /// What the last frame's lights converge at (`accumulation::samples`).
+    wanted: u32,
 }
 
 /// What a frame's image depends on besides the store and its buffers.
@@ -154,6 +160,7 @@ struct Pending {
     update: geometry::Update,
     /// Whether the view was culled, so its counts are this frame's.
     culled: bool,
+    sample: u32,
     lights: usize,
     moved: usize,
     transforms: usize,
@@ -193,6 +200,7 @@ impl Renderer {
         let smooth = shader::compile("smooth")?;
         let tangent = shader::compile("tangent")?;
         let shadow = shader::compile("shadow")?;
+        let accumulate = shader::compile("accumulate")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -203,6 +211,7 @@ impl Renderer {
             shade: Shade::new(&device)?,
             shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
+            accumulation: Accumulation::new(&device, &accumulate.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
@@ -210,6 +219,8 @@ impl Renderer {
             syncs: 0,
             pending: None,
             placed: None,
+            samples: 0,
+            wanted: 0,
         })
     }
 
@@ -230,9 +241,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// Returns whether the buffers now hold this frame, with no material build still out.
-    /// While frames change, each call returns the frame before and leaves this one on the GPU,
-    /// so GPU work overlaps the host's own frame time instead of running in series with it.
+    /// Returns whether the buffers now hold this frame, with no material build still out and
+    /// its samples all drawn. While frames change, each call returns the frame before and leaves
+    /// this one on the GPU, so GPU work overlaps the host's own frame time instead of running in
+    /// series with it. While nothing changes, each call draws the next sample until converged.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
@@ -300,12 +312,14 @@ impl Renderer {
         }
         let placed = self.placed.as_ref();
         // A swap waiting for a frame's bytes needs no build to land.
-        if moved == Moved::default()
+        let mut still = moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
-            && self.shade.settled()
-            && !self.shade.builder.wait(WAIT)?
-        {
-            return Ok(self.shade.settled());
+            && self.shade.settled();
+        if still && self.samples >= self.wanted {
+            if !self.shade.builder.wait(WAIT)? {
+                return Ok(self.shade.settled());
+            }
+            still = false;
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
@@ -339,6 +353,9 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        // A swap begun draws the old image until whole, but its end must start the sum again.
+        still &= self.shade.settled();
+        let sample = if still { self.samples } else { 0 };
         let bound = self.geometry.bound();
         // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
@@ -376,6 +393,7 @@ impl Renderer {
                 &casters,
             )?;
         }
+        let wanted = accumulation::samples(&lights);
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
         let mut view = match (&bound, &mut self.view) {
@@ -388,7 +406,16 @@ impl Renderer {
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
             let shadows = self.shadows.table();
-            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h], shadows);
+            view.begin(
+                cb,
+                &camera,
+                geometry,
+                &lights,
+                &tiles,
+                [w, h],
+                sample,
+                shadows,
+            );
             self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
@@ -431,10 +458,17 @@ impl Renderer {
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;
+        // A frame drawn while anything changes is shown alone, since the next is drawn anew.
+        if still {
+            self.accumulation.record(cb, target, sample);
+        }
+        self.commands.mark("accumulate")?;
         let read = aovs.each_ref().map(Option::is_some);
         target.readback(cb, &read);
         self.commands.mark("readback")?;
         self.commands.submit()?;
+        self.samples = if still { sample + 1 } else { 0 };
+        self.wanted = wanted;
         let pending = Pending {
             buffers,
             inputs,
@@ -444,6 +478,7 @@ impl Renderer {
             record: start.elapsed(),
             update,
             culled: view.is_some(),
+            sample,
             lights: lights.len(),
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
@@ -463,7 +498,7 @@ impl Renderer {
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.settled())
+        Ok(self.shade.settled() && self.samples >= self.wanted)
     }
 
     /// Places the pending frame only if `aovs` are the buffers it was drawn for.
@@ -528,6 +563,7 @@ impl Renderer {
             update: pending.update,
             read_bytes,
             drawn,
+            sample: pending.sample,
             lights: pending.lights,
             shadow,
             memory,

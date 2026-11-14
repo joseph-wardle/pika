@@ -16,6 +16,8 @@ struct Constants {
     tiles: vk::DeviceAddress,
     tile_lights: vk::DeviceAddress,
     extent: [u32; 2],
+    sample: u32,
+    unused: u32,
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
     smooth: vk::DeviceAddress,
@@ -90,6 +92,7 @@ impl View {
     }
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
+    /// `sample` is the frame's index among those drawn while nothing changes, 0 while anything does.
     /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
     #[allow(clippy::too_many_arguments)]
     pub fn begin(
@@ -100,6 +103,7 @@ impl View {
         lights: &[Light],
         tiles: &Tiles,
         extent: [u32; 2],
+        sample: u32,
         shadows: vk::DeviceAddress,
     ) {
         self.drawn.bytes().fill(0);
@@ -130,6 +134,8 @@ impl View {
             tiles: address(1),
             tile_lights: address(2),
             extent,
+            sample,
+            unused: 0,
             points: geometry.points,
             normals: geometry.normals,
             smooth: geometry.smooth,

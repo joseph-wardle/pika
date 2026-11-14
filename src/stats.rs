@@ -43,6 +43,8 @@ pub struct Frame {
     pub read_bytes: u64,
     /// Instances, then triangles.
     pub drawn: [u32; 2],
+    /// Its index among the frames drawn while nothing changed, 0 while anything did.
+    pub sample: u32,
     pub lights: usize,
     pub shadow: shadow::Counts,
     pub memory: Memory,
@@ -275,6 +277,7 @@ impl Frame {
             ("drawn_instances", u64::from(self.drawn[0])),
             ("drawn_triangles", u64::from(self.drawn[1])),
             ("drawn_lights", self.lights as u64),
+            ("sample", u64::from(self.sample)),
             ("shadow_pages", u64::from(self.shadow.held)),
             ("shadow_pages_wanted", u64::from(self.shadow.wanted)),
             ("shadow_pages_drawn", u64::from(self.shadow.drawn)),
@@ -379,6 +382,7 @@ mod tests {
             },
             read_bytes: 20_995_200,
             drawn: [1274, 11_550_000],
+            sample: 3,
             lights: 47,
             shadow: shadow::Counts {
                 wanted: 300,
@@ -433,7 +437,7 @@ mod tests {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
              wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
-             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
+             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 sample 3 \
              shadow_pages 256 shadow_pages_wanted 300 shadow_pages_drawn 12 shadow_pages_live 5 shadow_draws 9000 \
              shadow_triangles 400000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \

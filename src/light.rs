@@ -150,7 +150,9 @@ pub fn resolve(light: &store::Light) -> Option<Light> {
             let z = row(2);
             let length = length(z);
             // Past 80° the shadow ray's disk is clamped to a tile anyway (shaders/frame.slang).
-            let radius = (angle.to_radians() / 2.0).clamp(0.0, 80f32.to_radians()).tan();
+            let radius = (angle.to_radians() / 2.0)
+                .clamp(0.0, 80f32.to_radians())
+                .tan();
             (length > 0.0).then(|| Light {
                 radius,
                 ..Light::distant(z.map(|v| v / length), distant(params, angle))

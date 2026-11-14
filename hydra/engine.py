@@ -13,16 +13,22 @@ session, from none to 4, 2 and none again, builds no material and draws
 at each cap what a session started at it draws, that a raise whose
 read fails, its baked file cut short, keeps the image it had and still
 converges, and that once the file is whole again a cap change releases
-it, drawing what a session at that cap draws.
+it, drawing what a session at that cap draws. Last, for a fourth scene
+under a soft shadow, that frames drawn while nothing changes accumulate:
+the image is not converged until the 64th sample, nears the converged
+image as samples add up, and then stays bit-identical with no frame
+drawn; and that moving the caster starts the samples again.
 
-    hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda>
+    hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda> <penumbra.usda>
 
 Needs a display (check.sh runs it on its Xvnc) and the delegate on
 PXR_PLUGINPATH_NAME. The controls are the dictionary before the first
 frame, which has no frame pairs, the converged frame's pixel, which must
 differ from the clay, the edit's converged pixel, which must differ
 from the look it kept, and the fresh sessions' images at each cap, which
-must differ from each other.
+must differ from each other. Accumulation's controls are the clay scene,
+whose hard shadow converges at its first frame, and the moved caster's
+converged image, which must differ from the one before.
 """
 
 import glob
@@ -39,6 +45,8 @@ from pxr import Gf, Usd, UsdGeom, UsdImagingGL, UsdShade
 SIZE = 64
 # How long a material's build may take before the check gives up.
 PATIENCE = 60
+# src/accumulation.rs SAMPLES.
+SAMPLES = 64
 
 
 def gl_context():
@@ -142,7 +150,56 @@ def converge(engine, stage, params, fbo):
             sys.exit(f"engine: the scene did not converge in {PATIENCE} s")
 
 
-def main(clay, painted, mipped):
+def accumulate(engine, stage, params, fbo):
+    """Renders until converged and gives each frame's image and sample
+    index, from the first drawn with nothing changed."""
+    frames = []
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        engine.Render(stage.GetPseudoRoot(), params)
+        frames.append((pixels(fbo), engine.GetRenderStats().get("sample")))
+        if engine.IsConverged():
+            return frames
+        if time.monotonic() > deadline:
+            sys.exit(f"engine: the soft shadow did not converge in {PATIENCE} s")
+
+
+def distance(a, b):
+    """The summed 8-bit channel differences between two images."""
+    return sum(abs((p >> s & 255) - (q >> s & 255)) for p, q in zip(a, b) for s in (0, 8, 16))
+
+
+def accumulates(path, fbo):
+    """Checks that the scene's soft shadow accumulates while nothing
+    changes, stays once converged and starts again when its caster moves."""
+    engine, stage, params = scene(path)
+    frames = accumulate(engine, stage, params, fbo)
+    samples = [s for _, s in frames]
+    if samples[-1] != SAMPLES - 1 or len(frames) < SAMPLES:
+        sys.exit(f"engine: the soft shadow converged after {len(frames)} frames at sample {samples[-1]}, not {SAMPLES - 1}")
+    # Each image is the frame placed a call after it was drawn; the sample stat is the last placed.
+    images = {s: image for image, s in frames}
+    final = images[SAMPLES - 1]
+    early, late = distance(images[3], final), distance(images[31], final)
+    if not late < early:
+        sys.exit(f"engine: the image at sample 31 is {late} from the converged one, not nearer than sample 3's {early}")
+    drawn = engine.GetRenderStats()["frames"]
+    for _ in range(4):
+        engine.Render(stage.GetPseudoRoot(), params)
+        if not engine.IsConverged() or pixels(fbo) != final:
+            sys.exit("engine: a converged soft shadow changed with nothing moved")
+    if engine.GetRenderStats()["frames"] != drawn:
+        sys.exit("engine: a converged soft shadow drew frames with nothing moved")
+    print(f"engine: the soft shadow converged in {len(frames)} frames, nearing it {early} then {late}, then stayed")
+    caster = UsdGeom.Xformable(stage.GetPrimAtPath("/world/caster"))
+    caster.GetOrderedXformOps()[0].Set(Gf.Vec3d(0.3, 0, 1))
+    frames = accumulate(engine, stage, params, fbo)
+    if len(frames) < SAMPLES or frames[-1][0] == final:
+        sys.exit(f"engine: the moved caster converged in {len(frames)} frames to {'the same' if frames[-1][0] == final else 'its own'} image")
+    print(f"engine: the moved caster started the samples again, converging in {len(frames)} frames")
+
+
+def main(clay, painted, mipped, penumbra):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     engine, stage, params = scene(clay)
@@ -150,6 +207,8 @@ def main(clay, painted, mipped):
     if stats_hold_a_frame(before):
         sys.exit(f"engine: the stats held a frame before one was drawn: {before}")
     pixels = converge(engine, stage, params, fbo)
+    if len(pixels) != 1:
+        sys.exit(f"engine: the clay's hard shadow took {len(pixels)} frames to converge, not 1")
     after = engine.GetRenderStats()
     if not stats_hold_a_frame(after):
         sys.exit(f"engine: the host does not see the frame in Pika's stats: {after}")
@@ -229,9 +288,10 @@ def main(clay, painted, mipped):
     if image != fresh[4]:
         sys.exit("engine: the cap changing did not release the held raise")
     print(f"engine: the cap changed to 4 released the held raise in {frames} frames")
+    accumulates(penumbra, fbo)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 4:
+    if len(sys.argv) != 5:
         sys.exit(__doc__)
     main(*sys.argv[1:])

@@ -681,8 +681,17 @@ impl Shadows {
             eye: [0.0; 4],
         };
         let screen = Tiles::new(&[], &nowhere, [1, 1]);
-        view.begin(cb, &nowhere, geometry, &[], &screen, [1, 1], table.address);
-        target.copy_depth(cb, depth.raw);
+        view.begin(
+            cb,
+            &nowhere,
+            geometry,
+            &[],
+            &screen,
+            [1, 1],
+            0,
+            table.address,
+        );
+        target.copy_out(cb, 1, depth.raw);
         let written = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)

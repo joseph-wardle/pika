@@ -321,6 +321,16 @@ float noise(float2 pixel)
     return frac(52.9829189 * frac(dot(floor(pixel), float2(0.06711056, 0.00583715))));
 }
 
+// The pattern's three values at a pixel for the view's sample, each shifted per sample along
+// Roberts' R3 sequence, so a pixel's samples spread evenly; sample 0's are the pattern itself.
+// While anything changes it stays at sample 0: a pattern moving each frame would shimmer until
+// temporal history averages it.
+float3 pattern(float2 pixel)
+{
+    float3 shift = float(view->sample) * float3(0.8191725, 0.6710436, 0.5497005);
+    return frac(float3(noise(pixel), noise(pixel + float2(113, 47)), noise(pixel + float2(59, 193))) + shift);
+}
+
 // A point across the light's shape from P, at u in [0, 1)², or for a distant light a point
 // along the direction toward one across its disk: a rect's or cylinder's uniform over its
 // side, a sphere's or disk's over its disk. A distant light's disk is kept within a tile of
@@ -360,8 +370,7 @@ float3 across_light(Light light, Shadow *s, float3 P, float3 q, float w, float2 
 }
 
 // How much of light light_index reaches P: none where its map holds a caster nearer the
-// light, for a light with a size along a ray toward one point across it, the same for each
-// frame.
+// light, for a light with a size along a ray toward one point across it, its pattern's.
 float visibility(uint light_index, float3 P)
 {
     Light light = view->lights[light_index];
@@ -376,9 +385,8 @@ float visibility(uint light_index, float3 P)
                        dot(s->light_space[2].xyz, n));
     if (light.radius == 0 && light.shape != RECT && light.shape != DISK)
         return hard(s, q, nq, w);
-    float2 pixel = pixel_at(P);
-    float2 u = float2(noise(pixel), noise(pixel + float2(113, 47)));
-    float3 e = across_light(light, s, P, q, w, u);
+    float3 u = pattern(pixel_at(P));
+    float3 e = across_light(light, s, P, q, w, u.xy);
     // A point below P's horizon would have P shadow itself; the light's own evaluation leaves
     // it out already.
     float3 v = e - P;
@@ -398,5 +406,5 @@ float visibility(uint light_index, float3 P)
         float l = length(e - P);
         end = to_light(s, P + (e - P) * max(l - s->near, 0) / l);
     }
-    return soft(s, q, end, nq, w, noise(pixel + float2(59, 193)));
+    return soft(s, q, end, nq, w, u.z);
 }

@@ -229,6 +229,10 @@ struct View
     uint2 *tiles;
     uint *tile_lights;
     uint2 extent;
+    // The frame's index among those drawn while nothing changes, 0 while anything does
+    // (src/renderer.rs).
+    uint sample;
+    uint unused;
     float *points;
     float *normals;
     float *smooth;
