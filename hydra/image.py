@@ -1716,7 +1716,7 @@ def cached(frames, name):
     sample = 0
     for f in frames:
         if sample > 0 and int(f["sample"]) == 0:
-            seen.append(tuple(int(f[k]) for k in ("shadow_pages_drawn", "shadow_pages_live", "shadow_pages")))
+            seen.append(tuple(int(f[k]) for k in ("shadow_pages_drawn", "shadow_pages_live", "shadow_pages_held")))
         sample = int(f["sample"])
     caches = all(0 < drawn < held and live > 0 for drawn, live, held in seen)
     if not seen or caches != CACHED[name]:

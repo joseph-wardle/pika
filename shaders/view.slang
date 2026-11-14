@@ -50,16 +50,15 @@ struct Light
 
 static const uint NO_SHADOW = 0xffffffff;
 
-// A light's virtual shadow map (src/shadow.rs Shadow), of tiles of PAGE² texels; a tile the
-// camera's pixels read holds a page of the pool: depth from the light as float bits, so the
-// nearest caster is the least. A page stays drawn from frame to frame until what it shows
-// changes (src/shadow.rs). A distant light's is a clipmap of up to LEVELS square levels around
-// the camera, each TILES² tiles, level i's side 2^(level + i) world units, its depth in [0, 1]
-// over the casters; its tiles are held wrapped, at their place from the light-space origin
-// modulo TILES, so a level moving with the camera keeps the tiles it still covers. A local
-// light's is a cube of faces around its centre, each face's LOD l (TILES >> l)² tiles, its
-// depth the distance along the face's axis.
+// A light's virtual shadow map, as src/shadow.rs's module doc describes it. A page holds depth
+// from the light as float bits, so the nearest caster is the least. A distant light's level i
+// spans 2^(finest + i) world units, its depth in [0, 1] over the casters; its tiles are held
+// wrapped, at their place from the light-space origin modulo TILES, so a level moving with the
+// camera keeps the tiles it still covers. A local light's depth is the distance along the
+// face's axis.
 static const uint LEVELS = 16;
+// At most 32: shadow.slang keeps a row of tiles in one uint's bits and packs a tile's place in
+// 8.
 static const uint TILES = 32;
 static const uint PAGE = 256;
 static const uint TILEMAP = TILES * TILES;
@@ -88,7 +87,7 @@ struct Shadow
     // A local light's clipping distances along a face's axis.
     float near;
     float far;
-    // 1 when its light's map changed: every page it holds is drawn anew.
+    // 1 when its light's map changed or the frame is fresh: every page it holds is drawn anew.
     uint reset;
     // LEVELS × TILEMAP per shadow (start()): a page or NO_PAGE.
     uint *tiles;

@@ -102,7 +102,7 @@ mod tests {
     use super::*;
     use crate::store::Link;
 
-    /// As the light loop decides it, and as shadows will.
+    /// As the light loop and the shadows decide it.
     fn reaches(light: u32, mesh: u32) -> bool {
         light & mesh == light
     }

@@ -1,12 +1,4 @@
-// Virtual shadow pages, in the frame's order: mark the tiles the camera's pixels read, count
-// them, choose which levels the pool holds, release the pages of tiles no longer held, gather
-// the free pages, assign them to the tiles that need one, find the held pages under the
-// casters that move, start or stop moving, remember each moving caster's box, clear the pages
-// to draw, list each caster instance once per level and face with pages to draw that it meets,
-// and draw that list by atomic min, so the pool needs no depth attachment; then copy each page
-// a moving caster meets into its live copy and draw the moving casters into those.
-//
-// A page holds only the casters that are not moving, and is drawn again only when its light
+// Virtual shadow pages, the passes in src/shadow.rs `record`'s order. A page holds only the casters that are not moving, and is drawn again only when its light
 // changes or a caster starts or stops moving over it. The pages a moving caster meets get a
 // live copy each frame, from the second half of the pool, which shading reads instead.
 
@@ -31,7 +23,7 @@ struct Constants
     // live copy or the page, which each Shadow's tiles points into.
     uint *pages;
     uint *tiles;
-    // Per tile, this frame's flags: MARK to PAINTED.
+    // Per tile, this frame's flags, MARK to LIVE.
     Atomic<uint> *flags;
     // Per shadow, level and face, the bounds of the pages drawn this frame, then of the live
     // copies: least x and y, then least across - 1 - x and y, so all four start at 0xffffffff

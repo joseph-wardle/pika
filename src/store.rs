@@ -67,7 +67,7 @@ pub struct Instancer {
     pub categories: Option<InstanceCategories>,
 }
 
-/// Hydra's light-link categories per instance, indexed as the primvars are. Instances mostly
+/// Hydra's light- and shadow-link categories per instance, indexed as the primvars are. Instances mostly
 /// share theirs, so each distinct set is held once. Empty when no instance has any.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct InstanceCategories {

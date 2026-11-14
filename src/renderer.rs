@@ -302,7 +302,6 @@ impl Renderer {
             self.collect(pending, &buffers, &mut aovs)?;
         }
         let placed = self.placed.as_ref();
-        // A swap waiting for a frame's bytes needs no build to land.
         let unchanged = moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
             && self.shade.settled();

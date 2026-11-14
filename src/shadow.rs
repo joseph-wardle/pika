@@ -418,6 +418,7 @@ impl Shadows {
         let list = |device| Buffer::device_local(device, pages as u64 * 4, storage);
         self.pool = Some(Pool {
             pages,
+            // Twice pika:shadowPool: the second half holds the live copies.
             texels: Buffer::device_local(device, 2 * pages as u64 * PAGE_BYTES, storage)?,
             owners: Buffer::device_local(device, pages as u64 * OWNER_BYTES, filled)?,
             free: list(device)?,
@@ -494,7 +495,6 @@ impl Shadows {
             self.maps = Some(Maps::new(device, count, pixels, instances)?);
             self.clean = true;
         }
-        // Shading reads each tile's page this frame.
         let tiles = self.maps.as_ref().map_or(0, |m| m.tiles.address);
         // A local light's, which a distant one's levels then replace.
         let shadow = |j: usize, rows: [[f64; 4]; 3], c: &Caster| Shadow {
@@ -741,8 +741,12 @@ impl Shadows {
         barrier(d, cb, computed);
         self.walk.record(cb, &[walks], push);
         barrier(d, cb, computed);
+        // After `moving`, which reads the boxes it replaces, and before the casts, which read
+        // the frame it stamps; it reads the moved entries' first `moving.len()`, the instances
+        // moving now (`moved_entries`).
         self.remember.record(cb, &[remembered], push);
         barrier(d, cb, computed);
+        // These three write apart, the casts by atomic counts: no barrier between them.
         self.clear.record(cb, std::slice::from_ref(&texels), push);
         self.cast.record(cb, &[casting], push);
         self.cast_moving.record(cb, &[entries_moved], push);

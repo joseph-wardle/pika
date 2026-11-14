@@ -100,7 +100,7 @@ def main(path, warm=None):
     host, device, syncs, frames = read(path)
     window = (lambda rows: rows[-int(warm):]) if warm else (lambda rows: rows[1:] or rows)
     s, f = window(syncs), window(frames)
-    busy = [k for k in BUILDING if warm and any(r.get(k, 0) for r in f)]
+    busy = [k for k in BUILDING if warm and any(r[k] for r in f)]
     if busy:
         sys.exit(f"{path}: the warm window is not warm: {', '.join(busy)} in its frames")
     print(f"{path}: {len(syncs)} syncs, {len(frames)} frames on {device} ({host})")
@@ -127,8 +127,8 @@ def main(path, warm=None):
           f"targets {size(last['target_bytes'])}, host {size(last['host_bytes'])}; "
           f"vram {size(last['vram_used_bytes'])} used of {size(last['vram_budget_bytes'])}")
     print(f"  materials: {size(last['material_bytes'])}, {last['lowered_textures']:.0f} textures lowered to fit")
-    print(f"  shadows: {size(last.get('shadow_bytes', 0))}, {last.get('shadow_pages', 0):.0f} pages held of "
-          f"{last.get('shadow_pages_wanted', 0):.0f} wanted, {last.get('shadow_draws', 0):.0f} page draws")
+    print(f"  shadows: {size(last['shadow_bytes'])}, {last['shadow_pages_held']:.0f} pages held of "
+          f"{last['shadow_pages_wanted']:.0f} wanted, {last['shadow_draws']:.0f} caster draws")
     print(f"  textures: {last['blurred_textures']:.0f} drawn coarser than the view needs, "
           f"{last['unseen_textures']:.0f} unseen, {last['unestimated_textures']:.0f} not estimated")
 
