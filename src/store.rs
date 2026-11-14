@@ -352,8 +352,7 @@ pub struct Moved {
     /// A visibility, render tag, instancing or light link (instances carry links) changed.
     pub draws: bool,
     pub materials: BTreeSet<u64>,
-    /// Lights added, removed or changed.
-    pub lights: BTreeSet<u64>,
+    pub lights: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -831,14 +830,14 @@ impl Store {
             link: None,
         };
         self.lights.insert(id, light);
-        self.moved.lights.insert(id);
+        self.moved.lights = true;
         id
     }
 
     pub fn remove_light(&mut self, id: u64) -> Result<(), String> {
         let light = self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
         self.stats.removed += 1;
-        self.moved.lights.insert(id);
+        self.moved.lights = true;
         self.moved.draws |= light.link.is_some_and(|l| l != Link::default());
         Ok(())
     }
@@ -846,17 +845,13 @@ impl Store {
     pub fn set_light_params(&mut self, id: u64, params: LightParams) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
         let bytes = size_of::<LightParams>();
-        if write(&mut self.stats.light, &mut light.params, params, bytes) {
-            self.moved.lights.insert(id);
-        }
+        self.moved.lights |= write(&mut self.stats.light, &mut light.params, params, bytes);
         Ok(())
     }
 
     pub fn set_light_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
-        if write(&mut self.stats.light, &mut light.transform, transform, 128) {
-            self.moved.lights.insert(id);
-        }
+        self.moved.lights |= write(&mut self.stats.light, &mut light.transform, transform, 128);
         Ok(())
     }
 
@@ -864,10 +859,9 @@ impl Store {
     pub fn set_light_link(&mut self, id: u64, link: Link) -> Result<(), String> {
         let bytes = link.light.len() + link.shadow.len();
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
-        if write(&mut self.stats.light, &mut light.link, link, bytes) {
-            self.moved.lights.insert(id);
-            self.moved.draws = true;
-        }
+        let moved = write(&mut self.stats.light, &mut light.link, link, bytes);
+        self.moved.lights |= moved;
+        self.moved.draws |= moved;
         Ok(())
     }
 
@@ -1270,8 +1264,7 @@ mod tests {
         let mut store = Store::new();
         let id = store.insert_light("/sun".into());
         let other = store.insert_light("/fill".into());
-        let both = BTreeSet::from([id, other]);
-        assert_eq!(store.take_moved().lights, both);
+        assert!(store.take_moved().lights);
         let params = LightParams {
             intensity: 1.0,
             exposure: 0.0,
@@ -1287,7 +1280,7 @@ mod tests {
         store.set_light_transform(id, transform).unwrap();
         store.set_light_params(other, params).unwrap();
         store.set_light_link(other, Link::default()).unwrap();
-        assert_eq!(store.take_moved().lights, both);
+        assert!(store.take_moved().lights);
         // Hydra resends a light's fields unchanged, as usdview does its camera light: no move.
         store.end_sync();
         store.set_light_params(id, params).unwrap();
@@ -1301,16 +1294,16 @@ mod tests {
             ..params
         };
         store.set_light_params(id, brighter).unwrap();
-        assert_eq!(store.take_moved().lights, BTreeSet::from([id]));
+        assert!(store.take_moved().lights);
         let unlinked = Link {
             shadow: "group_0".into(),
             ..Link::default()
         };
         store.set_light_link(other, unlinked).unwrap();
         let moved = store.take_moved();
-        assert_eq!((moved.lights, moved.draws), (BTreeSet::from([other]), true));
+        assert!(moved.lights && moved.draws);
         store.remove_light(id).unwrap();
-        assert_eq!(store.take_moved().lights, BTreeSet::from([id]));
+        assert!(store.take_moved().lights);
         assert!(store.set_light_params(id, params).is_err());
         assert_eq!(store.census().unwrap().lights, 1);
     }

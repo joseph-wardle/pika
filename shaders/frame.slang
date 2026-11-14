@@ -29,9 +29,9 @@ float2 pixel_at(float3 P)
 uint2 tile(float3 P)
 {
     float2 pixel = pixel_at(P);
-    uint2 grid = (view->extent + TILE - 1) / TILE;
-    uint2 xy = min(uint2(max(pixel, 0) / TILE), grid - 1);
-    return view->tiles[xy.y * grid.x + xy.x];
+    uint2 grid = (view->extent + LIGHT_TILE - 1) / LIGHT_TILE;
+    uint2 xy = min(uint2(max(pixel, 0) / LIGHT_TILE), grid - 1);
+    return view->light_tiles[xy.y * grid.x + xy.x];
 }
 
 // Lambert's formula over the light's outline as P sees it, a polygon of up to 8 corners;
@@ -242,7 +242,7 @@ bool read(Shadow *s, float3 q, float3 nq, uint i, float along, out uint caster, 
 // What the level a pixel at camera clip w wants at q reads (read()). Past the pool a level may
 // have no page there, so coarser ones are tried, then the finer one a pixel on a level's edge
 // may have marked instead.
-bool sample(Shadow *s, float3 q, float3 nq, float w, out uint caster, out float depth,
+bool lookup(Shadow *s, float3 q, float3 nq, float w, out uint caster, out float depth,
             out float texel)
 {
     caster = EMPTY;
@@ -265,7 +265,7 @@ float hard(Shadow *s, float3 q, float3 nq, float w)
     uint caster;
     float depth;
     float texel;
-    if (!sample(s, q, nq, w, caster, depth, texel))
+    if (!lookup(s, q, nq, w, caster, depth, texel))
         return 1.0;
     return caster < asuint(depth) ? 0.0 : 1.0;
 }
@@ -303,7 +303,7 @@ float soft(Shadow *s, float3 start, float3 end, float3 nq, float w, float jitter
         uint caster;
         float depth;
         float texel;
-        if (!sample(s, q, nq, w, caster, depth, texel) || caster == EMPTY)
+        if (!lookup(s, q, nq, w, caster, depth, texel) || caster == EMPTY)
             continue;
         float2 d = from_light(s, q, depth, asfloat(caster));
         bool crossed = before.x <= d.y + texel ||

@@ -1,5 +1,4 @@
-//! The images a frame renders into, its depth buffer, the buffers read back from them and the
-//! sum a still view's frames accumulate into.
+//! The images a frame renders into, its depth buffer and the buffers read back from them.
 
 use ash::vk;
 
@@ -29,10 +28,8 @@ pub struct Target {
     depth_memory: vk::DeviceMemory,
     depth_bytes: u64,
     depth_view: vk::ImageView,
-    /// Per pixel, four floats: the color of each frame since the view was last still.
-    pub sum: Buffer,
-    /// The color attachment's pixels, copied out for the sum and back.
-    pub copy: Buffer,
+    /// Per pixel, the first color attachment's bytes.
+    pub color_bytes: u64,
 }
 
 impl Target {
@@ -43,11 +40,6 @@ impl Target {
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
-        let pixels = width as u64 * height as u64;
-        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
-        let copied =
-            storage | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
-        let color_bytes = formats.first().map_or(0, |f| f.1 as u64);
         let mut t = Self {
             device: device.raw.clone(),
             width,
@@ -57,8 +49,7 @@ impl Target {
             depth_memory: vk::DeviceMemory::null(),
             depth_bytes: 0,
             depth_view: vk::ImageView::null(),
-            sum: Buffer::device_local(device, pixels * 16, storage)?,
-            copy: Buffer::device_local(device, pixels * color_bytes, copied)?,
+            color_bytes: formats.first().map_or(0, |f| f.1 as u64),
         };
         for &(format, bytes_per_pixel) in formats {
             let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
@@ -105,8 +96,6 @@ impl Target {
             device: self.depth_bytes,
             host: 0,
         };
-        memory += self.sum.memory();
-        memory += self.copy.memory();
         for a in &self.colors {
             memory.device += a.bytes;
             memory += a.readback.memory();

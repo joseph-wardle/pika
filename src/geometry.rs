@@ -183,8 +183,9 @@ pub struct Bound {
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
-    /// Without instances; each view copies them.
+    /// Without instances; each view copies them, and shadows read them at `record_words`.
     pub records: vk::Buffer,
+    pub record_words: vk::DeviceAddress,
     pub count: u32,
     pub instance_count: u32,
 }
@@ -379,6 +380,7 @@ impl Geometry {
             boxes: draws.boxes.address,
             indices: layout.indices.raw,
             records: draws.records.raw,
+            record_words: draws.records.address,
             count: draws.tables.records.len() as u32,
             instance_count: draws.tables.instances.len() as u32,
         })
@@ -433,11 +435,14 @@ impl Geometry {
         footprints
     }
 
-    /// The drawn instances whose transform or points moved, by their index; valid only for a
-    /// frame whose update did not rewrite the draws, which renumbers them.
-    pub fn moved_instances(&self, moved: &Moved) -> Vec<u32> {
+    /// The drawn instances whose transform or points moved, by their index, ascending; `None`
+    /// when `update` rewrote the draws, which renumbers them.
+    pub fn moved_instances(&self, moved: &Moved, update: &Update) -> Option<Vec<u32>> {
+        if update.draws {
+            return None;
+        }
         let Some(d) = &self.draws else {
-            return Vec::new();
+            return Some(Vec::new());
         };
         let ids = moved.transforms.iter().chain(&moved.points);
         let rows = ids.filter_map(|id| d.tables.rows.get(id)).flatten();
@@ -447,7 +452,7 @@ impl Geometry {
             .collect();
         instances.sort_unstable();
         instances.dedup();
-        instances
+        Some(instances)
     }
 
     /// Each drawn instance with its mesh's box, in the mesh's own space.
@@ -1406,7 +1411,7 @@ fn rewrite(
                 instances: Buffer::device_local(device, size(&t.instances), storage)?,
                 owners: Buffer::device_local(device, size(&t.owners), storage)?,
                 boxes: Buffer::device_local(device, size(&t.boxes), storage)?,
-                records: Buffer::device_local(device, size(&t.records), copied)?,
+                records: Buffer::device_local(device, size(&t.records), storage | copied)?,
                 tables: DrawTables::default(),
                 tags: Vec::new(),
             }

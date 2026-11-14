@@ -24,7 +24,7 @@ impl Instance {
     }
 
     /// The shadow-link collections the mesh is in.
-    pub fn shadow(&self) -> u32 {
+    pub fn shadow_link(&self) -> u32 {
         self.flags[2]
     }
 

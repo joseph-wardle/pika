@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex, MutexGuard, Once, PoisonError};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use crate::cache;
 use crate::material::{self, Document, Network, Source};
@@ -356,7 +356,6 @@ pub struct Builder {
     jobs: Sender<Job>,
     done: Receiver<Built>,
     latest: Latest,
-    arrived: Vec<Built>,
 }
 
 /// Each material's latest generation while its job is out; workers skip stale jobs.
@@ -378,12 +377,7 @@ impl Builder {
             let jobs = latest.jobs.clone();
             std::thread::spawn(move || work(&bake, &queue, &finished, &jobs));
         }
-        Self {
-            jobs,
-            done,
-            latest,
-            arrived: Vec::new(),
-        }
+        Self { jobs, done, latest }
     }
 
     pub fn submit(&mut self, id: u64, document: Document, network: Network) -> Result<(), String> {
@@ -397,28 +391,9 @@ impl Builder {
         (self.jobs.send(job)).map_err(|_| "the build workers have exited".to_string())
     }
 
-    pub fn wait(&mut self, timeout: Duration) -> Result<bool, String> {
-        if !self.arrived.is_empty() {
-            return Ok(true);
-        }
-        if self.latest.jobs().is_empty() {
-            return Ok(false);
-        }
-        match self.done.recv_timeout(timeout) {
-            Ok(built) => {
-                self.arrived.push(built);
-                Ok(true)
-            }
-            Err(RecvTimeoutError::Timeout) => Ok(false),
-            Err(RecvTimeoutError::Disconnected) => Err("the build workers have exited".into()),
-        }
-    }
-
     /// The finished builds still their material's latest; stale ones are dropped.
     pub fn drain(&mut self) -> Vec<Built> {
-        let mut arrived = std::mem::take(&mut self.arrived);
-        arrived.extend(self.done.try_iter());
-        (arrived.into_iter())
+        (self.done.try_iter())
             .filter(|b| self.latest.landed(b.id, b.generation))
             .collect()
     }
@@ -759,31 +734,30 @@ mod tests {
                 hash: 1,
             },
         });
+        // The workers' builds, sent as they would send them.
+        let (sent, done) = mpsc::sync_channel(3);
+        builder.done = done;
         let mut finished = |id: u64, stale: bool| {
             let generation = builder.latest.submit(id);
             if stale {
                 builder.latest.submit(id);
             }
-            builder.arrived.push(Built {
+            sent.send(Built {
                 id,
                 generation,
                 document: material::document(&network).unwrap().unwrap(),
                 network: network.clone(),
                 result: Err(String::new()),
-            });
+            })
+            .unwrap();
         };
         finished(1, false);
         finished(2, true);
         finished(3, false);
         let ids = |built: &[Built]| built.iter().map(|b| b.id).collect::<Vec<_>>();
 
-        assert!(
-            builder.wait(Duration::ZERO).unwrap(),
-            "builds wait to be installed"
-        );
         assert_eq!(ids(&builder.drain()), [1, 3], "the stale one does not land");
         assert_eq!(builder.len(), 1, "material 2's latest build is still out");
         assert!(builder.drain().is_empty());
-        assert!(!builder.wait(Duration::ZERO).unwrap());
     }
 }

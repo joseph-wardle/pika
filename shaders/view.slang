@@ -63,7 +63,6 @@ static const uint LEVELS = 16;
 static const uint TILES = 32;
 static const uint PAGE = 256;
 static const uint TILEMAP = TILES * TILES;
-static const uint LOCAL_LEVELS = 6;
 // A tile with no page; before allocation, 0 is unmarked.
 static const uint NO_PAGE = 0xffffffff;
 
@@ -77,7 +76,7 @@ struct Shadow
     // 0 for a local light.
     int2 origin[LEVELS];
     // A distant light's finest level's exponent, and how many levels follow it.
-    int level;
+    int finest;
     uint levels;
     // A pixel's world width per unit of camera clip w.
     float pixel;
@@ -161,7 +160,7 @@ float2 face_tiles(float2 uv, uint across)
 // A tile's world width at level i: a power of two, so dividing by it is exact.
 float tile_width(Shadow *s, uint i)
 {
-    return exp2(float(s->level + int(i))) / TILES;
+    return exp2(float(s->finest + int(i))) / TILES;
 }
 
 // Outside the level, a tile index just past its edge.
@@ -180,7 +179,7 @@ bool inside(int2 t)
 // whose tiles hold P; the coarsest holds every mesh (src/shadow.rs).
 uint level_at(Shadow *s, float3 q, float w)
 {
-    float want = floor(log2(w * s->pixel * TILES * PAGE)) - float(s->level);
+    float want = floor(log2(w * s->pixel * TILES * PAGE)) - float(s->finest);
     uint i = uint(clamp(want, 0, float(s->levels - 1)));
     while (i + 1 < s->levels && !inside(tile_at(s, q.xy, i)))
         i++;
@@ -215,7 +214,7 @@ bool lit_by(Light light, float3 P, uint link)
 }
 
 // The side of a light tile in pixels (src/light.rs TILE).
-static const uint TILE = 16;
+static const uint LIGHT_TILE = 16;
 
 struct View
 {
@@ -226,7 +225,7 @@ struct View
     float4 eye;
     Light *lights;
     // Per tile, row by row: the first of its tile_lights and how many.
-    uint2 *tiles;
+    uint2 *light_tiles;
     uint *tile_lights;
     uint2 extent;
     // The frame's index among those drawn while nothing changes, 0 while anything does

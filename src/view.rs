@@ -13,7 +13,7 @@ use crate::transform::Camera;
 struct Constants {
     camera: Camera,
     lights: vk::DeviceAddress,
-    tiles: vk::DeviceAddress,
+    light_tiles: vk::DeviceAddress,
     tile_lights: vk::DeviceAddress,
     extent: [u32; 2],
     sample: u32,
@@ -131,7 +131,7 @@ impl View {
         let constants = Constants {
             camera: *camera,
             lights: address(0),
-            tiles: address(1),
+            light_tiles: address(1),
             tile_lights: address(2),
             extent,
             sample,
