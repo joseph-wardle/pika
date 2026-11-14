@@ -6,9 +6,10 @@
 )
 
 # Distant, sphere, rect, disk and cylinder lights are stored with their
-# UsdLux inputs, UsdLux's fallbacks where none is authored, and their world
-# transforms. Frame 2 edits a distant light, turning its parent, removes the
-# other, and edits the sphere's radius and the cylinder's length: a light is
+# UsdLux inputs, UsdLux's fallbacks where none is authored (the panel's
+# shadows are off), and their world transforms. Frame 2 edits a distant light, turning its parent, removes the
+# other, edits the sphere's radius and the cylinder's length, and turns the
+# panel's shadows on: a light is
 # no material, so its edits compile nothing.
 #
 # compiles: 1 then 0
@@ -67,8 +68,9 @@ def Xform "world"
         uniform token[] xformOpOrder = ["xformOp:translate"]
     }
 
-    def RectLight "panel"
+    def RectLight "panel" (prepend apiSchemas = ["ShadowAPI"])
     {
+        bool inputs:shadow:enable = 0
         float inputs:width = 2
         float inputs:height = 0.5
         float inputs:intensity = 3

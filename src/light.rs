@@ -9,6 +9,9 @@ use crate::transform::Camera;
 
 pub const TILE: u32 = 16;
 
+/// A light's `shadow` when it casts none.
+pub const NO_SHADOW: u32 = u32::MAX;
+
 /// The illuminance at which a light's reach ends: a facing white Lambert
 /// surface loses at most this / π of each light.
 pub const THRESHOLD: f32 = 0.01;
@@ -29,6 +32,7 @@ const OCTAGON: f32 = 1.053_907_4;
 pub struct Light {
     /// The unit direction toward a distant light, or the centre of another.
     pub position: [f32; 3],
+    /// A sphere's or cylinder's; for a distant light, the tangent of its disk's angular radius.
     pub radius: f32,
     /// Lux for a distant light, lux at unit distance for a sphere, radiance for an area light.
     pub illuminance: [f32; 3],
@@ -44,7 +48,9 @@ pub struct Light {
     pub link: u32,
     /// Past this an area light is read as a point; infinite for other lights.
     pub far: f32,
-    pub pad: [u32; 2],
+    /// Its map in the view's shadows, or `NO_SHADOW`.
+    pub shadow: u32,
+    pub pad: u32,
 }
 
 impl Light {
@@ -60,7 +66,8 @@ impl Light {
             fade: 0.0,
             link: 0,
             far: f32::INFINITY,
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 
@@ -78,7 +85,8 @@ impl Light {
             fade: 1.0 / (reach * reach),
             link: 0,
             far: f32::INFINITY,
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 
@@ -107,7 +115,8 @@ impl Light {
             fade: THRESHOLD / brightest,
             link: 0,
             far: far(shape, shown, bound),
-            pad: [0; 2],
+            shadow: NO_SHADOW,
+            pad: 0,
         }
     }
 }
@@ -140,7 +149,14 @@ pub fn resolve(light: &store::Light) -> Option<Light> {
         Shape::Distant { angle } => {
             let z = row(2);
             let length = length(z);
-            (length > 0.0).then(|| Light::distant(z.map(|v| v / length), distant(params, angle)))
+            // Past 80° the shadow ray's disk is clamped to a tile anyway (shaders/frame.slang).
+            let radius = (angle.to_radians() / 2.0)
+                .clamp(0.0, 80f32.to_radians())
+                .tan();
+            (length > 0.0).then(|| Light {
+                radius,
+                ..Light::distant(z.map(|v| v / length), distant(params, angle))
+            })
         }
         // Geometric mean of the axes' lengths, exact under a uniform scale.
         Shape::Sphere { radius } => {
@@ -500,6 +516,7 @@ mod tests {
             normalize,
             shape: Shape::Distant { angle },
             visible: true,
+            shadow: true,
         }
     }
 

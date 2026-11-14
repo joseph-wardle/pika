@@ -1,6 +1,6 @@
-"""Pika's image check: renders each scene in hydra/images/ in husk, for
-frames 1 and 2, and compares its color, depth and normal AOVs with a ray cast
-from USD, one ray through each pixel centre. The reference reads the stage,
+"""Pika's image check: renders each scene in hydra/images/ in husk, at
+each time of its time range, and compares its color, depth and normal AOVs
+with a ray cast from USD, one ray through each pixel centre. The reference reads the stage,
 never Pika's store, so the two cannot share a mistake.
 
     hython hydra/image.py <out dir> [usdrecord]
@@ -8,7 +8,7 @@ never Pika's store, so the two cannot share a mistake.
 Run it from a shell set up as hydra/check.sh sets one up. With `usdrecord`,
 it also renders each scene's color through usdrecord (usdview's engine),
 which needs an X display in DISPLAY. The renders run RENDERS at a time and
-the references on every core; the results print in the scenes' order.
+the references REFERENCES at a time; the results print in the scenes' order.
 
 What the reference encodes:
 - The camera is the RenderSettings camera's frustum, conformed to the
@@ -76,9 +76,23 @@ What the reference encodes:
   stage drawn without lights is black: Pika has no headlight of its own.
   Pika's threshold takes up to 0.01 lux off each light, 5.7e-4 of a clay
   surface's color, so a scene lights a surface with two at most. A light
-  lights only the meshes its lightLink collection includes; Pika links
-  per mesh, so a scene's instances must share their prototype's links.
-  Other light types are refused.
+  lights only the meshes its lightLink collection includes, a native
+  instance's mesh by its instance proxy's path.
+  A light, the camera light among them, unless its shadow:enable is off,
+  gives a hit the share of its shadow rays that meet no triangle of a mesh
+  its shadowLink collection includes (every mesh for the camera light), the
+  hit's own triangle aside, whatever pika:shadowPool holds. A light with no
+  size has one ray: a distant light's along its axis, another's to its
+  centre. A light with a size has 64, toward the centres of an 8 × 8 grid's
+  cells spread over it: uniformly over a rect, and over a cylinder's length
+  by its diameter facing the hit; through radius √u and angle 2πv, over a
+  disk, a sphere's disk of its radius facing the hit, and for a distant
+  light the directions across the disk of its half angle (at most 80°) a
+  unit along its axis. A hit whose rays toward the light's centre and edge
+  (the corners and the sides' midpoints, or 8 points round the disk)
+  agree takes their answer alone. A scene in POOLED marks more pages than its
+  pool, whose dropped levels must keep their texels under a pixel. Other
+  light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
   UsdPreviewSurface with its specular off (`preview`), OpenPBR or Standard
@@ -97,12 +111,21 @@ What the reference encodes:
   `weld`). Other materials and spaces are refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
 
-Pixels next to a change of face (silhouettes, face boundaries) are compared
-only for coverage, since a rasterizer and a ray decide them differently. Away
-from them, values must agree within TOLERANCE, colour also allowed 1/256 of
+Pixels next to a change of face (silhouettes, face boundaries) are not
+compared, since a rasterizer and a ray decide them differently; nor is the
+colour of pixels next to a change of which lights' shadows hold them,
+wholly or in part, or within two of one at a penumbra's end, since a shadow
+map's texels and a ray decide those differently. Elsewhere, coverage must
+agree and values within TOLERANCE, colour also allowed 1/256 of
 its value: the GPU decodes sRGB texels to about nine significant bits (RTX
 4070 Ti SUPER, driver 580), so a sample of a light grey is off by up to
-half of 1/256 before it is filtered.
+half of 1/256 before it is filtered. Pika gives a pixel in a penumbra, where
+a light's share is between 0 and 1, one ray a frame, averaged over a still
+view's frames, so penumbra pixels are compared otherwise: each colour must lie between its
+partly shadowed lights wholly shadowed and wholly lit, and over the pixels whose
+share of their light is within each of BANDS, the mean share Pika shows
+must be the reference's within PENUMBRA. A frame with penumbra pixels whose
+share can be read must fill at least one band.
 
 Each control perturbs the reference. A control must fail on every scene
 and host whose reference it changes, and must change at least one scene's.
@@ -137,11 +160,29 @@ TAIL = 4
 # at frame 1 a pixel of the lowered scene covers 2√2 texels of its 8×8, level 1, which its 4×4
 # floor holds; at frame 2 √2, level 0, which it does not.
 BLURRED = {"lowered": (0, 1)}
-FRAMES = (1, 2)
+# Scenes whose pika:shadowPool holds fewer pages than husk's camera marks; husk must warn of it
+# in one line.
+POOLED = {"receding": 1}
+# Scenes whose shadow pages husk must show cached, or not: moving's lights and camera stay while
+# its casters move, so it must keep some pages from the first time, draw others anew and give
+# the moving casters' pages a live copy; lamps' lights move and its casters stay, so, the
+# control, it must give none a live copy.
+CACHED = {"moving": True, "lamps": False}
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
+# Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
+# renders, under 32 GB.
+REFERENCES = 16
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
+# Penumbra pixels' bands of the reference's share of their light, the pixels a band needs to
+# be compared, and how far Pika's mean share over one may be from the reference's. Pika marches
+# EEVEE's 6 steps through one map from the light's centre, which narrows penumbrae: converged,
+# lamps.usda misses by up to 0.10, and a light of a quarter of the size by 0.30. Half the size
+# misses by 0.13, too near to tell apart.
+BANDS = ((0, 0.1), (0.1, 0.4), (0.4, 0.6), (0.6, 0.9), (0.9, 1))
+BAND_PIXELS = 16
+PENUMBRA = 0.15
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
             "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
@@ -153,6 +194,10 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sphere light read as a point of its intensity", "sphere light's scale ignored",
             "lights shining up their z axis", "area lights read as points", "area lights turned 90°",
             "area lights' scale ignored", "area lights lit from both sides", "light links ignored",
+            "instance links ignored",
+            "shadows ignored", "penumbrae wholly shadowed", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
+            "shadow rays past local lights", "moved casters' old shadows kept",
+            "shadows of the light's centre alone", "shadows of a quarter of the light's size",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -887,7 +932,7 @@ def triangles(stage, time, host, control=None):
             subdivided = False
         if subdivided or not normals:
             # The points smooth normals are computed from.
-            at = FRAMES[0] if control == "frame 1's smooth normals" else time
+            at = stage.GetStartTimeCode() if control == "frame 1's smooth normals" else time
             normals = smooth_normals(surface(mesh, at, control)[0], counts, indices, left, control)
             interpolation = UsdGeom.Tokens.vertex
         face_of = [face for face, count in enumerate(counts) for _ in range(count)]
@@ -1075,18 +1120,174 @@ def links(prim, paths, control):
     if control == "light links ignored":
         return np.ones(len(paths), bool)
     query = UsdLux.LightAPI(prim).GetLightLinkCollectionAPI().ComputeMembershipQuery()
-    included = {path: query.IsPathIncluded(Sdf.Path(path)) for path in set(paths)}
+    return member(prim, query, paths, control)
+
+
+def member(light, query, paths, control):
+    """Which `paths` the collection `query` includes. Under the control, a
+    native instance's mesh is in no collection, as Pika once held it: a light
+    whose collection is not everything gives no instance its light or shadow."""
+    stage = light.GetStage()
+    everything = dict(query.GetAsPathExpansionRuleMap()) == {Sdf.Path.absoluteRootPath: "expandPrims"}
+    def included(path):
+        proxy = stage.GetPrimAtPath(path).IsInstanceProxy()
+        if control == "instance links ignored" and proxy and not everything:
+            return False
+        return query.IsPathIncluded(Sdf.Path(path))
+    included = {path: included(path) for path in set(paths)}
     return np.array([included[path] for path in paths], bool)
 
 
-def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
+# Hit-triangle pairs a shadow ray test holds at once, about 100 MB: one per core runs.
+PAIRS = 1 << 20
+
+
+def shadowed(toward, casts, p, own, world, control, reach=None):
+    """Which hits `p`, on triangles `own`, a light toward `toward` (one
+    direction, or one per hit) shadows: their rays toward it meet one of
+    the triangles of `world` that `casts`, nearer than `reach`, the
+    distance to a local light's centre, when given."""
+    if control == "shadows ignored":
+        return np.zeros(len(p), bool)
+    if control == "shadow rays turned 6°":
+        a = math.radians(6)
+        side = normalize(np.cross(toward, (0.0, 1.0, 0.0)))
+        toward = normalize(toward * math.cos(a) + side * math.sin(a))
+    k = np.nonzero(casts)[0]
+    v0, e1, e2 = world[k, 0], world[k, 1] - world[k, 0], world[k, 2] - world[k, 0]
+    out = np.zeros(len(p), bool)
+    chunk = max(1, PAIRS // max(len(k), 1))
+    for start in range(0, len(p), chunk):
+        d = toward if toward.ndim == 1 else toward[start:start + chunk, None]
+        u, v, t, det = intersect(p[start:start + chunk, None], d, v0, e1, e2)
+        hit = (det != 0) & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > 1e-6)
+        if reach is not None and control != "shadow rays past local lights":
+            hit &= t < reach[start:start + chunk, None]
+        out[start:start + chunk] = (hit & (k != own[start:start + chunk, None])).any(axis=1)
+    return out
+
+
+# Where a sized light's shadow rays aim, over [0, 1]²: an 8 × 8 grid's cell centres, and the
+# edge of a rect or cylinder side and of a disk; `share` aims at the light's centre itself.
+GRID = (np.stack(np.meshgrid(np.arange(8), np.arange(8)), -1).reshape(-1, 2) + 0.5) / 8
+SIDE_EDGE = np.array([(x, y) for y in (0, 0.5, 1) for x in (0, 0.5, 1) if (x, y) != (0.5, 0.5)])
+DISK_EDGE = np.c_[np.ones(8), np.arange(8) / 8]
+
+
+def aims(prim, time, toward, angle, control):
+    """Where a light's shadow rays aim (see the module's doc): a function
+    of grid points u, (points, 2), and the hits p giving directions,
+    (points, 3), for a distant light (`prim` None or a DistantLight,
+    `toward` and `angle` its), else points, (points, hits, 3); and the
+    edge's grid points. None for a light with no size."""
+    if control == "shadows of the light's centre alone":
+        return None
+    scale = 0.25 if control == "shadows of a quarter of the light's size" else 1.0
+
+    def disk(u):
+        return scale * np.sqrt(u[:, :1]) * np.c_[np.cos(2 * np.pi * u[:, 1]), np.sin(2 * np.pi * u[:, 1])]
+
+    def side(u):
+        return scale * (2 * u - 1)
+
+    if toward is not None:
+        t = math.tan(min(math.radians(angle) / 2, math.radians(80)))
+        if t == 0:
+            return None
+        e0 = normalize(np.cross(toward, (0.0, 1.0, 0.0) if abs(toward[1]) < 0.9 else (1.0, 0.0, 0.0)))
+        e1 = np.cross(toward, e0)
+        return (lambda u, p: normalize(toward + t * (disk(u)[:, :1] * e0 + disk(u)[:, 1:] * e1))), DISK_EDGE
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    x, y, z, c = (np.array([m[r][0], m[r][1], m[r][2]]) for r in range(4))
+    if prim.IsA(UsdLux.SphereLight):
+        r = UsdLux.SphereLight(prim).GetRadiusAttr().Get(time) * np.linalg.norm(x)
+        if r == 0:
+            return None
+
+        def sphere_disk(u, p):
+            w = normalize(c - p)
+            a = normalize(np.cross(w, np.where(np.abs(w[:, :1]) < 0.9, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))))
+            b = np.cross(w, a)
+            d = disk(u)
+            return c + r * (d[:, 0, None, None] * a + d[:, 1, None, None] * b)
+        return sphere_disk, DISK_EDGE
+    if prim.IsA(UsdLux.RectLight):
+        light = UsdLux.RectLight(prim)
+        half = np.array([x * light.GetWidthAttr().Get(time) / 2, y * light.GetHeightAttr().Get(time) / 2])
+        return (lambda u, p: np.broadcast_to((c + side(u) @ half)[:, None], (len(u), len(p), 3))), SIDE_EDGE
+    if prim.IsA(UsdLux.DiskLight):
+        r = UsdLux.DiskLight(prim).GetRadiusAttr().Get(time)
+        return (lambda u, p: np.broadcast_to((c + disk(u) @ np.array([x * r, y * r]))[:, None], (len(u), len(p), 3))), DISK_EDGE
+    light = UsdLux.CylinderLight(prim)
+    half = x * light.GetLengthAttr().Get(time) / 2
+    r = light.GetRadiusAttr().Get(time) * np.linalg.norm(y)
+    axis = half / np.linalg.norm(half)
+
+    def cylinder_side(u, p):
+        out = normalize(np.cross(axis, p - c))
+        s = side(u)
+        return c + s[:, 0, None, None] * half + s[:, 1, None, None] * r * out
+    return cylinder_side, SIDE_EDGE
+
+
+def share(prim, time, toward, angle, p, own, world, casts, control):
+    """Each hit's share of a light (see the module's doc): a distant light
+    `toward` its direction, with its `angle`, or a local light `prim`."""
+    distant = toward is not None
+
+    def unmet(points, at):
+        """The share of the hits `at`'s rays toward `points`, directions
+        (n, 3) or points per hit (n, hits at, 3), that meet no caster."""
+        blocked = np.zeros(at.sum())
+        for q in points:
+            if distant:
+                blocked += shadowed(q, casts, p[at], own[at], world, control)
+            else:
+                v = q - p[at]
+                d = np.linalg.norm(v, axis=1)
+                blocked += shadowed(v / d[:, None], casts, p[at], own[at], world, control, d)
+        return 1 - blocked / len(points)
+
+    every = np.ones(len(p), bool)
+    if distant:
+        centre = toward[None]
+    else:
+        o = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time).ExtractTranslation()
+        centre = np.broadcast_to(np.array(o), (1, len(p), 3))
+    found = aims(prim, time, toward, angle, control)
+    if found is None:
+        return unmet(centre, every)
+    at, edge = found
+    out = unmet(np.concatenate([centre, at(edge, p)]), every)
+    split = (out > 0) & (out < 1)
+    if split.any():
+        out[split] = unmet(at(GRID, p[split]), split)
+    return out
+
+
+def shadow_casters(prim, faces, control):
+    """Which triangles, by `faces`' prim paths, cast the light's shadows:
+    those of the meshes its shadowLink collection includes, or none when
+    its shadow:enable is off."""
+    if prim.GetAttribute("inputs:shadow:enable").Get() is False and control != "shadow:enable ignored":
+        return np.zeros(len(faces), bool)
+    if control == "shadow links ignored":
+        return np.ones(len(faces), bool)
+    query = UsdLux.LightAPI(prim).GetShadowLinkCollectionAPI().ComputeMembershipQuery()
+    return member(prim, query, faces, control)
+
+
+def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=None):
     """Each light as the direction toward it, one for every hit or one
-    per hit, the illuminance it gives a surface facing it, likewise, and
-    the sine of the angle it subtends, 0 but for a sphere (see the
-    module's doc). `axis` is the direction the host's camera light shines;
-    `p` holds the hits, `n` their normals, turned toward the eye, and
-    `paths` their prims' paths. A light gives the hits it is not linked to
-    nothing, and is refused only over those it is."""
+    per hit, the illuminance it gives a surface facing it unshadowed,
+    likewise, the sine of the angle it subtends, 0 but for a sphere, and
+    each hit's share of it its shadow leaves (see the module's doc). `axis` is the direction the
+    host's camera light shines; `p` holds the hits, `n` their normals,
+    turned toward the eye, and `paths` their prims' paths; `casters` the
+    hits' triangles, the world triangles and their prims' paths. A light
+    gives the hits it is not linked to nothing, and is refused only over
+    those it is."""
+    own, world, faces = casters
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
         if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
@@ -1094,19 +1295,28 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
     if not found and lit:
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
-        return [(light, illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control), 0)]
+        e = illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control)
+        light = np.asarray(light, float)
+        # From the eye, a ray per hit along its own direction.
+        angle = CAMERA_LIGHT_ANGLE if light.ndim == 1 else 0
+        left = share(None, time, light, angle, p, own, world, np.ones(len(world), bool), control)
+        return [(light, e, 0, left)]
     if not found and control == "Pika's old headlight":
-        return [(-axis, (np.pi,) * 3, 0)]
+        return [(-axis, (np.pi,) * 3, 0, np.ones(len(p)))]
     out = []
     for prim in found:
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
         on = links(prim, paths, control)
+        left = np.ones(len(p))
+        local = prim.IsA(UsdLux.SphereLight) or any(prim.IsA(t) for t in AREA)
         if prim.IsA(UsdLux.SphereLight):
             given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
-        elif any(prim.IsA(t) for t in AREA):
+        elif local:
             given = area(prim, time, p[on], n[on], control)
+        if local:
+            left[on] = share(prim, time, None, 0, p[on], own[on], world, shadow_casters(prim, faces, control), control)
         else:
             m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
             z = np.array([m[2][0], m[2][1], m[2][2]])
@@ -1116,9 +1326,12 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, control=None):
                             api.GetColorAttr().Get(time), UsdLux.DistantLight(prim).GetAngleAttr().Get(time),
                             api.GetNormalizeAttr().Get(time), control)
             given = (z / np.linalg.norm(z), e, 0)
+            casts = shadow_casters(prim, faces, control)
+            angle = UsdLux.DistantLight(prim).GetAngleAttr().Get(time)
+            left[on] = share(None, time, given[0], angle, p[on], own[on], world, casts, control)
         d, e, sin = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.zeros(len(p))
         d[on], e[on], sin[on] = given
-        out.append((d, e, sin))
+        out.append((d, e, sin, left))
     return out
 
 
@@ -1136,8 +1349,8 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     f = frustum(stage, time, width, height, focal, policy)
-    held = host.holds_camera_light != (control == "camera light held as the other host holds it")
-    axis = np.array((frustum(stage, FRAMES[0], width, height, focal, policy) if held else f).ComputeViewDirection())
+    fixed = host.holds_camera_light != (control == "camera light held as the other host holds it")
+    axis = np.array((frustum(stage, stage.GetStartTimeCode(), width, height, focal, policy) if fixed else f).ComputeViewDirection())
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
@@ -1161,10 +1374,25 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
         "depth": np.ones((height, width)),
         "normal": np.zeros((height, width, 3)),
         "face": np.full((height, width), -1),
+        "shadow": np.zeros((height, width), int),
+        # Penumbra pixels, and at each, row by row, its colour with its partly shadowed lights
+        # wholly shadowed and wholly lit: kept only there, since the check holds every control's
+        # reference for every frame of every scene at once.
+        "soft": np.zeros((height, width), bool),
+        "bounds": np.zeros((0, 2, 3)),
     }
     if not tris:
         return image
     world = np.array([[list(v) for v in t["points"]] for t in tris])
+    faces = [t["face"][0] for t in tris]
+    casting = world
+    if control == "moved casters' old shadows kept" and time != stage.GetStartTimeCode():
+        # The triangles that moved since frame 1, where they were then.
+        old = triangles(stage, stage.GetStartTimeCode(), host)
+        moved = old if len(old) != len(tris) else [o for o, t in zip(old, tris) if o["points"] != t["points"]]
+        if moved:
+            casting = np.concatenate([world, np.array([[list(v) for v in o["points"]] for o in moved])])
+            faces = faces + [o["face"][0] for o in moved]
     nearest, p, bary = cast(to_clip, width, height, shift, world)
     around = footprint(to_clip, width, height, shift, world, nearest)
     hit = nearest >= 0
@@ -1224,20 +1452,28 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     # before lighting.
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
-    shine = np.zeros((len(p), 3))
+    shine, low, high = np.zeros((3, len(p), 3))
     paths = [tris[k]["face"][0] for k in i]
-    for d, e, sin in lights(stage, time, axis, toward, p, facing, paths, host, lit, control):
+    # Two bits a light: wholly shadowed, partly.
+    shadow = np.zeros(len(p), int)
+    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, casting, faces), control)
+    for bit, (d, e, sin, left) in enumerate(found):
+        partly = (left > 0) & (left < 1)
+        shadow |= ((left == 0) * 2 + partly) << (2 * bit)
         cos = dot(facing, d)
         if (abs(cos) < sin).any():
             raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")
-        shine += np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
+        given = np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
+        shine += given * left[:, None]
+        low += given * np.where(partly, 0, left)[:, None]
+        high += given * np.where(partly, 1, left)[:, None]
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
     albedo = np.array([l.albedo for l in looks])[i]
     emission = np.array([l.emission for l in looks])[i]
-    color = np.c_[albedo * shine + emission, np.ones(len(p))]
-    color[:, :3] += sampled("image")[0]
+    emitted = emission + sampled("image")[0]
+    color = np.c_[albedo * shine + emitted, np.ones(len(p))]
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":
@@ -1248,6 +1484,15 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     image["depth"][hit] = depth
     image["normal"][hit] = n
     image["face"][hit] = face[i]
+    image["shadow"][hit] = shadow
+    bounds = np.zeros((height, width, 2, 3))
+    bounds[hit] = np.stack([albedo * low + emitted, albedo * high + emitted], 1)
+    image["soft"][hit] = (high > low).any(axis=1)
+    image["bounds"] = bounds[image["soft"]]
+    if control == "penumbrae wholly shadowed":
+        # Their bounds meet, which leaves no share to compare: only the bounds can fail.
+        image["color"][image["soft"], :3] = image["bounds"][:, 0]
+        image["bounds"][:, 1] = image["bounds"][:, 0]
     return image
 
 
@@ -1345,13 +1590,13 @@ def read(path):
     return image
 
 
-def edges(face):
-    """Pixels whose 3×3 neighbourhood holds more than one face (or none)."""
-    padded = np.pad(face, 1, mode="edge")
+def edges(face, reach=1):
+    """Pixels whose neighbourhood `reach` pixels each way holds more than one face (or none)."""
+    padded = np.pad(face, reach, mode="edge")
     h, w = face.shape
     out = np.zeros(face.shape, bool)
-    for dy in range(3):
-        for dx in range(3):
+    for dy in range(2 * reach + 1):
+        for dx in range(2 * reach + 1):
             out |= padded[dy:dy + h, dx:dx + w] != face
     return out
 
@@ -1366,16 +1611,51 @@ def compare(image, ref, aovs):
     if stray.any():
         problems.append(f"coverage differs at {stray.sum()} pixels away from edges")
     inner = covered & drawn & ~edge
+    # Each of a still frame's samples rounds to a map texel, so a penumbra's ends stray a pixel
+    # further than one ray's.
+    shadow = edges(ref["shadow"]) | (edges(ref["shadow"], 2) & edges(ref["soft"], 2))
+    lit = inner & ~shadow & ~ref["soft"]
     for aov in aovs:
         error = np.abs(image[aov][..., :4] - ref[aov][..., :4] if aov == "color" else image[aov] - ref[aov])
         allowed = TOLERANCE[aov]
         if aov == "color":
             allowed = allowed + np.abs(ref[aov][..., :4]) / 256
         over = error > allowed
-        over = over.reshape(over.shape[:2] + (-1,)).any(-1) & inner
+        over = over.reshape(over.shape[:2] + (-1,)).any(-1) & (lit if aov == "color" else inner)
         if over.any():
             slack = " plus 1/256 of the value" if aov == "color" else ""
             problems.append(f"{aov} differs by up to {error[over].max():.3g} (tolerance {TOLERANCE[aov]:g}{slack})")
+    return problems + penumbrae(image, ref, inner & ref["soft"])
+
+
+def penumbrae(image, ref, at):
+    """Why the penumbra pixels `at` of `image` do not match `ref` (see the
+    module's doc), or an empty list."""
+    problems = []
+    bounds = np.zeros(at.shape + (2, 3))
+    bounds[ref["soft"]] = ref["bounds"]
+    low, high = bounds[at][:, 0], bounds[at][:, 1]
+    color = image["color"][at][:, :3]
+    allowed = TOLERANCE["color"] + np.abs(high) / 256
+    out = ((color < low - allowed) | (color > high + allowed)).any(axis=1)
+    if out.any():
+        problems.append(f"{out.sum()} penumbra pixels lie outside their lights wholly shadowed and wholly lit")
+    span = (high - low).sum(axis=1)
+    # Too little of the light to read its share from.
+    seen = span > 30 * TOLERANCE["color"]
+    shown = (color - low).sum(axis=1)[seen] / span[seen]
+    share = (ref["color"][at][:, :3] - low).sum(axis=1)[seen] / span[seen]
+    compared = 0
+    for a, b in BANDS:
+        band = (share >= a) & (share < b)
+        if band.sum() < BAND_PIXELS:
+            continue
+        compared += 1
+        if abs(shown[band].mean() - share[band].mean()) > PENUMBRA:
+            problems.append(f"penumbra pixels of share {a}-{b} show {shown[band].mean():.2f} of their light, "
+                            f"not {share[band].mean():.2f}")
+    if seen.any() and not compared:
+        problems.append(f"no band holds {BAND_PIXELS} of the {seen.sum()} penumbra pixels")
     return problems
 
 
@@ -1387,7 +1667,12 @@ def budget(name):
     return env
 
 
-def husk(scene, out):
+def times(stage):
+    """The times of the stage's time range."""
+    return tuple(range(int(stage.GetStartTimeCode()), int(stage.GetEndTimeCode()) + 1))
+
+
+def husk(scene, out, times):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.husk.log")
     env = budget(name)
@@ -1395,21 +1680,23 @@ def husk(scene, out):
     headlight = [] if name in CAMERA_LIT else ["--headlight", "none"]
     with open(log, "w") as f:
         subprocess.run(["husk", "-V", "1", "-R", "Pika", "-s", SETTINGS, "--disable-motionblur", *headlight,
-                        "-f", str(FRAMES[0]), "-n", str(len(FRAMES)),
+                        "-f", str(times[0]), "-n", str(len(times)),
                         "-o", os.path.join(out, f"{name}.husk.$F4.exr"), scene],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=env)
-    return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in FRAMES}, log
+    return {t: read(os.path.join(out, f"{name}.husk.{t:04d}.exr")) for t in times}, log
 
 
-def blurred(stats, name):
-    """Failures unless the `stats` husk wrote report BLURRED's textures
-    drawn coarser than needed on the first frame and the last."""
-    counts = []
-    with open(stats) as f:
-        for line in f:
-            words = line.split()
-            if words and words[0] == "frame":
-                counts.append(int(dict(zip(words[2::2], words[3::2]))["blurred_textures"]))
+def stats(path):
+    """Each frame line of the PIKA_STATS file at `path`, its values by name."""
+    with open(path) as f:
+        lines = [line.split() for line in f]
+    return [dict(zip(w[2::2], w[3::2])) for w in lines if w and w[0] == "frame"]
+
+
+def blurred(frames, name):
+    """Failures unless husk's `frames` stats report BLURRED's textures drawn coarser than
+    needed on the first frame and the last."""
+    counts = [int(f["blurred_textures"]) for f in frames]
     expected = BLURRED.get(name, (0, 0))
     if not counts or (counts[0], counts[-1]) != expected:
         found = (counts[0], counts[-1]) if counts else "no frames"
@@ -1417,17 +1704,37 @@ def blurred(stats, name):
     return []
 
 
-def usdrecord(scene, out, width):
+def cached(frames, name):
+    """Failures unless husk's `frames` stats show each time past the first keeping some of
+    its shadow pages, drawing others anew and giving some a live copy, as a CACHED scene
+    whose casters move must, and not, as one whose casters stay must. Husk accumulates each
+    time's samples before moving on, so the time moved where a frame starts the samples
+    again after one that had begun them."""
+    if name not in CACHED:
+        return []
+    seen = []
+    sample = 0
+    for f in frames:
+        if sample > 0 and int(f["sample"]) == 0:
+            seen.append(tuple(int(f[k]) for k in ("shadow_pages_drawn", "shadow_pages_live", "shadow_pages")))
+        sample = int(f["sample"])
+    caches = all(0 < drawn < held and live > 0 for drawn, live, held in seen)
+    if not seen or caches != CACHED[name]:
+        return [f"{name}: shadow pages drawn, live and held at the times past the first {seen}"]
+    return []
+
+
+def usdrecord(scene, out, width, times):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
     off = [] if name in CAMERA_LIT else ["--disableCameraLight"]
     with open(log, "w") as f:
         subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off,
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
-                        "--frames", f"{FRAMES[0]}:{FRAMES[-1]}",
+                        "--frames", f"{times[0]}:{times[-1]}",
                         scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
-    return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in FRAMES}, log
+    return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in times}, log
 
 
 def references(scene, width, height, host):
@@ -1437,7 +1744,7 @@ def references(scene, width, height, host):
     name = os.path.splitext(os.path.basename(scene))[0]
     lowered, lit = name in BUDGET, name in CAMERA_LIT
     controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in FRAMES}
+    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in times(stage)}
 
 
 def differs(stage, host):
@@ -1458,17 +1765,19 @@ def budget_warnings(name):
     return int(name in BUDGET) + int(any(BLURRED.get(name, (0, 0))))
 
 
-def warned(log, name, capped, lowered):
+def warned(log, name, capped, lowered, pooled):
     """Failures unless `log` holds `capped` warnings of textures the cap
-    shrinks and `lowered` of textures lowered to fit."""
+    shrinks, `lowered` of textures lowered to fit and `pooled` of a shadow
+    pool too small."""
     with open(log) as f:
         lines = [line for line in f if line.startswith("pika: warning: ")]
     failures = []
-    for kind, mark, expected in (("cap", "by pika:textureCap", capped),
-                                 ("budget", "to fit the device's memory budget", lowered)):
+    for kind, mark, expected in (("textures shrunk by the cap", "by pika:textureCap", capped),
+                                 ("textures shrunk by the budget", "to fit the device's memory budget", lowered),
+                                 ("a shadow pool too small", "and pika:shadowPool holds", pooled)):
         count = sum(mark in line for line in lines)
         if count != expected:
-            failures.append(f"{name}: {count} warnings of textures shrunk by the {kind}, not {expected}")
+            failures.append(f"{name}: {count} warnings of {kind}, not {expected}")
     return failures
 
 
@@ -1477,13 +1786,14 @@ def check(name, renders, references, aovs):
     Returns (failures, the controls that changed a reference)."""
     failures = []
     changed = set()
-    for t in FRAMES:
+    times = sorted(renders)
+    for t in times:
         problems = compare(renders[t], references[t][None], aovs)
         print(f"  frame {t}: {'; '.join(problems) or 'matches'}")
         failures += [f"{name} frame {t}: {p}" for p in problems]
-    t = FRAMES[-1]
+    t = times[-1]
     for control in CONTROLS:
-        frame = FRAMES[0] if control == "frame 1's reference" else t
+        frame = times[0] if control == "frame 1's reference" else t
         perturbed = references[frame][None if frame != t else control]
         if not compare(perturbed, references[t][None], aovs):
             continue
@@ -1503,16 +1813,16 @@ def main():
     stages = {s: Usd.Stage.Open(s) for s in scenes}
     sizes = {s: tuple(UsdRender.Settings(stages[s].GetPrimAtPath(SETTINGS)).GetResolutionAttr().Get())
              for s in scenes}
-    with (concurrent.futures.ProcessPoolExecutor() as compute,
+    with (concurrent.futures.ProcessPoolExecutor(REFERENCES) as compute,
           concurrent.futures.ThreadPoolExecutor(RENDERS) as render):
         # The pool forks before the render threads start.
         refs = {s: compute.submit(references, s, *sizes[s], HUSK) for s in scenes}
-        husks = {s: render.submit(husk, s, out) for s in scenes}
-        records = {s: render.submit(usdrecord, s, out, sizes[s][0]) for s in scenes} if record else {}
+        husks = {s: render.submit(husk, s, out, times(stages[s])) for s in scenes}
+        records = {s: render.submit(usdrecord, s, out, sizes[s][0], times(stages[s])) for s in scenes} if record else {}
         recorded = {}
         for s, job in records.items():
             # usdrecord takes the image's height from the camera's aspect.
-            shape = job.result()[0][FRAMES[0]]["color"].shape
+            shape = next(iter(job.result()[0].values()))["color"].shape
             host = usdrecord_host()
             if shape[:2] != sizes[s][::-1] or differs(stages[s], host) or os.path.basename(s)[:-5] in CAMERA_LIT:
                 recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
@@ -1523,15 +1833,16 @@ def main():
             renders, log = husks[s].result()
             print(f"{name} in husk ({log}):")
             f, c = check(name, renders, refs[s].result(), ["color", "depth", "normal"])
-            failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name))
-            failures += blurred(log.replace(".husk.log", ".husk.stats"), name)
+            failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name), POOLED.get(name, 0))
+            frames = stats(log.replace(".husk.log", ".husk.stats"))
+            failures += blurred(frames, name) + cached(frames, name)
             changed |= c
             if s not in records:
                 continue
             renders, log = records[s].result()
             print(f"{name} in usdrecord ({log}):")
             failures += check(f"{name} (usdrecord)", renders, recorded.get(s, refs[s]).result(), ["color"])[0]
-            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name))
+            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name), 0)
     for control in CONTROLS:
         if control not in changed:
             failures.append(f"the control '{control}' changes no scene's reference")

@@ -7,7 +7,7 @@ use ash::vk;
 
 use crate::commands::Commands;
 use crate::gpu::{self, Buffer};
-use crate::link::Links;
+use crate::link::{Links, Mask};
 use crate::need::{self, Footprint};
 use crate::smooth::{self, Smooth};
 use crate::store::{
@@ -16,7 +16,7 @@ use crate::store::{
 };
 use crate::subdiv::{self, Subdiv};
 use crate::tangent::{self, Tangent};
-use crate::transform::{Instance, instance_transforms, multiply};
+use crate::transform::{Instance, instances, multiply};
 
 /// A vertex's normal index when its normal is its point's smooth normal.
 const SMOOTH: u32 = u32::MAX;
@@ -183,8 +183,9 @@ pub struct Bound {
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
-    /// Without instances; each view copies them.
+    /// Without instances; each view copies them, and shadows read them at `record_words`.
     pub records: vk::Buffer,
+    pub record_words: vk::DeviceAddress,
     pub count: u32,
     pub instance_count: u32,
 }
@@ -379,6 +380,7 @@ impl Geometry {
             boxes: draws.boxes.address,
             indices: layout.indices.raw,
             records: draws.records.raw,
+            record_words: draws.records.address,
             count: draws.tables.records.len() as u32,
             instance_count: draws.tables.instances.len() as u32,
         })
@@ -431,6 +433,34 @@ impl Geometry {
             }
         }
         footprints
+    }
+
+    /// The drawn instances whose transform or points moved, by their index, ascending; `None`
+    /// when `update` rewrote the draws, which renumbers them.
+    pub fn moved_instances(&self, moved: &Moved, update: &Update) -> Option<Vec<u32>> {
+        if update.draws {
+            return None;
+        }
+        let Some(d) = &self.draws else {
+            return Some(Vec::new());
+        };
+        let ids = moved.transforms.iter().chain(&moved.points);
+        let rows = ids.filter_map(|id| d.tables.rows.get(id)).flatten();
+        let mut instances: Vec<u32> = rows
+            .flat_map(|r| r.instances.clone())
+            .map(|i| i as u32)
+            .collect();
+        instances.sort_unstable();
+        instances.dedup();
+        Some(instances)
+    }
+
+    /// Each drawn instance with its mesh's box, in the mesh's own space.
+    pub fn instances(&self) -> impl Iterator<Item = (&Instance, &[f32; 6])> {
+        self.draws.iter().flat_map(|d| {
+            let t = &d.tables;
+            (t.instances.iter().zip(&t.owners)).map(|(i, &r)| (i, &t.boxes[r as usize]))
+        })
     }
 
     pub fn memory(&self) -> gpu::Memory {
@@ -1381,7 +1411,7 @@ fn rewrite(
                 instances: Buffer::device_local(device, size(&t.instances), storage)?,
                 owners: Buffer::device_local(device, size(&t.owners), storage)?,
                 boxes: Buffer::device_local(device, size(&t.boxes), storage)?,
-                records: Buffer::device_local(device, size(&t.records), copied)?,
+                records: Buffer::device_local(device, size(&t.records), storage | copied)?,
                 tables: DrawTables::default(),
                 tags: Vec::new(),
             }
@@ -1489,10 +1519,12 @@ fn mesh_instances(
     if range.index_count == 0 || !(tagged || tags.is_empty()) {
         return Vec::new();
     }
-    let matrices = match instancing {
-        None => vec![*transform],
-        Some(i) => match instance_transforms(instancers, i) {
-            Ok(m) => m.iter().map(|m| multiply(transform, m)).collect(),
+    let placed = match instancing {
+        None => vec![(*transform, Mask::default())],
+        Some(i) => match instances(instancers, links, i) {
+            Ok(p) => (p.iter())
+                .map(|(m, l)| (multiply(transform, m), *l))
+                .collect(),
             Err(e) => {
                 eprintln!("pika: warning: {}: {e}; not drawn", mesh.path);
                 return Vec::new();
@@ -1500,8 +1532,8 @@ fn mesh_instances(
         },
     };
     let link = links.mesh(mesh);
-    (matrices.iter())
-        .filter_map(|m| Instance::new(m, topology.left_handed, link))
+    (placed.iter())
+        .filter_map(|(m, l)| Instance::new(m, topology.left_handed, link | *l))
         .collect()
 }
 

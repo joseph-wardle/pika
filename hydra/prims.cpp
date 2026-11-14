@@ -17,7 +17,6 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cstring>
 #include <memory>
 #include <unordered_map>
@@ -476,14 +475,17 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
     }
     if (bits & HdChangeTracker::DirtyPrimvar)
         _SyncPrimvars(delegate, renderer);
-    // Pika links lights per mesh, so it ignores categories that differ between instances.
-    static std::atomic<bool> warned{false};
     if (bits & HdChangeTracker::DirtyCategories) {
+        std::vector<size_t> counts;
+        std::vector<const char *> tokens;
         for (VtArray<TfToken> const &c : delegate->GetInstanceCategories(GetId())) {
-            if (!c.empty() && !warned.exchange(true))
-                warn(path + ": its instances have light links of their own, which Pika ignores; "
-                            "each instance is lit as its prototype is (warned once)");
+            counts.push_back(c.size());
+            for (TfToken const &t : c)
+                tokens.push_back(t.GetText());
         }
+        _pika.report(pika_instancer_categories(renderer, _id, counts.data(), counts.size(),
+                                               tokens.data()),
+                     path + " categories");
     }
 }
 
@@ -692,8 +694,10 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     // A changed link is a collection change, which hosts may send as a
     // params change too.
     if (bits & (DirtyParams | DirtyCollection)) {
-        TfToken link = light_param(delegate, id, HdTokens->lightLink, TfToken());
-        _pika.report(pika_light_link(renderer, _id, link.GetText()), id.GetString() + " link");
+        TfToken light = light_param(delegate, id, HdTokens->lightLink, TfToken());
+        TfToken shadow = light_param(delegate, id, HdTokens->shadowLink, TfToken());
+        _pika.report(pika_light_link(renderer, _id, light.GetText(), shadow.GetText()),
+                     id.GetString() + " link");
     }
     if (!(bits & DirtyParams))
         return;
@@ -715,6 +719,7 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);
     params.length = light_param(delegate, id, HdLightTokens->length, 1.0f);
     params.visible = delegate->GetVisible(id);
+    params.shadow = light_param(delegate, id, HdLightTokens->shadowEnable, true);
     _pika.report(pika_light_params(renderer, _id, &params), id.GetString() + " params");
 }
 

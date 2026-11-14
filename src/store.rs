@@ -43,7 +43,8 @@ pub struct Mesh {
     /// Hydra syncs only prims of the tags a pass draws, leaving the rest stale (a proxy
     /// is inserted but never synced), so drawing must filter by tag.
     pub render_tag: Option<String>,
-    /// Light-link collection tokens; lights linked to one of them, or to all, light it.
+    /// Light- and shadow-link collection tokens; lights linked to one of them, or to
+    /// all, light it or take its shadow.
     pub categories: Option<Vec<String>>,
 }
 
@@ -63,6 +64,35 @@ pub struct Instancer {
     pub parent: Option<Option<Instancing>>,
     pub transform: Option<[f64; 16]>,
     pub primvars: Option<InstancePrimvars>,
+    pub categories: Option<InstanceCategories>,
+}
+
+/// Hydra's light-link categories per instance, indexed as the primvars are. Instances mostly
+/// share theirs, so each distinct set is held once. Empty when no instance has any.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct InstanceCategories {
+    pub sets: Vec<Vec<String>>,
+    /// Each instance's index into `sets`.
+    pub set: Vec<u32>,
+}
+
+impl InstanceCategories {
+    pub fn new(instances: Vec<Vec<String>>) -> Self {
+        if instances.iter().all(Vec::is_empty) {
+            return Self::default();
+        }
+        let mut categories = Self::default();
+        let mut seen: HashMap<Vec<String>, u32> = HashMap::new();
+        for c in instances {
+            let next = seen.len() as u32;
+            let set = *seen.entry(c).or_insert_with_key(|c| {
+                categories.sets.push(c.clone());
+                next
+            });
+            categories.set.push(set);
+        }
+        categories
+    }
 }
 
 /// Each `None` when absent: native instances arrive as matrices, point instancers as parts.
@@ -104,8 +134,16 @@ pub struct Light {
     pub path: String,
     pub params: Option<LightParams>,
     pub transform: Option<[f64; 16]>,
-    /// Its lightLink collection token; empty when it lights every mesh.
-    pub link: Option<String>,
+    pub link: Option<Link>,
+}
+
+/// Collection tokens, each empty when the light reaches every mesh.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Link {
+    /// The lightLink collection's: the meshes it lights.
+    pub light: String,
+    /// The shadowLink collection's: the meshes that cast its shadows.
+    pub shadow: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -117,6 +155,8 @@ pub struct LightParams {
     pub shape: Shape,
     /// Hydra's visibility, which the params dirty bit covers too.
     pub visible: bool,
+    /// UsdLux's shadow:enable.
+    pub shadow: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -604,6 +644,7 @@ impl Store {
             parent: None,
             transform: None,
             primvars: None,
+            categories: None,
         };
         self.instancers.insert(id, instancer);
         self.moved.draws = true;
@@ -674,6 +715,28 @@ impl Store {
             &mut self.stats.instancer,
             &mut instancer.primvars,
             primvars,
+            bytes,
+        );
+        Ok(())
+    }
+
+    pub fn set_instance_categories(
+        &mut self,
+        id: u64,
+        categories: InstanceCategories,
+    ) -> Result<(), String> {
+        let bytes = 4 * categories.set.len()
+            + (categories.sets.iter().flatten())
+                .map(String::len)
+                .sum::<usize>();
+        let instancer = self
+            .instancers
+            .get_mut(&id)
+            .ok_or_else(|| stale("instancer", id))?;
+        self.moved.draws |= write(
+            &mut self.stats.instancer,
+            &mut instancer.categories,
+            categories,
             bytes,
         );
         Ok(())
@@ -775,7 +838,7 @@ impl Store {
         let light = self.lights.remove(&id).ok_or_else(|| stale("light", id))?;
         self.stats.removed += 1;
         self.moved.lights = true;
-        self.moved.draws |= light.link.is_some_and(|l| !l.is_empty());
+        self.moved.draws |= light.link.is_some_and(|l| l != Link::default());
         Ok(())
     }
 
@@ -793,8 +856,8 @@ impl Store {
     }
 
     /// A link moves the meshes too: collection bits are assigned over every light's link.
-    pub fn set_light_link(&mut self, id: u64, link: String) -> Result<(), String> {
-        let bytes = link.len();
+    pub fn set_light_link(&mut self, id: u64, link: Link) -> Result<(), String> {
+        let bytes = link.light.len() + link.shadow.len();
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
         let moved = write(&mut self.stats.light, &mut light.link, link, bytes);
         self.moved.lights |= moved;
@@ -1025,6 +1088,16 @@ impl fmt::Display for Instancer {
             None => writeln!(f, "  parent {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())?;
+        match &self.categories {
+            Some(c) if c.sets.is_empty() => writeln!(f, "  categories none")?,
+            Some(c) => {
+                for set in &c.sets {
+                    writeln!(f, "  category_set {set:?}")?;
+                }
+                writeln!(f, "  instance_category_sets{}", List(&c.set))?;
+            }
+            None => writeln!(f, "  categories {UNSYNCED}")?,
+        }
         let Some(p) = &self.primvars else {
             return writeln!(f, "  primvars {UNSYNCED}");
         };
@@ -1076,7 +1149,7 @@ impl fmt::Display for Light {
         writeln!(f, "light {}", self.path)?;
         match &self.params {
             Some(p) => {
-                writeln!(f, "  visible {}", p.visible)?;
+                writeln!(f, "  visible {} shadow {}", p.visible, p.shadow)?;
                 writeln!(
                     f,
                     "  intensity {} exposure {} color{} normalize {}",
@@ -1100,7 +1173,7 @@ impl fmt::Display for Light {
             None => writeln!(f, "  params {UNSYNCED}")?,
         }
         match &self.link {
-            Some(link) => writeln!(f, "  link {link:?}")?,
+            Some(link) => writeln!(f, "  link {:?} shadow {:?}", link.light, link.shadow)?,
             None => writeln!(f, "  link {UNSYNCED}")?,
         }
         transform(f, self.transform.as_ref())
@@ -1190,6 +1263,7 @@ mod tests {
     fn lights_move_only_when_they_change() {
         let mut store = Store::new();
         let id = store.insert_light("/sun".into());
+        let other = store.insert_light("/fill".into());
         assert!(store.take_moved().lights);
         let params = LightParams {
             intensity: 1.0,
@@ -1198,16 +1272,20 @@ mod tests {
             normalize: false,
             shape: Shape::Distant { angle: 0.53 },
             visible: true,
+            shadow: true,
         };
         let mut transform = [0.0; 16];
         transform[0] = 1.0;
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
+        store.set_light_params(other, params).unwrap();
+        store.set_light_link(other, Link::default()).unwrap();
         assert!(store.take_moved().lights);
         // Hydra resends a light's fields unchanged, as usdview does its camera light: no move.
         store.end_sync();
         store.set_light_params(id, params).unwrap();
         store.set_light_transform(id, transform).unwrap();
+        store.set_light_link(other, Link::default()).unwrap();
         assert_eq!(store.take_moved(), Moved::default());
         let stats = store.end_sync();
         assert!(stats.light.pulled > 0 && stats.light.redundant == stats.light.pulled);
@@ -1217,10 +1295,17 @@ mod tests {
         };
         store.set_light_params(id, brighter).unwrap();
         assert!(store.take_moved().lights);
+        let unlinked = Link {
+            shadow: "group_0".into(),
+            ..Link::default()
+        };
+        store.set_light_link(other, unlinked).unwrap();
+        let moved = store.take_moved();
+        assert!(moved.lights && moved.draws);
         store.remove_light(id).unwrap();
         assert!(store.take_moved().lights);
         assert!(store.set_light_params(id, params).is_err());
-        assert_eq!(store.census().unwrap().lights, 0);
+        assert_eq!(store.census().unwrap().lights, 1);
     }
 
     #[test]
@@ -1630,6 +1715,45 @@ mod tests {
     }
 
     #[test]
+    fn instances_share_their_category_sets() {
+        let tokens = |t: &[&str]| t.iter().map(|&t| t.to_owned()).collect::<Vec<_>>();
+        let c = InstanceCategories::new(vec![
+            tokens(&["a", "b"]),
+            tokens(&[]),
+            tokens(&["a", "b"]),
+            tokens(&["a"]),
+        ]);
+        assert_eq!(c.sets, [tokens(&["a", "b"]), tokens(&[]), tokens(&["a"])]);
+        assert_eq!(c.set, [0, 1, 0, 2]);
+        // Instances with none hold nothing, as an instancer Hydra gives no categories does.
+        let none = InstanceCategories::new(vec![tokens(&[]); 3]);
+        assert_eq!(none, InstanceCategories::default());
+        assert_eq!(InstanceCategories::new(Vec::new()), none);
+        // Negative control: a changed set is told apart.
+        let changed = InstanceCategories::new(vec![tokens(&["a", "b"]), tokens(&["b"])]);
+        assert_ne!(changed.sets[1], c.sets[1]);
+    }
+
+    #[test]
+    fn instance_categories_move_the_draws() {
+        let mut store = Store::new();
+        let i = store.insert_instancer("/i".into());
+        store.take_moved();
+        let one = || InstanceCategories::new(vec![vec!["group_0".into()]]);
+        store.set_instance_categories(i, one()).unwrap();
+        assert!(store.take_moved().draws);
+        store.set_instance_categories(i, one()).unwrap();
+        assert!(
+            !store.take_moved().draws,
+            "unchanged categories move nothing"
+        );
+        store
+            .set_instance_categories(i, InstanceCategories::default())
+            .unwrap();
+        assert!(store.take_moved().draws);
+    }
+
+    #[test]
     fn dump_is_sorted_by_path_and_exact() {
         let mut store = Store::new();
         let b = store.insert_mesh("/world/b".into());
@@ -1719,6 +1843,8 @@ mod tests {
             ..Default::default()
         };
         store.set_instance_primvars(i, primvars).unwrap();
+        let categories = InstanceCategories::new(vec![vec!["group_1".into()]]);
+        store.set_instance_categories(i, categories).unwrap();
         let c = store.insert_curves("/world/c".into());
         store.pulled_curves(c, 68).unwrap();
         store.insert_counted("sphereLight".into(), "/world/aa".into());
@@ -1768,6 +1894,8 @@ curves /world/c
 instancer /world/i
   parent /world/j indices 2
   transform not synced
+  category_set [\"group_1\"]
+  instance_category_sets 0
   instance_translations 1
     1 0 0
   instance_rotations 1

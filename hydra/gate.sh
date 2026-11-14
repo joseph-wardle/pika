@@ -26,6 +26,9 @@ nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,pstate,utilization.gpu,pow
     --format=csv,noheader -lms 200 >"$OUT/clocks.csv" &
 smi=$!
 trap 'kill $smi' EXIT
+# Hosts start with the usual soft limit of 1024 open files; a shell raised past it
+# would hide a leak.
+ulimit -Sn 1024
 PIKA_STATS=$OUT/gate.stats testusdview --renderer Pika --camera "$CAMERA" \
     --sessionLayer "$ROOT/hydra/scenes/alab_nofur.usda" --testScript "$ROOT/hydra/gate.py" \
     "$STAGE" >"$OUT/gate.log" 2>&1 || { echo "usdview exited $? (see $OUT/gate.log)"; exit 1; }

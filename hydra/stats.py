@@ -21,7 +21,10 @@ BUDGET_MS = 41.67
 # ALab in usdview at 1080p, not limits.
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
-    ("shade", ("gpu_shade_ms",), 8.0),
+    ("shade", ("gpu_shade_ms",), 12.0),
+    # Listing, drawing and copying shadow pages; their lookups are in shade.
+    ("shadow", ("gpu_shadow_list_ms", "gpu_shadow_pages_ms", "gpu_shadow_copy_ms",
+                "gpu_shadow_live_ms"), 3.0),
     ("update", ("gpu_upload_ms", "gpu_subdiv_ms", "gpu_smooth_ms", "gpu_tangent_ms",
                 "gpu_texture_ms"), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),
@@ -124,6 +127,8 @@ def main(path, warm=None):
           f"targets {size(last['target_bytes'])}, host {size(last['host_bytes'])}; "
           f"vram {size(last['vram_used_bytes'])} used of {size(last['vram_budget_bytes'])}")
     print(f"  materials: {size(last['material_bytes'])}, {last['lowered_textures']:.0f} textures lowered to fit")
+    print(f"  shadows: {size(last.get('shadow_bytes', 0))}, {last.get('shadow_pages', 0):.0f} pages held of "
+          f"{last.get('shadow_pages_wanted', 0):.0f} wanted, {last.get('shadow_draws', 0):.0f} page draws")
     print(f"  textures: {last['blurred_textures']:.0f} drawn coarser than the view needs, "
           f"{last['unseen_textures']:.0f} unseen, {last['unestimated_textures']:.0f} not estimated")
 

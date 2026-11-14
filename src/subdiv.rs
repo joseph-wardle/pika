@@ -33,7 +33,7 @@ struct Push {
 
 impl Subdiv {
     pub fn new(device: &gpu::Device, spirv: &[u32]) -> Result<Self, String> {
-        let compute = gpu::Compute::new(device, spirv, size_of::<Push>())?;
+        let compute = gpu::Compute::new(device, spirv, c"cs", size_of::<Push>())?;
         Ok(Self { compute })
     }
 

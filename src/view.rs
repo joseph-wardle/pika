@@ -13,9 +13,11 @@ use crate::transform::Camera;
 struct Constants {
     camera: Camera,
     lights: vk::DeviceAddress,
-    tiles: vk::DeviceAddress,
+    light_tiles: vk::DeviceAddress,
     tile_lights: vk::DeviceAddress,
     extent: [u32; 2],
+    sample: u32,
+    unused: u32,
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
     smooth: vk::DeviceAddress,
@@ -29,6 +31,7 @@ struct Constants {
     records: vk::DeviceAddress,
     visible: vk::DeviceAddress,
     drawn: vk::DeviceAddress,
+    shadows: vk::DeviceAddress,
 }
 
 pub struct View {
@@ -89,6 +92,9 @@ impl View {
     }
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
+    /// `sample` is the frame's index among those drawn while nothing changes, 0 while anything does.
+    /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
         cb: vk::CommandBuffer,
@@ -97,6 +103,8 @@ impl View {
         lights: &[Light],
         tiles: &Tiles,
         extent: [u32; 2],
+        sample: u32,
+        shadows: vk::DeviceAddress,
     ) {
         self.drawn.bytes().fill(0);
         // SAFETY: `Light` and the tiles' integers are plain `repr(C)` data without padding.
@@ -123,9 +131,11 @@ impl View {
         let constants = Constants {
             camera: *camera,
             lights: address(0),
-            tiles: address(1),
+            light_tiles: address(1),
             tile_lights: address(2),
             extent,
+            sample,
+            unused: 0,
             points: geometry.points,
             normals: geometry.normals,
             smooth: geometry.smooth,
@@ -139,6 +149,7 @@ impl View {
             records: self.records.address,
             visible: self.visible.address,
             drawn: self.drawn.address,
+            shadows,
         };
         // SAFETY: `Constants` is plain `repr(C)` data without padding.
         let bytes = unsafe {

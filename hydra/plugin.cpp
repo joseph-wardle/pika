@@ -31,7 +31,8 @@ PXR_NAMESPACE_OPEN_SCOPE
 namespace {
 
 // husk reads these off the render settings prim; usdview offers them in Renderer Settings.
-TF_DEFINE_PRIVATE_TOKENS(_tokens, ((textureCap, "pika:textureCap")));
+TF_DEFINE_PRIVATE_TOKENS(_tokens,
+                         ((textureCap, "pika:textureCap"))((shadowPool, "pika:shadowPool")));
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -58,6 +59,8 @@ protected:
         HdRenderDelegate const *delegate = GetRenderIndex()->GetRenderDelegate();
         int cap = delegate->GetRenderSetting<int>(_tokens->textureCap, 0);
         frame.texture_cap = uint32_t(std::max(cap, 0));
+        int pool = delegate->GetRenderSetting<int>(_tokens->shadowPool, 256);
+        frame.shadow_pool = uint32_t(std::max(pool, 0));
         std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
         GfVec4f clear(0.0f);
         PikaRenderBuffer *first = nullptr;
@@ -274,7 +277,8 @@ private:
         std::make_shared<HdResourceRegistry>();
     // None by default: textures are expected at their own size.
     HdRenderSettingDescriptorList _settings = {
-        {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)}};
+        {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)},
+        {"Shadow pool (MB)", _tokens->shadowPool, VtValue(256)}};
 };
 
 } // namespace

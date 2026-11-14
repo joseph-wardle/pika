@@ -131,6 +131,8 @@ typedef struct pika_light {
     float height;
     float length;
     bool visible;
+    // UsdLux's shadow:enable.
+    bool shadow;
 } pika_light;
 
 // Bottom row first; `pixels` is null when the AOV is not bound.
@@ -156,6 +158,9 @@ typedef struct pika_frame {
     size_t render_tag_count;
     // Texels a texture's longest side is capped at (pika:textureCap); 0 is none.
     uint32_t texture_cap;
+    // The shadow page pool's megabytes (pika:shadowPool), in quarter-megabyte pages; 0 is an
+    // error.
+    uint32_t shadow_pool;
 } pika_frame;
 
 // A key ending in _ms is milliseconds; any other value is a count.
@@ -219,6 +224,10 @@ int pika_instancer_free(const pika_renderer *renderer, uint64_t id);
 // The parent's instance indices this instancer repeats at.
 int pika_instancer_parent(const pika_renderer *renderer, uint64_t id, const char *parent,
                           const int32_t *indices, size_t count);
+// Each instance's categories, as pika_mesh_categories takes a mesh's: `counts[i]` tokens per
+// instance, in instance order, all in `categories`.
+int pika_instancer_categories(const pika_renderer *renderer, uint64_t id, const size_t *counts,
+                              size_t count, const char *const *categories);
 int pika_instancer_transform(const pika_renderer *renderer, uint64_t id,
                              const double matrix[16]);
 int pika_instancer_primvars(const pika_renderer *renderer, uint64_t id,
@@ -239,9 +248,10 @@ int pika_light_new(const pika_renderer *renderer, const char *path, uint64_t *ou
 int pika_light_free(const pika_renderer *renderer, uint64_t id);
 int pika_light_params(const pika_renderer *renderer, uint64_t id,
                       const pika_light *params);
-// The lightLink collection's token, the category of the meshes it lights; ""
-// lights every mesh.
-int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *link);
+// The lightLink collection's token, the category of the meshes it lights, and the
+// shadowLink collection's, of the meshes that cast its shadows; "" reaches every mesh.
+int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *light,
+                    const char *shadow);
 // A distant light shines down its -z axis.
 int pika_light_transform(const pika_renderer *renderer, uint64_t id,
                          const double matrix[16]);

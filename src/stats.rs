@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use crate::commands::Times;
 use crate::geometry::Update;
 use crate::gpu;
+use crate::shadow;
 use crate::store::{Census, Stats as Pulled};
 use crate::texture::Needs;
 
@@ -42,7 +43,10 @@ pub struct Frame {
     pub read_bytes: u64,
     /// Instances, then triangles.
     pub drawn: [u32; 2],
+    /// Its index among the frames drawn while nothing changed, 0 while anything did.
+    pub sample: u32,
     pub lights: usize,
+    pub shadow: shadow::Counts,
     pub memory: Memory,
     /// Meshes whose points moved.
     pub moved: usize,
@@ -70,6 +74,7 @@ pub struct Memory {
     pub views: gpu::Memory,
     pub targets: gpu::Memory,
     pub materials: gpu::Memory,
+    pub shadows: gpu::Memory,
     pub vram_used: u64,
     pub vram_budget: u64,
 }
@@ -272,13 +277,21 @@ impl Frame {
             ("drawn_instances", u64::from(self.drawn[0])),
             ("drawn_triangles", u64::from(self.drawn[1])),
             ("drawn_lights", self.lights as u64),
+            ("sample", u64::from(self.sample)),
+            ("shadow_pages", u64::from(self.shadow.held)),
+            ("shadow_pages_wanted", u64::from(self.shadow.wanted)),
+            ("shadow_pages_drawn", u64::from(self.shadow.drawn)),
+            ("shadow_pages_live", u64::from(self.shadow.live)),
+            ("shadow_draws", u64::from(self.shadow.draws)),
+            ("shadow_triangles", u64::from(self.shadow.triangles)),
             ("geometry_bytes", m.geometry.device),
             ("view_bytes", m.views.device),
             ("target_bytes", m.targets.device),
             ("material_bytes", m.materials.device),
+            ("shadow_bytes", m.shadows.device),
             (
                 "host_bytes",
-                m.geometry.host + m.views.host + m.targets.host + m.materials.host,
+                m.geometry.host + m.views.host + m.targets.host + m.materials.host + m.shadows.host,
             ),
             ("vram_used_bytes", m.vram_used),
             ("vram_budget_bytes", m.vram_budget),
@@ -369,7 +382,16 @@ mod tests {
             },
             read_bytes: 20_995_200,
             drawn: [1274, 11_550_000],
+            sample: 3,
             lights: 47,
+            shadow: shadow::Counts {
+                wanted: 300,
+                held: 256,
+                drawn: 12,
+                live: 5,
+                draws: 9000,
+                triangles: 400_000,
+            },
             memory: Memory {
                 geometry: gpu::Memory {
                     device: 1 << 30,
@@ -384,6 +406,10 @@ mod tests {
                     host: 21_000_000,
                 },
                 materials: gpu::Memory::default(),
+                shadows: gpu::Memory {
+                    device: 64 << 20,
+                    host: 8,
+                },
                 vram_used: 2_000_000_000,
                 vram_budget: 15_000_000_000,
             },
@@ -411,9 +437,10 @@ mod tests {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
              wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
-             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 \
-             geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
-             material_bytes 0 host_bytes 22048584 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
+             read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 sample 3 \
+             shadow_pages 256 shadow_pages_wanted 300 shadow_pages_drawn 12 shadow_pages_live 5 shadow_draws 9000 \
+             shadow_triangles 400000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
+             material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
              moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \
              blurred_textures 6\n";

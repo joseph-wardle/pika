@@ -28,6 +28,8 @@ pub struct Target {
     depth_memory: vk::DeviceMemory,
     depth_bytes: u64,
     depth_view: vk::ImageView,
+    /// Per pixel, the first color attachment's bytes.
+    pub color_bytes: u64,
 }
 
 impl Target {
@@ -47,6 +49,7 @@ impl Target {
             depth_memory: vk::DeviceMemory::null(),
             depth_bytes: 0,
             depth_view: vk::ImageView::null(),
+            color_bytes: formats.first().map_or(0, |f| f.1 as u64),
         };
         for &(format, bytes_per_pixel) in formats {
             let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
@@ -55,7 +58,9 @@ impl Target {
                 | vk::MemoryPropertyFlags::HOST_COHERENT
                 | vk::MemoryPropertyFlags::HOST_CACHED;
             let readback = Buffer::host(device, bytes, vk::BufferUsageFlags::TRANSFER_DST, host)?;
-            let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
+            let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST;
             let (image, memory, bytes, view) = image(device, format, usage, COLOR, width, height)?;
             t.colors.push(Attachment {
                 format,
@@ -140,7 +145,7 @@ impl Target {
             .image_view(self.depth_view)
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 0.0,
@@ -158,6 +163,204 @@ impl Target {
             d.cmd_pipeline_barrier2(
                 cb,
                 &vk::DependencyInfo::default().image_memory_barriers(&barriers),
+            );
+            d.cmd_begin_rendering(cb, &rendering);
+        }
+    }
+
+    /// Records after `end_rendering`: copies color attachment `index` row by row into `buffer`,
+    /// for compute passes to read and write before `resume_rendering` or `copy_in`.
+    pub fn copy_out(&self, cb: vk::CommandBuffer, index: usize, buffer: vk::Buffer) {
+        let attachment_image = self.colors[index].image;
+        let barrier =
+            |src: (vk::PipelineStageFlags2, vk::AccessFlags2), dst: (_, _), layouts: [_; 2]| {
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(src.0)
+                    .src_access_mask(src.1)
+                    .dst_stage_mask(dst.0)
+                    .dst_access_mask(dst.1)
+                    .old_layout(layouts[0])
+                    .new_layout(layouts[1])
+                    .image(attachment_image)
+                    .subresource_range(COLOR)
+            };
+        let attachment = (
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        );
+        let copy = (
+            vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::TRANSFER_READ,
+        );
+        let to_copy = barrier(
+            attachment,
+            copy,
+            [
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ],
+        );
+        let back = barrier(
+            copy,
+            (
+                attachment.0,
+                attachment.1 | vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+            ),
+            [
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ],
+        );
+        let copied = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            );
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, every handle was created on `d`, and
+        // `buffer` holds `width`×`height` of the attachment's pixels (the caller's).
+        unsafe {
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&[to_copy]),
+            );
+            d.cmd_copy_image_to_buffer(
+                cb,
+                attachment_image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                buffer,
+                &[region],
+            );
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&[copied])
+                    .image_memory_barriers(&[back]),
+            );
+        }
+    }
+
+    /// Records after compute passes that wrote `buffer`, `copy_out`'s of attachment `index`:
+    /// copies it back into the attachment, as `readback` or `resume_rendering` then find it.
+    pub fn copy_in(&self, cb: vk::CommandBuffer, index: usize, buffer: vk::Buffer) {
+        let written = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ);
+        let image = self.colors[index].image;
+        let to_copy = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(image)
+            .subresource_range(COLOR);
+        let back = vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COPY)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            )
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image(image)
+            .subresource_range(COLOR);
+        let region = vk::BufferImageCopy::default()
+            .image_subresource(vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .image_extent(vk::Extent3D {
+                width: self.width,
+                height: self.height,
+                depth: 1,
+            });
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, every handle was created on `d`, and
+        // `buffer` holds `width`×`height` of the attachment's pixels (the caller's).
+        unsafe {
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default()
+                    .memory_barriers(&[written])
+                    .image_memory_barriers(&[to_copy]),
+            );
+            d.cmd_copy_buffer_to_image(
+                cb,
+                buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &[region],
+            );
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().image_memory_barriers(&[back]),
+            );
+        }
+    }
+
+    /// Renders on into what the last rendering stored, colors and depth alike.
+    pub fn resume_rendering(&self, cb: vk::CommandBuffer) {
+        let stages = vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
+            | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
+            | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS;
+        let access = vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE;
+        let stored = vk::MemoryBarrier2::default()
+            .src_stage_mask(stages)
+            .src_access_mask(access)
+            .dst_stage_mask(stages)
+            .dst_access_mask(
+                access
+                    | vk::AccessFlags2::COLOR_ATTACHMENT_READ
+                    | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
+            );
+        let attachments: Vec<_> = (self.colors.iter())
+            .map(|a| {
+                vk::RenderingAttachmentInfo::default()
+                    .image_view(a.view)
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .load_op(vk::AttachmentLoadOp::LOAD)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+            })
+            .collect();
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(self.depth_view)
+            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::LOAD)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE);
+        let rendering = vk::RenderingInfo::default()
+            .render_area(self.area())
+            .layer_count(1)
+            .color_attachments(&attachments)
+            .depth_attachment(&depth);
+        let d = &self.device;
+        // SAFETY: `cb` is recording outside rendering, after a rendering of these attachments
+        // that stored them; the info structs outlive the calls.
+        unsafe {
+            d.cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().memory_barriers(&[stored]),
             );
             d.cmd_begin_rendering(cb, &rendering);
         }

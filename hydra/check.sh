@@ -188,6 +188,26 @@ DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/image.py" "$OUT/images" usdre
 for log in "$OUT"/images/*.log; do
     clean "$(basename "$log" .log)" "$log"
 done
+# An empty shadow pool is refused, not drawn unshadowed; receding.usda's own small pool, which
+# rendered clean above, is the control.
+cat >"$OUT/unpooled.usda" <<EOF
+#usda 1.0
+(
+    subLayers = [@$ROOT/hydra/images/receding.usda@]
+)
+
+over "render"
+{
+    over "settings"
+    {
+        custom int pika:shadowPool = 0
+    }
+}
+EOF
+husk -V 1 -R Pika -s /render/settings -f 1 -n 1 -o "$OUT/unpooled.\$F4.exr" "$OUT/unpooled.usda" \
+    >"$OUT/unpooled.log" 2>&1 || true
+grep -q "^pika: error: render: pika:shadowPool is 0 MB" "$OUT/unpooled.log" ||
+    fail "an empty shadow pool was not refused (see $OUT/unpooled.log)"
 fixtures=("$ROOT"/hydra/fixtures/*.usda)
 export -f fixture clean store_after counts keys expected pending redundant fail
 export OUT ROOT
@@ -205,8 +225,9 @@ first=${fixtures[0]}
     >/dev/null 2>&1 || fail "stats.py summarised a frame line cut short"
 
 DISPLAY=:$(cat "$OUT/display") hython "$ROOT/hydra/engine.py" "$ROOT/hydra/scenes/cube.usda" \
-    "$ROOT/hydra/scenes/painted.usda" "$ROOT/hydra/scenes/mipped.usda" >"$OUT/engine.log" 2>&1 ||
-    fail "the host does not see Pika's stats, a pending material is not clay or as it was, or a cap change in session differs from a fresh session (see $OUT/engine.log)"
+    "$ROOT/hydra/scenes/painted.usda" "$ROOT/hydra/scenes/mipped.usda" "$ROOT/hydra/scenes/penumbra.usda" \
+    >"$OUT/engine.log" 2>&1 ||
+    fail "the host does not see Pika's stats, a pending material is not clay or as it was, a cap change in session differs from a fresh session, or a soft shadow does not accumulate (see $OUT/engine.log)"
 clean engine "$OUT/engine.log"
 grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; held at 2×2 until the memory budget grows or the textures change$" "$OUT/engine.log" ||
     fail "engine: the raise whose read failed was not warned of (see $OUT/engine.log)"

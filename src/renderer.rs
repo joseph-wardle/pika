@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
+use crate::accumulation::{self, Accumulation};
 use crate::commands::Commands;
 use crate::cull::Cull;
 use crate::geometry::{self, Geometry};
@@ -16,6 +17,7 @@ use crate::link::Links;
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
+use crate::shadow::{Caster, Shadows};
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
 use crate::target::Target;
@@ -75,13 +77,12 @@ pub struct Frame<'a> {
     pub render_tags: Vec<String>,
     /// `pika:textureCap`, 0 for none.
     pub texture_cap: u32,
+    /// `pika:shadowPool`, in MB.
+    pub shadow_pool: u32,
 }
 
 /// OpenGL's far plane.
 const FAR: f32 = 1.0;
-
-/// How long a call with nothing else to draw waits for a material build; keeps usdview responsive.
-const WAIT: Duration = Duration::from_millis(16);
 
 // One instance per process: plugins are never unloaded, and each delegate's device borrows it.
 static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
@@ -95,7 +96,9 @@ pub struct Renderer {
     view: Option<View>,
     raster: Raster,
     shade: Shade,
+    shadows: Shadows,
     cull: Cull,
+    accumulation: Accumulation,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
@@ -114,6 +117,7 @@ struct Inputs {
     clear_color: [f32; 4],
     render_tags: Vec<String>,
     texture_cap: u32,
+    shadow_pool: u32,
 }
 
 /// The host's buffers are taken to hold the last frame placed into ones that match.
@@ -149,6 +153,7 @@ struct Pending {
     update: geometry::Update,
     /// Whether the view was culled, so its counts are this frame's.
     culled: bool,
+    sample: u32,
     lights: usize,
     moved: usize,
     transforms: usize,
@@ -187,6 +192,8 @@ impl Renderer {
         let subdiv = shader::compile("subdiv")?;
         let smooth = shader::compile("smooth")?;
         let tangent = shader::compile("tangent")?;
+        let shadow = shader::compile("shadow")?;
+        let accumulation = shader::compile("accumulation")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -195,7 +202,9 @@ impl Renderer {
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
             shade: Shade::new(&device)?,
+            shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
+            accumulation: Accumulation::new(&device, &accumulation.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
@@ -223,9 +232,10 @@ impl Renderer {
         Ok(())
     }
 
-    /// Returns whether the buffers now hold this frame, with no material build still out.
-    /// While frames change, each call returns the frame before and leaves this one on the GPU,
-    /// so GPU work overlaps the host's own frame time instead of running in series with it.
+    /// Returns whether the buffers now hold this frame, with no material build still out and
+    /// its samples all drawn. While frames change, each call returns the frame before and leaves
+    /// this one on the GPU, so GPU work overlaps the host's own frame time instead of running in
+    /// series with it. While nothing changes, each call draws the next sample until converged.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         let [x, y, w, h] = frame.window;
@@ -283,6 +293,7 @@ impl Renderer {
             clear_color: frame.clear_color,
             render_tags: frame.render_tags.clone(),
             texture_cap: frame.texture_cap,
+            shadow_pool: frame.shadow_pool,
         };
         let mut aovs = [frame.color, frame.depth, frame.normal];
 
@@ -292,16 +303,16 @@ impl Renderer {
         }
         let placed = self.placed.as_ref();
         // A swap waiting for a frame's bytes needs no build to land.
-        if moved == Moved::default()
+        let unchanged = moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
-            && self.shade.settled()
-            && !self.shade.builder.wait(WAIT)?
-        {
-            return Ok(self.shade.settled());
+            && self.shade.settled();
+        if unchanged && self.accumulation.converged() {
+            return Ok(true);
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
 
         let start = Instant::now();
+        self.shadows.reserve(&self.device, inputs.shadow_pool)?;
         let target = match &mut self.target {
             Some(t) if t.fits(&formats, w, h) => t,
             slot => {
@@ -330,17 +341,51 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        // A swap begun draws the old image until whole, but its end must start the sum again.
+        let still = unchanged && self.shade.settled();
+        if !still {
+            self.accumulation.drawn = 0;
+        }
+        let sample = self.accumulation.drawn;
+        let bound = self.geometry.bound();
         // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
-        let lights: Vec<_> = (self.store.lights().values())
-            .filter_map(|l| {
-                let link = links.light(l);
-                light::resolve(l).map(|r| light::Light { link, ..r })
-            })
-            .collect();
+        let mut lights = Vec::new();
+        let mut casters = Vec::new();
+        for (&id, l) in self.store.lights() {
+            let Some(resolved) = light::resolve(l) else {
+                continue;
+            };
+            let link = links.light(l);
+            if l.params.is_some_and(|p| p.shadow) {
+                casters.push(Caster {
+                    id,
+                    light: lights.len(),
+                    link: link.shadow,
+                });
+            }
+            lights.push(light::Light {
+                link: link.light,
+                ..resolved
+            });
+        }
+        if let Some(g) = &bound {
+            let (device, geometry) = (&self.device, &self.geometry);
+            let projection = &inputs.projection;
+            (self.shadows).fit(
+                device,
+                geometry,
+                g,
+                &camera,
+                projection,
+                [w, h],
+                &mut lights,
+                &casters,
+            )?;
+        }
+        self.accumulation.wanted = accumulation::samples(&lights);
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
-        let bound = self.geometry.bound();
         let mut view = match (&bound, &mut self.view) {
             (None, _) => None,
             (Some(g), Some(v)) if v.fits(g, capacity) => Some(v),
@@ -350,7 +395,17 @@ impl Renderer {
             }
         };
         if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
-            view.begin(cb, &camera, geometry, &lights, &tiles, [w, h]);
+            let shadows = self.shadows.table();
+            view.begin(
+                cb,
+                &camera,
+                geometry,
+                &lights,
+                &tiles,
+                [w, h],
+                sample,
+                shadows,
+            );
             self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
@@ -369,13 +424,28 @@ impl Renderer {
         if let Some((geometry, view)) = drawn {
             (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
         }
+        target.end_rendering(cb);
         self.commands.mark("draw")?;
+        // Between the prepass and shading, which reads them: pages follow the depth drawn.
+        if let Some((geometry, view)) = drawn {
+            let moving = self.geometry.moved_instances(&moved, &update);
+            let commands = &mut self.commands;
+            (self.shadows).record(commands, geometry, view, target, moving.as_deref())?;
+        } else {
+            Shadows::skip(&mut self.commands)?;
+        }
+        target.resume_rendering(cb);
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();
             (self.shade).draw(cb, formats[0].0, target.area(), geometry, groups, view);
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;
+        // A frame drawn while anything changes is shown alone, since the next is drawn anew.
+        if still {
+            self.accumulation.record(&self.device, cb, target)?;
+        }
+        self.commands.mark("accumulate")?;
         let read = aovs.each_ref().map(Option::is_some);
         target.readback(cb, &read);
         self.commands.mark("readback")?;
@@ -389,6 +459,7 @@ impl Renderer {
             record: start.elapsed(),
             update,
             culled: view.is_some(),
+            sample,
             lights: lights.len(),
             moved: moved.points.len(),
             transforms: moved.transforms.len(),
@@ -408,7 +479,7 @@ impl Renderer {
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.settled())
+        Ok(self.shade.settled() && self.accumulation.converged())
     }
 
     /// Places the pending frame only if `aovs` are the buffers it was drawn for.
@@ -424,6 +495,7 @@ impl Renderer {
             (Some(view), true) => view.drawn(),
             _ => [0; 2],
         };
+        let shadow = self.shadows.counts();
         let placing = Instant::now();
         let [x, y, w, h] = pending.buffers.window;
         let fits = pending.buffers == *buffers;
@@ -453,11 +525,14 @@ impl Renderer {
             .heap(!0, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
         let vram = self.device.heaps()[local];
         let (vram_used, vram_budget) = (vram.used, vram.allowed);
+        let mut targets = target.memory();
+        targets += self.accumulation.memory();
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
-            targets: target.memory(),
+            targets,
             materials: self.shade.memory(),
+            shadows: self.shadows.memory(),
             vram_used,
             vram_budget,
         };
@@ -471,7 +546,9 @@ impl Renderer {
             update: pending.update,
             read_bytes,
             drawn,
+            sample: pending.sample,
             lights: pending.lights,
+            shadow,
             memory,
             moved: pending.moved,
             transforms: pending.transforms,
