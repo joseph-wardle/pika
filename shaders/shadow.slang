@@ -117,6 +117,8 @@ struct State
 
 // Draws each list holds (src/shadow.rs CAPACITY).
 static const uint CAPACITY = 1 << 19;
+// Tile walks a frame lists (src/shadow.rs WALKS).
+static const uint WALKS = 1 << 18;
 
 struct Push
 {
@@ -622,14 +624,23 @@ void visit(uint j, uint i, uint face, int2 at, uint flag)
 }
 
 // Lists tiles a to b of shadow j's level i and face for the walk pass to visit, a thread per
-// tile: a thread per box would hold its group until the largest box is done. The list holds
-// every walk this pass can list (src/shadow.rs walk_bound).
+// tile: a thread per box would hold its group until the largest box is done. Past the list's
+// end, visits them here.
 void walk_tiles(uint j, uint i, uint face, int2 a, int2 b, uint flag)
 {
     Constants *p = push.constants;
     uint w = p->state->walked.increment();
-    uint span = uint(a.x) | uint(a.y) << 8 | uint(b.x) << 16 | uint(b.y) << 24;
-    p->walks[w] = uint4(j, i | face << 8 | flag << 16, span, 0);
+    if (w < WALKS)
+    {
+        uint span = uint(a.x) | uint(a.y) << 8 | uint(b.x) << 16 | uint(b.y) << 24;
+        p->walks[w] = uint4(j, i | face << 8 | flag << 16, span, 0);
+        return;
+    }
+    for (int y = a.y; y <= b.y; y++)
+    {
+        for (int x = a.x; x <= b.x; x++)
+            visit(j, i, face, int2(x, y), flag);
+    }
 }
 
 // Per moved entry, level and shadow. The held pages a moving instance's box covers get a live
@@ -676,7 +687,7 @@ void moving(uint3 thread : SV_DispatchThreadID)
 void walk(uint3 group : SV_GroupID, uint3 lane : SV_GroupThreadID)
 {
     Constants *p = push.constants;
-    uint count = p->state->walked.load();
+    uint count = min(p->state->walked.load(), WALKS);
     for (uint w = group.x; w < count; w += push.stride / 64)
     {
         uint4 k = p->walks[w];

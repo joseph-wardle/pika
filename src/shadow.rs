@@ -40,9 +40,11 @@ const OWNER_BYTES: u64 = 12;
 /// level face it meets with pages to draw: 38 MB of lists (`shaders/shadow.slang`
 /// `CAPACITY`).
 const CAPACITY: u32 = 1 << 19;
-/// Tile walks the moving pass lists a frame, 4 MB; past `walk_bound`'s for its moved entries,
-/// every page is drawn anew.
-const WALKS: u64 = 1 << 18;
+/// Tile walks the moving pass lists a frame, 4 MB (`shaders/shadow.slang` `WALKS`); past
+/// them, it walks the tiles itself. A bound on the CPU would have to assume every moving
+/// instance meets every face of every shadow, which ALab's 330 movers and 49 shadows put at
+/// four times this, so every frame would be drawn anew.
+const WALKS: u32 = 1 << 18;
 /// Moved entries a frame lists, as one `vkCmdUpdateBuffer` writes them; past it, every page
 /// is drawn anew.
 const MOVED: u32 = 65536 / 4;
@@ -346,7 +348,7 @@ impl Shadows {
                 u64::from(MOVED) * 4,
                 storage | vk::BufferUsageFlags::TRANSFER_DST,
             )?,
-            walks: Buffer::device_local(device, WALKS * 16, storage)?,
+            walks: Buffer::device_local(device, u64::from(WALKS) * 16, storage)?,
             movers: Vec::new(),
             indirect: Buffer::device_local(device, 2 * CAPACITY as u64 * draw_bytes, indirect)?,
             draws: Buffer::device_local(device, 2 * CAPACITY as u64 * 16, storage)?,
@@ -606,7 +608,7 @@ impl Shadows {
         let listed = moved
             .filter(|_| !clean)
             .map(|m| (m, moved_entries(m, &self.movers)))
-            .filter(|(_, e)| e.len() <= MOVED as usize && walk_bound(e, faces) <= WALKS);
+            .filter(|(_, e)| e.len() <= MOVED as usize);
         // A fresh frame draws every caster into every page.
         let fresh = listed.is_none();
         let (moving, moved) = listed.unwrap_or((&[], Vec::new()));
@@ -706,8 +708,8 @@ impl Shadows {
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
         let casting = 0..geometry.instance_count * LEVELS * shadows.len() as u32;
-        // A group per tile walk.
-        let walks = 0..walk_bound(moved, faces) as u32 * 64;
+        // A group per tile walk listed.
+        let walks = 0..walk_bound(moved, faces).min(WALKS.into()) as u32 * 64;
         let entries_moved = 0..moved.len() as u32 * LEVELS * shadows.len() as u32;
         let remembered = 0..if fresh {
             geometry.instance_count
@@ -1011,9 +1013,9 @@ fn clip_levels(held: Option<i32>, need: i32, near: f64, pixel: f64) -> [i32; 2] 
     [coarsest, finest]
 }
 
-/// The tile walks the moving pass may list for `moved` entries, which bounds its list: per
-/// entry and each of the shadows' `faces` (levels times faces), one for the tiles its box
-/// covers, and one more for those it covered when it starts.
+/// The tile walks the moving pass may list for `moved` entries, which bounds the walk pass's
+/// groups: per entry and each of the shadows' `faces` (levels times faces), one for the tiles
+/// its box covers, and one more for those it covered when it starts.
 fn walk_bound(moved: &[u32], faces: u32) -> u64 {
     let walks: u64 = (moved.iter())
         .map(|e| 1 + u64::from(e & STARTED != 0))
@@ -1153,6 +1155,7 @@ mod tests {
             (view, "PAGE", PAGE),
             (shadow, "FACES", FACES),
             (shadow, "CAPACITY", CAPACITY),
+            (shadow, "WALKS", WALKS),
             (shadow, "STARTED", STARTED),
             (shadow, "STOPPED", STOPPED),
         ];
@@ -1165,7 +1168,7 @@ mod tests {
         assert_eq!(slang_const(view, "MOVED"), None);
     }
 
-    /// The walk list is sized by this bound alone, so it must count a start's two walks.
+    /// The walk pass's groups are sized by this bound, so it must count a start's two walks.
     #[test]
     fn walk_bound_counts_a_starts_two_walks() {
         // A sun of 16 levels and a sphere light of 6 LODs, 6 faces each.
