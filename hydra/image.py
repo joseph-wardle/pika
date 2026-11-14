@@ -79,11 +79,18 @@ What the reference encodes:
   lights only the meshes its lightLink collection includes, a native
   instance's mesh by its instance proxy's path.
   A light, the camera light among them, unless its shadow:enable is off,
-  gives nothing to a hit whose ray toward it meets a triangle of a mesh its
-  shadowLink collection includes (every mesh for the camera light), the
-  hit's own triangle aside, whatever pika:shadowPool holds: a distant
-  light's ray runs along its axis whatever its angle, and another's to its
-  centre whatever its shape. A scene in POOLED marks more pages than its
+  gives a hit the share of its shadow rays that meet no triangle of a mesh
+  its shadowLink collection includes (every mesh for the camera light), the
+  hit's own triangle aside, whatever pika:shadowPool holds. A light with no
+  size has one ray: a distant light's along its axis, another's to its
+  centre. A light with a size has 64, toward the centres of an 8 × 8 grid's
+  cells spread over it: uniformly over a rect, and over a cylinder's length
+  by its diameter facing the hit; through radius √u and angle 2πv, over a
+  disk, a sphere's disk of its radius facing the hit, and for a distant
+  light the directions across the disk of its half angle (at most 80°) a
+  unit along its axis. A hit whose rays toward the light's centre and edge
+  (the corners and the sides' midpoints, or 8 points round the disk)
+  agree takes their answer alone. A scene in POOLED marks more pages than its
   pool, whose dropped levels must keep their texels under a pixel. Other
   light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
@@ -106,12 +113,17 @@ What the reference encodes:
 
 Pixels next to a change of face (silhouettes, face boundaries) are compared
 only for coverage, since a rasterizer and a ray decide them differently; so
-are pixels next to a change of which lights' shadows hold them, since a
-shadow map's texels and a ray decide those differently. Away
+are pixels next to a change of which lights' shadows hold them, wholly or
+in part, since a shadow map's texels and a ray decide those differently. Away
 from them, values must agree within TOLERANCE, colour also allowed 1/256 of
 its value: the GPU decodes sRGB texels to about nine significant bits (RTX
 4070 Ti SUPER, driver 580), so a sample of a light grey is off by up to
-half of 1/256 before it is filtered.
+half of 1/256 before it is filtered. Pika gives a pixel in a penumbra, where
+a light's share is between 0 and 1, one ray, the same for each frame, so
+penumbra pixels are compared otherwise: each colour must lie between its
+partly held lights wholly held and wholly lit, and over the pixels whose
+share of their light is within each of BANDS, the mean share Pika shows
+must be the reference's within PENUMBRA.
 
 Each control perturbs the reference. A control must fail on every scene
 and host whose reference it changes, and must change at least one scene's.
@@ -159,6 +171,11 @@ RENDERS = 8
 REFERENCES = 16
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
+# Penumbra pixels' bands of the reference's share of their light, the pixels a band needs to
+# be compared, and how far Pika's mean share over one may be from the reference's.
+BANDS = ((0, 0.1), (0.1, 0.4), (0.4, 0.6), (0.6, 0.9), (0.9, 1))
+BAND_PIXELS = 16
+PENUMBRA = 0.1
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
             "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
@@ -173,6 +190,7 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "instance links ignored",
             "shadows ignored", "shadow links ignored", "shadow:enable ignored", "shadow rays turned 6°",
             "shadow rays past local lights", "moved casters' old shadows kept",
+            "shadows of the light's centre alone", "shadows of half the light's size",
             "st origin at the top", "st wrapped, not clamped", "nearest texel",
             "useMetadata read as periodic", "file wrap metadata ignored",
             "st read whatever the name", "UV0 drawn pink", "st seams smoothed over", "st refined bilinearly",
@@ -1142,6 +1160,104 @@ def shadowed(toward, casts, p, own, world, control, reach=None):
     return out
 
 
+# Where a sized light's shadow rays aim, over [0, 1]²: an 8 × 8 grid's cell centres, and the
+# centre and edge of a rect or cylinder side and of a disk.
+GRID = (np.stack(np.meshgrid(np.arange(8), np.arange(8)), -1).reshape(-1, 2) + 0.5) / 8
+SIDE_EDGE = np.stack(np.meshgrid([0, 0.5, 1], [0, 0.5, 1]), -1).reshape(-1, 2)
+DISK_EDGE = np.r_[[[0.0, 0.0]], np.c_[np.ones(8), np.arange(8) / 8]]
+
+
+def aims(prim, time, toward, angle, control):
+    """Where a light's shadow rays aim (see the module's doc): a function
+    of grid points u, (points, 2), and the hits p giving directions,
+    (points, 3), for a distant light (`prim` None or a DistantLight,
+    `toward` and `angle` its), else points, (points, hits, 3); and the
+    edge's grid points. None for a light with no size."""
+    if control == "shadows of the light's centre alone":
+        return None
+    scale = 0.5 if control == "shadows of half the light's size" else 1.0
+
+    def disk(u):
+        return scale * np.sqrt(u[:, :1]) * np.c_[np.cos(2 * np.pi * u[:, 1]), np.sin(2 * np.pi * u[:, 1])]
+
+    def side(u):
+        return scale * (2 * u - 1)
+
+    if toward is not None:
+        t = math.tan(min(math.radians(angle) / 2, math.radians(80)))
+        if t == 0:
+            return None
+        e0 = normalize(np.cross(toward, (0.0, 1.0, 0.0) if abs(toward[1]) < 0.9 else (1.0, 0.0, 0.0)))
+        e1 = np.cross(toward, e0)
+        return (lambda u, p: normalize(toward + t * (disk(u)[:, :1] * e0 + disk(u)[:, 1:] * e1))), DISK_EDGE
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    x, y, z, c = (np.array([m[r][0], m[r][1], m[r][2]]) for r in range(4))
+    if prim.IsA(UsdLux.SphereLight):
+        r = UsdLux.SphereLight(prim).GetRadiusAttr().Get(time) * np.linalg.norm(x)
+        if r == 0:
+            return None
+
+        def sphere_disk(u, p):
+            w = normalize(c - p)
+            a = normalize(np.cross(w, np.where(np.abs(w[:, :1]) < 0.9, (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))))
+            b = np.cross(w, a)
+            d = disk(u)
+            return c + r * (d[:, 0, None, None] * a + d[:, 1, None, None] * b)
+        return sphere_disk, DISK_EDGE
+    if prim.IsA(UsdLux.RectLight):
+        light = UsdLux.RectLight(prim)
+        half = np.array([x * light.GetWidthAttr().Get(time) / 2, y * light.GetHeightAttr().Get(time) / 2])
+        return (lambda u, p: np.broadcast_to((c + side(u) @ half)[:, None], (len(u), len(p), 3))), SIDE_EDGE
+    if prim.IsA(UsdLux.DiskLight):
+        r = UsdLux.DiskLight(prim).GetRadiusAttr().Get(time)
+        return (lambda u, p: np.broadcast_to((c + disk(u) @ np.array([x * r, y * r]))[:, None], (len(u), len(p), 3))), DISK_EDGE
+    light = UsdLux.CylinderLight(prim)
+    half = x * light.GetLengthAttr().Get(time) / 2
+    r = light.GetRadiusAttr().Get(time) * np.linalg.norm(y)
+    axis = half / np.linalg.norm(half)
+
+    def cylinder_side(u, p):
+        out = normalize(np.cross(axis, p - c))
+        s = side(u)
+        return c + s[:, 0, None, None] * half + s[:, 1, None, None] * r * out
+    return cylinder_side, SIDE_EDGE
+
+
+def visible(prim, time, toward, angle, p, own, world, casts, control):
+    """Each hit's share of a light (see the module's doc): a distant light
+    `toward` its direction, with its `angle`, or a local light `prim`."""
+    distant = toward is not None
+
+    def unmet(points, at):
+        """The share of the hits `at`'s rays toward `points`, directions
+        (n, 3) or points per hit (n, hits at, 3), that meet no caster."""
+        held = np.zeros(at.sum())
+        for q in points:
+            if distant:
+                held += shadowed(q, casts, p[at], own[at], world, control)
+            else:
+                v = q - p[at]
+                d = np.linalg.norm(v, axis=1)
+                held += shadowed(v / d[:, None], casts, p[at], own[at], world, control, d)
+        return 1 - held / len(points)
+
+    every = np.ones(len(p), bool)
+    if distant:
+        centre = toward[None]
+    else:
+        o = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time).ExtractTranslation()
+        centre = np.broadcast_to(np.array(o), (1, len(p), 3))
+    found = aims(prim, time, toward, angle, control)
+    if found is None:
+        return unmet(centre, every)
+    at, edge = found
+    out = unmet(np.concatenate([centre, at(edge, p)]), every)
+    split = (out > 0) & (out < 1)
+    if split.any():
+        out[split] = unmet(at(GRID, p[split]), split)
+    return out
+
+
 def shadow_casters(prim, faces, control):
     """Which triangles, by `faces`' prim paths, cast the light's shadows:
     those of the meshes its shadowLink collection includes, or none when
@@ -1156,9 +1272,9 @@ def shadow_casters(prim, faces, control):
 
 def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=None):
     """Each light as the direction toward it, one for every hit or one
-    per hit, the illuminance it gives a surface facing it, likewise, the
-    sine of the angle it subtends, 0 but for a sphere, and the hits its
-    shadow holds (see the module's doc). `axis` is the direction the
+    per hit, the illuminance it gives a surface facing it unshadowed,
+    likewise, the sine of the angle it subtends, 0 but for a sphere, and
+    each hit's share of it its shadow leaves (see the module's doc). `axis` is the direction the
     host's camera light shines; `p` holds the hits, `n` their normals,
     turned toward the eye, and `paths` their prims' paths; `casters` the
     hits' triangles, the world triangles and their prims' paths. A light
@@ -1173,27 +1289,27 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=N
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
         e = illuminance(intensity, 0, (1, 1, 1), CAMERA_LIGHT_ANGLE, False, control)
-        held = shadowed(np.asarray(light, float), np.ones(len(world), bool), p, own, world, control)
-        return [(light, np.where(held[:, None], 0.0, e), 0, held)]
+        light = np.asarray(light, float)
+        # From the eye, a ray per hit along its own direction.
+        angle = CAMERA_LIGHT_ANGLE if light.ndim == 1 else 0
+        left = visible(None, time, light, angle, p, own, world, np.ones(len(world), bool), control)
+        return [(light, e, 0, left)]
     if not found and control == "Pika's old headlight":
-        return [(-axis, (np.pi,) * 3, 0, np.zeros(len(p), bool))]
+        return [(-axis, (np.pi,) * 3, 0, np.ones(len(p)))]
     out = []
     for prim in found:
         if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
             continue
         api = UsdLux.LightAPI(prim)
         on = links(prim, paths, control)
-        held = np.zeros(len(p), bool)
+        left = np.ones(len(p))
         local = prim.IsA(UsdLux.SphereLight) or any(prim.IsA(t) for t in AREA)
         if prim.IsA(UsdLux.SphereLight):
             given = sphere(api, UsdLux.SphereLight(prim).GetRadiusAttr().Get(time), time, p[on], control)
         elif local:
             given = area(prim, time, p[on], n[on], control)
         if local:
-            centre = np.array(UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time).ExtractTranslation())
-            c = centre - p[on]
-            d = np.linalg.norm(c, axis=1)
-            held[on] = shadowed(c / d[:, None], shadow_casters(prim, faces, control), p[on], own[on], world, control, d)
+            left[on] = visible(prim, time, None, 0, p[on], own[on], world, shadow_casters(prim, faces, control), control)
         else:
             m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
             z = np.array([m[2][0], m[2][1], m[2][2]])
@@ -1204,11 +1320,11 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=N
                             api.GetNormalizeAttr().Get(time), control)
             given = (z / np.linalg.norm(z), e, 0)
             casts = shadow_casters(prim, faces, control)
-            held[on] = shadowed(given[0], casts, p[on], own[on], world, control)
+            angle = UsdLux.DistantLight(prim).GetAngleAttr().Get(time)
+            left[on] = visible(None, time, given[0], angle, p[on], own[on], world, casts, control)
         d, e, sin = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.zeros(len(p))
         d[on], e[on], sin[on] = given
-        e[held] = 0
-        out.append((d, e, sin, held))
+        out.append((d, e, sin, left))
     return out
 
 
@@ -1252,6 +1368,10 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
         "normal": np.zeros((height, width, 3)),
         "face": np.full((height, width), -1),
         "shadow": np.zeros((height, width), int),
+        # Penumbra pixels, and at each, row by row, its colour with its partly held lights
+        # wholly held and wholly lit: held only there, since every control's frames are.
+        "soft": np.zeros((height, width), bool),
+        "bounds": np.zeros((0, 2, 3)),
     }
     if not tris:
         return image
@@ -1325,23 +1445,28 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     # before lighting.
     facing = shade
     facing[dot(facing, toward) < 0] *= -1
-    shine = np.zeros((len(p), 3))
+    shine, low, high = np.zeros((3, len(p), 3))
     paths = [tris[k]["face"][0] for k in i]
+    # Two bits a light: wholly held, partly.
     held = np.zeros(len(p), int)
     found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, casting, faces), control)
-    for bit, (d, e, sin, shadow) in enumerate(found):
-        held |= shadow.astype(int) << bit
+    for bit, (d, e, sin, left) in enumerate(found):
+        partly = (left > 0) & (left < 1)
+        held |= ((left == 0) * 2 + partly) << (2 * bit)
         cos = dot(facing, d)
         if (abs(cos) < sin).any():
             raise ValueError("a surface sees a sphere light cross its horizon: only a whole sphere has a closed form")
-        shine += np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
+        given = np.clip(cos, 0.0, 1.0)[:, None] * np.array(e) / np.pi
+        shine += given * left[:, None]
+        low += given * np.where(partly, 0, left)[:, None]
+        high += given * np.where(partly, 1, left)[:, None]
     limit = np.array([180 if l.facing is None else l.facing for l in looks])[i]
     if (dot(facing, toward) < np.cos(np.radians(limit))).any():
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
     albedo = np.array([l.albedo for l in looks])[i]
     emission = np.array([l.emission for l in looks])[i]
-    color = np.c_[albedo * shine + emission, np.ones(len(p))]
-    color[:, :3] += sampled("image")[0]
+    emitted = emission + sampled("image")[0]
+    color = np.c_[albedo * shine + emitted, np.ones(len(p))]
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":
@@ -1353,6 +1478,10 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     image["normal"][hit] = n
     image["face"][hit] = face[i]
     image["shadow"][hit] = held
+    bounds = np.zeros((height, width, 2, 3))
+    bounds[hit] = np.stack([albedo * low + emitted, albedo * high + emitted], 1)
+    image["soft"][hit] = (high > low).any(axis=1)
+    image["bounds"] = bounds[image["soft"]]
     return image
 
 
@@ -1470,7 +1599,7 @@ def compare(image, ref, aovs):
     stray = (drawn != covered) & ~edge
     if stray.any():
         problems.append(f"coverage differs at {stray.sum()} pixels away from edges")
-    inner = covered & drawn & ~edge
+    inner = covered & drawn & ~edge & ~ref["soft"]
     for aov in aovs:
         error = np.abs(image[aov][..., :4] - ref[aov][..., :4] if aov == "color" else image[aov] - ref[aov])
         allowed = TOLERANCE[aov]
@@ -1481,6 +1610,31 @@ def compare(image, ref, aovs):
         if over.any():
             slack = " plus 1/256 of the value" if aov == "color" else ""
             problems.append(f"{aov} differs by up to {error[over].max():.3g} (tolerance {TOLERANCE[aov]:g}{slack})")
+    return problems + penumbrae(image, ref, covered & drawn & ref["soft"] & ~edges(ref["face"]))
+
+
+def penumbrae(image, ref, at):
+    """Why the penumbra pixels `at` of `image` do not match `ref` (see the
+    module's doc), or an empty list."""
+    problems = []
+    bounds = np.zeros(at.shape + (2, 3))
+    bounds[ref["soft"]] = ref["bounds"]
+    low, high = bounds[at][:, 0], bounds[at][:, 1]
+    color = image["color"][at][:, :3]
+    allowed = TOLERANCE["color"] + np.abs(high) / 256
+    out = ((color < low - allowed) | (color > high + allowed)).any(axis=1)
+    if out.any():
+        problems.append(f"{out.sum()} penumbra pixels lie outside their lights wholly held and wholly lit")
+    span = (high - low).sum(axis=1)
+    # Too little of the light to read its share from.
+    seen = span > 30 * TOLERANCE["color"]
+    shown = (color - low).sum(axis=1)[seen] / span[seen]
+    share = (ref["color"][at][:, :3] - low).sum(axis=1)[seen] / span[seen]
+    for a, b in BANDS:
+        band = (share >= a) & (share < b)
+        if band.sum() >= BAND_PIXELS and abs(shown[band].mean() - share[band].mean()) > PENUMBRA:
+            problems.append(f"penumbra pixels of share {a}-{b} show {shown[band].mean():.2f} of their light, "
+                            f"not {share[band].mean():.2f}")
     return problems
 
 

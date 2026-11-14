@@ -21,7 +21,7 @@ BUDGET_MS = 41.67
 # ALab in usdview at 1080p, not limits.
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
-    ("shade", ("gpu_shade_ms",), 8.0),
+    ("shade", ("gpu_shade_ms",), 12.0),
     # Listing, drawing and copying shadow pages; their lookups are in shade.
     ("shadow", ("gpu_shadow_list_ms", "gpu_shadow_pages_ms", "gpu_shadow_copy_ms",
                 "gpu_shadow_live_ms"), 3.0),
