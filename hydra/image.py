@@ -113,7 +113,7 @@ What the reference encodes:
 - Depth and normal are those of one ray through each pixel centre, as a
   still view's sample 0 draws them. Color is Pika's still view converged:
   the filtered mean over each pixel's neighbourhood (FILTER_RADIUS, as
-  src/accumulation.rs weighs it), the edge pixels standing in past the
+  src/film.rs weighs it), the edge pixels standing in past the
   image's edge. Where a look samples an image (`textured`), colour varies
   under a pixel, so the reference casts RAYS × RAYS rays a pixel, one
   through each cell of a grid over it, and filters them; the texture level
@@ -185,7 +185,7 @@ RENDERS = 8
 # Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
 # renders, under 32 GB.
 REFERENCES = 16
-# Pika's pixel filter (src/accumulation.rs): EEVEE's Gaussian, its standard deviation
+# Pika's pixel filter (src/film.rs): EEVEE's Gaussian, its standard deviation
 # FILTER_SIGMA of its radius in pixels, nothing past it.
 FILTER_RADIUS = 1.5
 FILTER_SIGMA = 0.284

@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use ash::vk;
 
-use crate::accumulation::{self, Accumulation};
 use crate::commands::Commands;
 use crate::cull::Cull;
+use crate::film::Film;
 use crate::geometry::{self, Geometry};
 use crate::gpu;
 use crate::light::{self, Tiles};
@@ -98,7 +98,7 @@ pub struct Renderer {
     shade: Shade,
     shadows: Shadows,
     cull: Cull,
-    accumulation: Accumulation,
+    film: Film,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
@@ -193,7 +193,7 @@ impl Renderer {
         let smooth = shader::compile("smooth")?;
         let tangent = shader::compile("tangent")?;
         let shadow = shader::compile("shadow")?;
-        let accumulation = shader::compile("accumulation")?;
+        let film = shader::compile("film")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -204,7 +204,7 @@ impl Renderer {
             shade: Shade::new(&device)?,
             shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            accumulation: Accumulation::new(&device, &accumulation.spirv)?,
+            film: Film::new(&device, &film.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
@@ -305,7 +305,7 @@ impl Renderer {
         let unchanged = moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
             && self.shade.settled();
-        if unchanged && self.accumulation.converged() {
+        if unchanged && self.film.converged() {
             return Ok(true);
         }
         let latent = placed.is_some_and(|(b, _)| *b == buffers);
@@ -317,7 +317,13 @@ impl Renderer {
             slot => {
                 // Free the old target before allocating its replacement.
                 *slot = None;
-                slot.insert(Target::new(&self.device, &formats, w, h)?)
+                slot.insert(Target::new(
+                    &self.device,
+                    &formats,
+                    &[raster::MOTION],
+                    w,
+                    h,
+                )?)
             }
         };
         let cb = self.commands.begin()?;
@@ -341,13 +347,12 @@ impl Renderer {
         )?;
         self.commands.mark("texture")?;
         // A swap begun draws the old image until whole, but its end must start the sum again.
-        let still = unchanged && self.shade.settled();
-        if !still {
-            self.accumulation.drawn = 0;
-        }
-        let sample = self.accumulation.drawn;
+        let sample = (self.film).begin(unchanged && self.shade.settled());
         // Texture needs above take the unjittered camera: jitter moves a pixel by under one.
-        let camera = camera.jittered(accumulation::jitter(sample), [w, h]);
+        let unjittered = camera;
+        let jitter = self.film.jitter();
+        let camera = unjittered.jittered(jitter, [w, h]);
+        let previous = (self.film.previous()).unwrap_or(unjittered.view_projection);
         let bound = self.geometry.bound();
         // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
@@ -399,6 +404,8 @@ impl Renderer {
             view.begin(
                 cb,
                 &camera,
+                jitter,
+                &previous,
                 geometry,
                 &lights,
                 &tiles,
@@ -441,13 +448,11 @@ impl Renderer {
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;
-        // A frame drawn while anything changes is shown alone, since the next is drawn anew.
-        if still {
-            self.accumulation.record(&self.device, cb, target)?;
-        }
-        self.commands.mark("accumulate")?;
+        (self.film).record(&self.device, cb, target, &unjittered)?;
+        self.commands.mark("film")?;
         // A still view's depth and normal are its sample 0's, at the pixels' centres, as
         // EEVEE's data passes keep the sample nearest; the host's buffers hold them after.
+        // While anything changes they are each frame's, jittered.
         let read = [0, 1, 2].map(|i| aovs[i].is_some() && (i == 0 || sample == 0));
         target.readback(cb, &read);
         self.commands.mark("readback")?;
@@ -481,7 +486,7 @@ impl Renderer {
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.settled() && self.accumulation.converged())
+        Ok(self.shade.settled() && self.film.converged())
     }
 
     /// Places the pending frame only if `aovs` are the buffers it was drawn for.
@@ -530,7 +535,7 @@ impl Renderer {
         let vram = self.device.heaps()[local];
         let (vram_used, vram_budget) = (vram.used, vram.allowed);
         let mut targets = target.memory();
-        targets += self.accumulation.memory();
+        targets += self.film.memory();
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),

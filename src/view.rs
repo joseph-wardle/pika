@@ -13,10 +13,12 @@ use crate::transform::Camera;
 #[derive(Clone, Copy)]
 struct Constants {
     camera: Camera,
+    previous: [[f32; 4]; 4],
     lights: vk::DeviceAddress,
     light_tiles: vk::DeviceAddress,
     tile_lights: vk::DeviceAddress,
     extent: [u32; 2],
+    jitter: [f32; 2],
     sample: u32,
     unused: u32,
     points: vk::DeviceAddress,
@@ -94,12 +96,16 @@ impl View {
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
     /// `sample` is the frame's index among those drawn while nothing changes, 0 while anything does.
+    /// `camera` is jittered by `jitter` (`film::jitter`); `previous` is the frame before's
+    /// view-projection, unjittered, which motion is measured from.
     /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
     #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
         cb: vk::CommandBuffer,
         camera: &Camera,
+        jitter: [f64; 2],
+        previous: &[[f32; 4]; 4],
         geometry: &Bound,
         lights: &[Light],
         tiles: &Tiles,
@@ -125,10 +131,12 @@ impl View {
         let address = |i: usize| self.lights.address + offsets[i] as u64;
         let constants = Constants {
             camera: *camera,
+            previous: *previous,
             lights: address(0),
             light_tiles: address(1),
             tile_lights: address(2),
             extent,
+            jitter: jitter.map(|v| v as f32),
             sample,
             unused: 0,
             points: geometry.points,

@@ -12,7 +12,7 @@ use crate::geometry::{Bound, Group};
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Network, Source};
 use crate::need::Footprint;
-use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
+use crate::raster::{COLOR_FORMATS, DEPTH_AOV, MOTION, NORMAL_AOV};
 use crate::stats;
 use crate::store::{Moved, Store};
 use crate::target;
@@ -476,6 +476,7 @@ impl Surface {
                     (color, vk::ColorComponentFlags::RGBA),
                     (DEPTH_AOV.0, vk::ColorComponentFlags::empty()),
                     (NORMAL_AOV.0, vk::ColorComponentFlags::empty()),
+                    (MOTION, vk::ColorComponentFlags::empty()),
                 ];
                 gpu::graphics(
                     d,

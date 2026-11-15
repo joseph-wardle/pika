@@ -46,7 +46,7 @@ from pxr import Gf, Usd, UsdGeom, UsdImagingGL, UsdShade
 SIZE = 64
 # How long a material's build may take before the check gives up.
 PATIENCE = 60
-# src/accumulation.rs SAMPLES.
+# src/film.rs SAMPLES.
 SAMPLES = 64
 
 
@@ -78,6 +78,15 @@ def centre(fbo):
     return pixel.red(), pixel.green(), pixel.blue()
 
 
+def framing(stage):
+    """The frustum usdview frames a new stage with."""
+    bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
+    frustum = Gf.Camera().frustum
+    frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
+                        bounds.ComputeAlignedRange().GetSize().GetLength() / 2)
+    return frustum
+
+
 def scene(path):
     """The engine rendering the scene with Pika, its stage and the params
     of its frames, framed as usdview frames a new stage."""
@@ -89,10 +98,7 @@ def scene(path):
         sys.exit("engine: cannot use the Pika renderer plugin")
     engine.SetRenderViewport(Gf.Vec4d(0, 0, SIZE, SIZE))
     engine.SetRendererAov("color")
-    bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
-    frustum = Gf.Camera().frustum
-    frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
-                        bounds.ComputeAlignedRange().GetSize().GetLength() / 2)
+    frustum = framing(stage)
     engine.SetCameraState(frustum.ComputeViewMatrix(), frustum.ComputeProjectionMatrix())
     params = UsdImagingGL.RenderParams()
     params.frame = Usd.TimeCode(1)

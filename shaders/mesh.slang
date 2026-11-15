@@ -7,6 +7,8 @@ struct Varyings
 {
     float4 position : SV_Position;
     float3 normal : NORMAL;
+    // Clip space at the frame before's camera.
+    float4 previous : PREVIOUS;
     nointerpolation uint flip : FLIP;
 };
 
@@ -17,6 +19,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
     Varyings o;
     o.position = p.position;
     o.normal = p.normal;
+    o.previous = transform(view->previous, float4(p.world, 1));
     o.flip = p.flip;
     return o;
 }
@@ -28,6 +31,7 @@ struct Targets
     float4 color : SV_Target0;
     float depth : SV_Target1;
     float4 normal : SV_Target2;
+    float2 motion : SV_Target3;
 };
 
 [shader("fragment")]
@@ -43,5 +47,10 @@ Targets fs(Varyings v, bool front : SV_IsFrontFace)
     // Hydra's depth is OpenGL's window depth, 0 at the near plane.
     t.depth = 1 - v.position.z;
     t.normal = float4(n, 0);
+    // The jitter moved what this pixel's centre sees from where it falls unjittered.
+    float2 now = v.position.xy + view->jitter;
+    float2 was = (v.previous.xy / v.previous.w * 0.5 + 0.5) * float2(view->extent);
+    // Behind the camera before, so off its image: the resolve drops the history.
+    t.motion = v.previous.w > 0 ? was - now : float2(65504);
     return t;
 }

@@ -14,7 +14,8 @@ struct Attachment {
     memory: vk::DeviceMemory,
     bytes: u64,
     view: vk::ImageView,
-    readback: Buffer,
+    /// None for an attachment only the GPU reads.
+    readback: Option<Buffer>,
 }
 
 /// Every handle starts null, so a failed `new` can drop a partly built value.
@@ -33,10 +34,12 @@ pub struct Target {
 }
 
 impl Target {
-    /// `formats` pairs each color format with its bytes per pixel.
+    /// `formats` pairs each read-back color format with its bytes per pixel; the color
+    /// attachments `unread`, which only the GPU reads, follow them.
     pub fn new(
         device: &gpu::Device,
         formats: &[(vk::Format, usize)],
+        unread: &[vk::Format],
         width: u32,
         height: u32,
     ) -> Result<Self, String> {
@@ -51,13 +54,20 @@ impl Target {
             depth_view: vk::ImageView::null(),
             color_bytes: formats.first().map_or(0, |f| f.1 as u64),
         };
-        for &(format, bytes_per_pixel) in formats {
-            let bytes = width as u64 * height as u64 * bytes_per_pixel as u64;
+        let read = formats.iter().map(|&(f, bytes)| (f, Some(bytes)));
+        for (format, bytes_per_pixel) in read.chain(unread.iter().map(|&f| (f, None))) {
             // Uncached host memory reads at a small fraction of cached speed.
             let host = vk::MemoryPropertyFlags::HOST_VISIBLE
                 | vk::MemoryPropertyFlags::HOST_COHERENT
                 | vk::MemoryPropertyFlags::HOST_CACHED;
-            let readback = Buffer::host(device, bytes, vk::BufferUsageFlags::TRANSFER_DST, host)?;
+            let readback = match bytes_per_pixel {
+                Some(b) => {
+                    let bytes = width as u64 * height as u64 * b as u64;
+                    let usage = vk::BufferUsageFlags::TRANSFER_DST;
+                    Some(Buffer::host(device, bytes, usage, host)?)
+                }
+                None => None,
+            };
             let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
                 | vk::ImageUsageFlags::TRANSFER_SRC
                 | vk::ImageUsageFlags::TRANSFER_DST;
@@ -78,17 +88,15 @@ impl Target {
     }
 
     pub fn fits(&self, formats: &[(vk::Format, usize)], width: u32, height: u32) -> bool {
-        let same = self
-            .colors
-            .iter()
-            .map(|a| a.format)
-            .eq(formats.iter().map(|f| f.0));
+        let read = self.colors.iter().filter(|a| a.readback.is_some());
+        let same = read.map(|a| a.format).eq(formats.iter().map(|f| f.0));
         same && (self.width, self.height) == (width, height)
     }
 
     /// Tightly packed rows, safe to read only between the frame's wait and its next submit.
     pub fn pixels(&mut self, index: usize) -> &mut [u8] {
-        self.colors[index].readback.bytes()
+        let readback = self.colors[index].readback.as_mut();
+        readback.expect("only motion has no readback").bytes()
     }
 
     pub fn memory(&self) -> Memory {
@@ -98,12 +106,14 @@ impl Target {
         };
         for a in &self.colors {
             memory.device += a.bytes;
-            memory += a.readback.memory();
+            if let Some(r) = &a.readback {
+                memory += r.memory();
+            }
         }
         memory
     }
 
-    /// Each color is cleared to its value in `clears`, the depth to the far plane.
+    /// Each color is cleared to its value in `clears`, motion to none, the depth to the far plane.
     pub fn begin_rendering(&self, cb: vk::CommandBuffer, clears: &[vk::ClearColorValue]) {
         let d = &self.device;
         let mut barriers: Vec<_> = (self.colors.iter())
@@ -131,7 +141,8 @@ impl Target {
                 .image(self.depth)
                 .subresource_range(DEPTH),
         );
-        let attachments: Vec<_> = (self.colors.iter().zip(clears))
+        let none = vk::ClearColorValue::default();
+        let attachments: Vec<_> = (self.colors.iter().zip(clears.iter().chain([&none])))
             .map(|(a, &color)| {
                 vk::RenderingAttachmentInfo::default()
                     .image_view(a.view)
@@ -374,12 +385,12 @@ impl Target {
     /// Records after `end_rendering`; host-visible once the frame is waited for.
     pub fn readback(&self, cb: vk::CommandBuffer, read: &[bool]) {
         let d = &self.device;
-        let read: Vec<&Attachment> = (self.colors.iter().zip(read))
+        let read: Vec<(&Attachment, &Buffer)> = (self.colors.iter().zip(read))
             .filter(|(_, r)| **r)
-            .map(|(a, _)| a)
+            .filter_map(|(a, _)| Some((a, a.readback.as_ref()?)))
             .collect();
         let to_copy: Vec<_> = (read.iter())
-            .map(|a| {
+            .map(|(a, _)| {
                 vk::ImageMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                     .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
@@ -393,13 +404,13 @@ impl Target {
             .collect();
         // Host-coherent memory still needs this for the copies to be visible to the host.
         let to_host: Vec<_> = (read.iter())
-            .map(|a| {
+            .map(|(_, buffer)| {
                 vk::BufferMemoryBarrier2::default()
                     .src_stage_mask(vk::PipelineStageFlags2::COPY)
                     .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
                     .dst_stage_mask(vk::PipelineStageFlags2::HOST)
                     .dst_access_mask(vk::AccessFlags2::HOST_READ)
-                    .buffer(a.readback.raw)
+                    .buffer(buffer.raw)
                     .size(vk::WHOLE_SIZE)
             })
             .collect();
@@ -423,12 +434,12 @@ impl Target {
                 cb,
                 &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
             );
-            for a in &read {
+            for (a, buffer) in &read {
                 d.cmd_copy_image_to_buffer(
                     cb,
                     a.image,
                     vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                    a.readback.raw,
+                    buffer.raw,
                     &[region],
                 );
             }

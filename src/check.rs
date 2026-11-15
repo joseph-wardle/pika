@@ -61,7 +61,7 @@ pub struct Offscreen<'a> {
 impl<'a> Offscreen<'a> {
     pub fn new(device: &'a gpu::Device<'a>, shader: &Shader) -> Result<Self, String> {
         let commands = Commands::new(device)?;
-        let target = Target::new(device, &[(FORMAT, 4)], SIZE as u32, SIZE as u32)?;
+        let target = Target::new(device, &[(FORMAT, 4)], &[], SIZE as u32, SIZE as u32)?;
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .size(size_of::<Push>() as u32)];
