@@ -1,7 +1,7 @@
 """Pika's image check: renders each scene in hydra/images/ in husk, at
 each time of its time range, and compares its color, depth and normal AOVs
-with a ray cast from USD, one ray through each pixel centre. The reference reads the stage,
-never Pika's store, so the two cannot share a mistake.
+with a ray cast from USD. The reference reads the stage, never Pika's store,
+so the two cannot share a mistake.
 
     hython hydra/image.py <out dir> [usdrecord]
 
@@ -110,10 +110,22 @@ What the reference encodes:
   subdivided mesh's primvar is refined with its points (`texcoord`,
   `weld`). Other materials and spaces are refused, not approximated.
 - Pixels with no hit keep the clear values: color 0, depth 1, normal 0.
+- Depth and normal are those of one ray through each pixel centre, as a
+  still view's sample 0 draws them. Color is Pika's still view converged:
+  the filtered mean over each pixel's neighbourhood (FILTER_RADIUS, as
+  src/accumulation.rs weighs it), the edge pixels standing in past the
+  image's edge. Where a look samples an image (`textured`), colour varies
+  under a pixel, so the reference casts RAYS × RAYS rays a pixel, one
+  through each cell of a grid over it, and filters them; the texture level
+  still follows the pixel's footprint, as Pika's does whatever the jitter.
+  Elsewhere colour varies too slowly under a pixel for the filter to move
+  it, so the ray through the centre stands for the pixel.
 
 Pixels next to a change of face (silhouettes, face boundaries) are not
 compared, since a rasterizer and a ray decide them differently; nor is the
-colour of pixels next to a change of which lights' shadows hold them,
+colour of pixels whose filter meets more than one face or set of shadows
+(`mixed`: a textured scene's rays tell, elsewhere a change within two
+pixels), nor of pixels next to a change of which lights' shadows hold them,
 wholly or in part, or within two of one at a penumbra's end, since a shadow
 map's texels and a ray decide those differently. Elsewhere, coverage must
 agree and values within TOLERANCE, colour also allowed 1/256 of
@@ -173,6 +185,19 @@ RENDERS = 8
 # Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
 # renders, under 32 GB.
 REFERENCES = 16
+# Pika's pixel filter (src/accumulation.rs): EEVEE's Gaussian, its standard deviation
+# FILTER_SIGMA of its radius in pixels, nothing past it.
+FILTER_RADIUS = 1.5
+FILTER_SIGMA = 0.284
+# Rays to a pixel's side in a textured scene's reference: odd, so one passes through the centre.
+RAYS = 3
+# A jump between adjacent rays of a textured scene's colour past which its pixels are not
+# compared: on rewrapped's ramp, whose rays jump by 0.25, their integral strays by 0.003 from
+# one of 9 × 9 rays a pixel, against Pika's 0.001, so the tolerance holds up to about 0.16.
+STEP = 0.1
+# Scenes whose shadows thin below a pixel between the centres, which their references trace
+# as a textured scene's.
+THIN = {"receding"}
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
 # Penumbra pixels' bands of the reference's share of their light, the pixels a band needs to
@@ -184,6 +209,7 @@ BANDS = ((0, 0.1), (0.1, 0.4), (0.4, 0.6), (0.6, 0.9), (0.9, 1))
 BAND_PIXELS = 16
 PENUMBRA = 0.15
 CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "unconverted depth",
+            "unfiltered", "filter of half the radius", "depth and normals off centre",
             "unflipped normals", "flat normals", "instancer transform dropped", "outer instances dropped",
             "orientations misread", "authored normals on subdivided meshes", "holes drawn",
             "face normals averaged", "left-handed corners unswapped", "frame 1's smooth normals",
@@ -1345,19 +1371,129 @@ def frustum(stage, time, width, height, focal, policy):
     return f
 
 
-def reference(stage, time, width, height, host, lowered, lit, control=None):
+def reference(stage, time, width, height, host, lowered, lit, thin, control=None, centre=None, base=None):
+    """The reference image of the stage at `time` (see the module's doc). `centre` is the
+    uncontrolled trace through the pixel centres and `base` the uncontrolled reference: a
+    control whose trace through the centres matches `centre` takes `base`'s filtered colour
+    rather than tracing a textured scene's rays anew. `thin`: the scene is traced as a
+    textured one is (THIN)."""
+    if control is None and centre is not None:
+        image = dict(centre)
+    else:
+        image = trace(stage, time, width, height, 1, host, lowered, lit,
+                      None if control == "depth and normals off centre" else control)
+    if control == "depth and normals off centre":
+        off = trace(stage, time, width, height, 1, host, lowered, lit, control)
+        image["depth"], image["normal"] = off["depth"], off["normal"]
+    radius = FILTER_RADIUS / 2 if control == "filter of half the radius" else FILTER_RADIUS
+    same = base is not None and radius == FILTER_RADIUS and all(
+        np.array_equal(image[k], centre[k]) for k in ("color", "face", "shadow", "bounds", "cell"))
+    traced = (image["textured"] or thin) and control != "unfiltered"
+    if traced and same:
+        for k in ("color", "bounds", "soft", "mixed"):
+            image[k] = base[k]
+        return image
+    if traced:
+        fine = trace(stage, time, width * RAYS, height * RAYS, RAYS, host, lowered, lit, control)
+        filtered(image, fine, radius)
+    elif base is not None and all(np.array_equal(image[k], centre[k]) for k in ("face", "shadow")):
+        image["mixed"] = base["mixed"]
+        image["bounds"] = image["bounds"][image["soft"]]
+        return image
+    else:
+        # The geometry alone, at the textured scenes' rays: a face may end between centres.
+        fine = {"face": coverage(stage, time, width, height, host, control)}
+        image["mixed"] = mixed(fine, image, ("face",))
+    # Pika's shadow edges stray up to a map texel, a pixel, from the rays', and the filter
+    # spreads them further.
+    image["mixed"] |= edges(image["shadow"], 2)
+    # An edge pixel sees a sliver past its outermost rays, and nothing past the image.
+    image["mixed"][[0, -1], :] = True
+    image["mixed"][:, [0, -1]] = True
+    # Bounds only where they differ: the check holds every control's reference for every
+    # frame of every scene at once.
+    image["bounds"] = image["bounds"][image["soft"]]
+    return image
+
+
+def weight(radius, distance2):
+    """Pika's filter's weight at `distance2` pixels squared from a pixel's centre."""
+    r = distance2 / radius ** 2
+    return np.where(r < 1, np.exp(-0.5 * r / FILTER_SIGMA ** 2), 0.0)
+
+
+def windows(a, kernel):
+    """Each of `kernel`'s weights with the rays of `a`, traced RAYS × RAYS a pixel, at its
+    offset from every pixel's centre, the edge pixels' rays repeated past the image's edge."""
+    h, w = a.shape[0] // RAYS, a.shape[1] // RAYS
+    rest = a.shape[2:]
+    cells = a.reshape((h, RAYS, w, RAYS) + rest)
+    cells = np.pad(cells, [(1, 1), (0, 0), (1, 1), (0, 0)] + [(0, 0)] * len(rest), mode="edge")
+    padded = cells.reshape(((h + 2) * RAYS, (w + 2) * RAYS) + rest)
+    for i, j in zip(*np.nonzero(kernel)):
+        yield kernel[i, j], padded[i:i + h * RAYS:RAYS, j:j + w * RAYS:RAYS]
+
+
+def kernel(radius):
+    """The filter's weight at each ray of a pixel and its neighbours each way."""
+    d = (np.arange(3 * RAYS) + 0.5) / RAYS - 1.5
+    return weight(radius, d[:, None] ** 2 + d[None, :] ** 2)
+
+
+def mixed(fine, centre, keys):
+    """Pixels whose `keys` differ from `centre`'s at a ray of `fine` in the pixel or a
+    neighbour: all the filter reaches, and a face may end between rays."""
+    out = np.zeros(centre[keys[0]].shape, bool)
+    for key in keys:
+        for _, v in windows(fine[key], np.ones((3 * RAYS, 3 * RAYS))):
+            out |= v != centre[key]
+    return out
+
+
+def stepped(color):
+    """Pixels whose filter meets two adjacent rays of `color`, traced RAYS × RAYS a pixel,
+    differing by more than STEP: the rays integrate a steep ramp only to within a fraction
+    of its jump."""
+    h, w = color.shape[0] // RAYS, color.shape[1] // RAYS
+    jump = np.zeros(color.shape[:2])
+    across = np.abs(np.diff(color[..., :3], axis=1)).max(axis=-1)
+    down = np.abs(np.diff(color[..., :3], axis=0)).max(axis=-1)
+    jump[:, :-1] = np.maximum(jump[:, :-1], across)
+    jump[:-1] = np.maximum(jump[:-1], down)
+    out = np.zeros((h, w), bool)
+    for _, v in windows(jump > STEP, np.ones((3 * RAYS, 3 * RAYS))):
+        out |= v
+    return out
+
+
+def filtered(image, fine, radius):
+    """Gives `image` the colour, penumbra bounds and penumbra pixels of `fine`, its trace at
+    RAYS × RAYS rays a pixel, filtered by `radius`; marks `mixed` the pixels whose filter
+    meets a ray of another face, set of shadows or st cell than the centre's."""
+    k = kernel(radius)
+    total = k.sum()
+    image["color"] = sum(w * v for w, v in windows(fine["color"], k)) / total
+    image["bounds"] = sum(w * v for w, v in windows(fine["bounds"], k)) / total
+    image["soft"] = np.logical_or.reduce([v for _, v in windows(fine["soft"], k)])
+    image["mixed"] = mixed(fine, image, ("face", "shadow", "cell")) | stepped(fine["color"])
+
+
+# Controls that move the rays, by the fraction of a pixel.
+SHIFTS = {"half a pixel right": 0.5, "depth and normals off centre": 0.25}
+
+
+def lens(control):
+    """The focal length's factor and the window policy under `control`."""
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
-    f = frustum(stage, time, width, height, focal, policy)
-    fixed = host.holds_camera_light != (control == "camera light held as the other host holds it")
-    axis = np.array((frustum(stage, stage.GetStartTimeCode(), width, height, focal, policy) if fixed else f).ComputeViewDirection())
+    return focal, policy
+
+
+def view(stage, time, width, height, host, control):
+    """The camera's frustum at `time`, conformed to a `width` × `height` image, its world to
+    clip matrix, and the triangles drawn."""
+    f = frustum(stage, time, width, height, *lens(control))
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
-    authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
-    # 0 is none, as it is to Pika.
-    cap = (authored.Get() if host.settings and authored else 0) or CAP
-    if lowered and control != "lowering ignored":
-        cap = min(cap, TAIL)
-    eye = np.array(f.position)
     if control == "orientations misread":
         misread_orientations(stage, time)
     tris = triangles(stage, time, host, control)
@@ -1367,7 +1503,43 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
             c = to_clip.Transform(p)
             return f.GetNearFar().Contains(-f.ComputeViewMatrix().Transform(p)[2]) and all(abs(v) <= 1 for v in (c[0], c[1]))
         tris = [t for t in tris if seen(t["centre"])]
-    shift = 0.5 if control == "half a pixel right" else 0.0
+    return f, to_clip, tris
+
+
+def face_ids(tris):
+    """Each triangle's face as a number, the same for every trace of the same triangles."""
+    faces = {}
+    return np.array([faces.setdefault(t["face"], len(faces)) for t in tris])
+
+
+def coverage(stage, time, width, height, host, control=None):
+    """The face each of RAYS × RAYS rays a pixel meets, -1 for none, at RAYS times the
+    image's size."""
+    _, to_clip, tris = view(stage, time, width * RAYS, height * RAYS, host, control)
+    out = np.full((height * RAYS, width * RAYS), -1)
+    if not tris:
+        return out
+    world = np.array([[list(v) for v in t["points"]] for t in tris])
+    nearest, _, _ = cast(to_clip, width * RAYS, height * RAYS, SHIFTS.get(control, 0.0) * RAYS, world)
+    out[nearest >= 0] = face_ids(tris)[nearest[nearest >= 0]]
+    return out
+
+
+def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
+    """The stage at `time` traced through each pixel centre of a `width` × `height` image,
+    `scale` times as fine as the reference's: its texture levels follow the reference's
+    pixels."""
+    f, to_clip, tris = view(stage, time, width, height, host, control)
+    fixed = host.holds_camera_light != (control == "camera light held as the other host holds it")
+    focal, policy = lens(control)
+    axis = np.array((frustum(stage, stage.GetStartTimeCode(), width, height, focal, policy) if fixed else f).ComputeViewDirection())
+    authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
+    # 0 is none, as it is to Pika.
+    cap = (authored.Get() if host.settings and authored else 0) or CAP
+    if lowered and control != "lowering ignored":
+        cap = min(cap, TAIL)
+    eye = np.array(f.position)
+    shift = SHIFTS.get(control, 0.0) * scale
 
     image = {
         "color": np.zeros((height, width, 4)),
@@ -1379,7 +1551,10 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
         # wholly shadowed and wholly lit: kept only there, since the check holds every control's
         # reference for every frame of every scene at once.
         "soft": np.zeros((height, width), bool),
-        "bounds": np.zeros((0, 2, 3)),
+        "bounds": np.zeros((height, width, 2, 3)),
+        # Per pixel, the step of its look's image it lies in (`sampled`), 0 for none.
+        "cell": np.zeros((height, width), np.int64),
+        "textured": False,
     }
     if not tris:
         return image
@@ -1394,7 +1569,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
             casting = np.concatenate([world, np.array([[list(v) for v in o["points"]] for o in moved])])
             faces = faces + [o["face"][0] for o in moved]
     nearest, p, bary = cast(to_clip, width, height, shift, world)
-    around = footprint(to_clip, width, height, shift, world, nearest)
+    around = footprint(to_clip, width, height, shift, world, nearest, scale)
     hit = nearest >= 0
     i = nearest[hit]
     p, bary = p[hit], bary[hit]
@@ -1417,6 +1592,7 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
     looks = [t["look"] for t in tris]
+    image["textured"] = any(l.image or l.normal for l in looks)
 
     def sampled(field):
         """Each hit's sample of its look's `field` image at its st, 0 where
@@ -1430,8 +1606,16 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
             at = np.einsum("nc,ncj->nj", bary[on], st)
             step = np.einsum("nkc,ncj->nkj", around[on], st) - at[:, None]
             out[on] = sample(path, at, step, modes, space, cap, control)
+            # A sample steps where st crosses into another UDIM tile, or across an image's edge
+            # into a black border; elsewhere it is continuous.
+            cell = np.floor(at).astype(np.int64)
+            for axis, mode in enumerate(modes):
+                if mode != "black" and "<UDIM>" not in path:
+                    cell[:, axis] = 0
+            cells[np.flatnonzero(on)] = cell[:, 0] * 65536 + cell[:, 1]
         return out, which >= 0
 
+    cells = np.zeros(len(p), np.int64)
     # A normal map perturbs the normal before it is turned toward the eye.
     value, mapped = sampled("normal")
     if mapped.any() and control != "normal map ignored":
@@ -1478,21 +1662,20 @@ def reference(stage, time, width, height, host, lowered, lit, control=None):
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
     if control == "unconverted depth":
         depth = 1 - depth
-    faces = {}
-    face = np.array([faces.setdefault(t["face"], len(faces)) for t in tris])
+    face = face_ids(tris)
     image["color"][hit] = color
+    image["cell"][hit] = cells
     image["depth"][hit] = depth
     image["normal"][hit] = n
     image["face"][hit] = face[i]
     image["shadow"][hit] = shadow
-    bounds = np.zeros((height, width, 2, 3))
+    bounds = image["bounds"]
     bounds[hit] = np.stack([albedo * low + emitted, albedo * high + emitted], 1)
     image["soft"][hit] = (high > low).any(axis=1)
-    image["bounds"] = bounds[image["soft"]]
     if control == "penumbrae wholly shadowed":
         # Their bounds meet, which leaves no share to compare: only the bounds can fail.
-        image["color"][image["soft"], :3] = image["bounds"][:, 0]
-        image["bounds"][:, 1] = image["bounds"][:, 0]
+        image["color"][..., :3] = np.where(image["soft"][..., None], bounds[..., 0, :], image["color"][..., :3])
+        bounds[..., 1, :] = bounds[..., 0, :]
     return image
 
 
@@ -1551,10 +1734,10 @@ def cast(to_clip, width, height, shift, tris):
     return nearest, point, bary
 
 
-def footprint(to_clip, width, height, shift, tris, nearest):
+def footprint(to_clip, width, height, shift, tris, nearest, scale):
     """For each pixel `cast` hit, in image order: the barycentric
-    coordinates, on its own triangle's plane, of the ray through the next
-    pixel's centre to the right and of the one below, (hits, 2, 3). A
+    coordinates, on its own triangle's plane, of the ray `scale` pixels to
+    the right and of the one `scale` below, (hits, 2, 3). A
     texture's level follows from the st between a pixel and its neighbours,
     as the GPU differences its interpolated st across a pixel quad (see
     the module's doc)."""
@@ -1563,7 +1746,7 @@ def footprint(to_clip, width, height, shift, tris, nearest):
     unproject = np.linalg.inv(np.array(to_clip))
     out = np.zeros((len(x), 2, 3))
     for k, (dx, dy) in enumerate(((1, 0), (0, 1))):
-        o, d = rays(unproject, width, height, x + 0.5 + shift + dx, y + 0.5 + dy)
+        o, d = rays(unproject, width, height, x + 0.5 + shift + dx * scale, y + 0.5 + dy * scale)
         u, v, _, _ = intersect(o, d, tris[i, 0], tris[i, 1] - tris[i, 0], tris[i, 2] - tris[i, 0])
         out[:, k] = np.c_[1 - u - v, u, v]
     return out
@@ -1601,11 +1784,13 @@ def edges(face, reach=1):
     return out
 
 
-def compare(image, ref, aovs):
-    """Why `image` does not match `ref`, or an empty list."""
+def compare(image, ref, aovs, trusted=None):
+    """Why `image` does not match `ref`, or an empty list, over the pixels `trusted` (`ref`
+    by default) compares: a control is caught where the uncontrolled reference is compared."""
+    trusted = ref if trusted is None else trusted
     problems = []
     covered = ref["face"] >= 0
-    edge = edges(ref["face"])
+    edge = edges(trusted["face"])
     drawn = image["color"][..., 3] > 0.5
     stray = (drawn != covered) & ~edge
     if stray.any():
@@ -1613,8 +1798,8 @@ def compare(image, ref, aovs):
     inner = covered & drawn & ~edge
     # Each of a still frame's samples rounds to a map texel, so a penumbra's ends stray a pixel
     # further than one ray's.
-    shadow = edges(ref["shadow"]) | (edges(ref["shadow"], 2) & edges(ref["soft"], 2))
-    lit = inner & ~shadow & ~ref["soft"]
+    shadow = edges(trusted["shadow"]) | (edges(trusted["shadow"], 2) & edges(trusted["soft"], 2))
+    lit = inner & ~shadow & ~ref["soft"] & ~trusted["mixed"]
     for aov in aovs:
         error = np.abs(image[aov][..., :4] - ref[aov][..., :4] if aov == "color" else image[aov] - ref[aov])
         allowed = TOLERANCE[aov]
@@ -1742,9 +1927,15 @@ def references(scene, width, height, host):
     `scene`: a path, which a process pool can be handed."""
     stage = Usd.Stage.Open(scene)
     name = os.path.splitext(os.path.basename(scene))[0]
-    lowered, lit = name in BUDGET, name in CAMERA_LIT
-    controls = [None] + [c for c in CONTROLS if c != "frame 1's reference"]
-    return {t: {c: reference(stage, t, width, height, host, lowered, lit, c) for c in controls} for t in times(stage)}
+    lowered, lit, thin = name in BUDGET, name in CAMERA_LIT, name in THIN
+    controls = [c for c in CONTROLS if c != "frame 1's reference"]
+    out = {}
+    for t in times(stage):
+        centre = trace(stage, t, width, height, 1, host, lowered, lit)
+        base = reference(stage, t, width, height, host, lowered, lit, thin, None, centre)
+        out[t] = {None: base} | {c: reference(stage, t, width, height, host, lowered, lit, thin, c, centre, base)
+                                 for c in controls}
+    return out
 
 
 def differs(stage, host):
@@ -1798,7 +1989,7 @@ def check(name, renders, references, aovs):
         if not compare(perturbed, references[t][None], aovs):
             continue
         changed.add(control)
-        caught = bool(compare(renders[t], perturbed, aovs))
+        caught = bool(compare(renders[t], perturbed, aovs, references[t][None]))
         print(f"  control '{control}': {'fails, as it must' if caught else 'PASSES'}")
         if not caught:
             failures.append(f"{name}: the control '{control}' passes")

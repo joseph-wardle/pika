@@ -346,6 +346,8 @@ impl Renderer {
             self.accumulation.drawn = 0;
         }
         let sample = self.accumulation.drawn;
+        // Texture needs above take the unjittered camera: jitter moves a pixel by under one.
+        let camera = camera.jittered(accumulation::jitter(sample), [w, h]);
         let bound = self.geometry.bound();
         // A headlight is the host's to send, so a store holding no light draws black.
         let links = Links::new(&self.store);
@@ -382,7 +384,6 @@ impl Renderer {
                 &casters,
             )?;
         }
-        self.accumulation.wanted = accumulation::samples(&lights);
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
         let mut view = match (&bound, &mut self.view) {
@@ -445,7 +446,9 @@ impl Renderer {
             self.accumulation.record(&self.device, cb, target)?;
         }
         self.commands.mark("accumulate")?;
-        let read = aovs.each_ref().map(Option::is_some);
+        // A still view's depth and normal are its sample 0's, at the pixels' centres, as
+        // EEVEE's data passes keep the sample nearest; the host's buffers hold them after.
+        let read = [0, 1, 2].map(|i| aovs[i].is_some() && (i == 0 || sample == 0));
         target.readback(cb, &read);
         self.commands.mark("readback")?;
         self.commands.submit()?;
@@ -500,18 +503,20 @@ impl Renderer {
         let fits = pending.buffers == *buffers;
         if fits {
             for (i, aov) in aovs.iter_mut().enumerate() {
-                if let Some(aov) = aov {
-                    let (width, height) = (buffers.width, buffers.height);
-                    let window = [x, y, w, h];
-                    place(
-                        target.pixels(i),
-                        pending.formats[i].1,
-                        aov,
-                        width,
-                        height,
-                        window,
-                    );
-                }
+                // An AOV not read back keeps what the buffer holds.
+                let Some(aov) = aov.as_mut().filter(|_| pending.read[i]) else {
+                    continue;
+                };
+                let (width, height) = (buffers.width, buffers.height);
+                let window = [x, y, w, h];
+                place(
+                    target.pixels(i),
+                    pending.formats[i].1,
+                    aov,
+                    width,
+                    height,
+                    window,
+                );
             }
         }
         let place = placing.elapsed();
