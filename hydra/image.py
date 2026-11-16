@@ -91,7 +91,8 @@ What the reference encodes:
   unit along its axis. A hit whose rays toward the light's centre and edge
   (the corners and the sides' midpoints, or 8 points round the disk)
   agree takes their answer alone. A scene in POOLED marks more pages than its
-  pool, whose dropped levels must keep their texels under a pixel. Other
+  pool, whose dropped levels must keep their texels under a pixel; one in
+  REPEATED must draw the same twice, bit for bit. Other
   light types are refused.
   `look` says which materials have a closed form: clay (none bound), pink
   (a nodedef the libraries lack, when the host delivers it), a
@@ -180,6 +181,10 @@ POOLED = {"receding": 1}
 # the moving casters' pages a live copy; lamps' lights move and its casters stay, so, the
 # control, it must give none a live copy.
 CACHED = {"moving": True, "lamps": False}
+# Scenes husk must draw the same twice, bit for bit: receding's jittered samples mark more
+# pages than dropping a LOD frees, so the pool cuts a level, and which of its tiles keep pages
+# must not follow the GPU's thread order.
+REPEATED = {"receding"}
 # Each render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
 # Each reference process holds up to 1.4 GB (Houdini 22's hython): 16 keep a check, with its
@@ -1909,6 +1914,20 @@ def cached(frames, name):
     return []
 
 
+def repeated(name, renders, again):
+    """Failures unless husk's second render, `again`, matches `renders` bit for bit. The
+    control is its last frame against the first render's first, which must differ."""
+    def same(a, b):
+        return all(np.array_equal(a[aov], b[aov]) for aov in a)
+    failures = [f"{name} frame {t}: drawn again, the image differs" for t in sorted(renders)
+                if not same(renders[t], again[t])]
+    first, last = min(renders), max(renders)
+    if same(renders[first], again[last]):
+        failures.append(f"{name}: the control failed: frames {first} and {last} are the same")
+    print(f"  drawn again: {'the same bit for bit' if not failures else 'differs'}")
+    return failures
+
+
 def usdrecord(scene, out, width, times):
     name = os.path.splitext(os.path.basename(scene))[0]
     log = os.path.join(out, f"{name}.usdrecord.log")
@@ -2009,6 +2028,10 @@ def main():
         # The pool forks before the render threads start.
         refs = {s: compute.submit(references, s, *sizes[s], HUSK) for s in scenes}
         husks = {s: render.submit(husk, s, out, times(stages[s])) for s in scenes}
+        again = os.path.join(out, "again")
+        os.makedirs(again, exist_ok=True)
+        agains = {s: render.submit(husk, s, again, times(stages[s])) for s in scenes
+                  if os.path.basename(s)[:-5] in REPEATED}
         records = {s: render.submit(usdrecord, s, out, sizes[s][0], times(stages[s])) for s in scenes} if record else {}
         recorded = {}
         for s, job in records.items():
@@ -2027,6 +2050,8 @@ def main():
             failures += f + warned(log, name, CAPPED.get(name, 0), budget_warnings(name), POOLED.get(name, 0))
             frames = stats(log.replace(".husk.log", ".husk.stats"))
             failures += blurred(frames, name) + cached(frames, name)
+            if s in agains:
+                failures += repeated(name, renders, agains[s].result()[0])
             changed |= c
             if s not in records:
                 continue

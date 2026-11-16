@@ -150,8 +150,8 @@ struct State {
     marked: [u32; (LEVELS * LEVELS) as usize],
     parents: [u32; (LEVELS * LEVELS) as usize],
     both: [u32; LEVELS as usize],
-    next: [u32; LEVELS as usize],
-    base: [u32; LEVELS as usize],
+    ranked: u32,
+    room: u32,
 }
 
 #[repr(C)]
@@ -266,6 +266,7 @@ pub struct Shadows {
     choose: gpu::Compute,
     assign: gpu::Compute,
     release: gpu::Compute,
+    rank: gpu::Compute,
     gather: gpu::Compute,
     moving: gpu::Compute,
     remember: gpu::Compute,
@@ -328,6 +329,7 @@ impl Shadows {
             choose: compute(c"choose")?,
             assign: compute(c"assign")?,
             release: compute(c"release")?,
+            rank: compute(c"rank")?,
             gather: compute(c"gather")?,
             moving: compute(c"moving")?,
             remember: compute(c"remember")?,
@@ -721,10 +723,13 @@ impl Shadows {
         barrier(d, cb, computed);
         self.count.record(cb, std::slice::from_ref(&entries), push);
         barrier(d, cb, computed);
-        self.choose.record(cb, &[thread], push);
+        self.choose.record(cb, std::slice::from_ref(&thread), push);
         barrier(d, cb, computed);
         self.release
             .record(cb, std::slice::from_ref(&entries), push);
+        barrier(d, cb, computed);
+        // A single item is one group, which rank needs whole.
+        self.rank.record(cb, &[thread], push);
         barrier(d, cb, computed);
         self.gather.record(cb, &[pool_pages], push);
         barrier(d, cb, computed);
