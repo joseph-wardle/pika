@@ -203,6 +203,12 @@ class Generator : public mx::SlangShaderGenerator {
 void generate(std::string const &path, std::string const &out) {
     mx::DocumentPtr libraries = mx::createDocument();
     mx::loadLibraries({"libraries"}, mx::FileSearchPath(materialx), libraries);
+    for (char const *name : {"IM_normalmap_float_genglsl", "IM_normalmap_vector2_genglsl"}) {
+        mx::ImplementationPtr impl = libraries->getImplementation(name);
+        if (!impl)
+            throw std::runtime_error(std::string("Houdini's MaterialX libraries have no ") + name);
+        impl->setFile(bake + "/libraries/stdlib/genglsl/mx_normalmap.glsl");
+    }
     mx::DocumentPtr doc = mx::createDocument();
     mx::readFromXmlFile(doc, path);
     doc->importLibrary(libraries);

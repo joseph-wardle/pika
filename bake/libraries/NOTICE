@@ -1,7 +1,9 @@
-stdlib/genslang/lib/mx_texture.slang is modified from the file of that path
-in MaterialX 1.39.5 (https://github.com/AcademySoftwareFoundation/MaterialX,
-Copyright Contributors to the MaterialX Project), under the Apache License
-2.0 (LICENSE here, the project's). The upstream file carries no notice of
-its own. The file's header says how it differs; the generate tool registers
-this directory's parent as a source search path, so it shadows Houdini's
-copy of the same path.
+stdlib/genslang/lib/mx_texture.slang and stdlib/genglsl/mx_normalmap.glsl
+are each modified from the file of that path in MaterialX 1.39.5
+(https://github.com/AcademySoftwareFoundation/MaterialX, Copyright
+Contributors to the MaterialX Project), under the Apache License 2.0
+(LICENSE here, the project's). The upstream files carry no notice of their
+own. Each file's header says how it differs; the generate tool registers
+this directory's parent as a source search path, so mx_texture.slang
+shadows Houdini's copy of the same path, and names mx_normalmap.glsl as its
+nodes' source file.

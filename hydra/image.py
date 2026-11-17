@@ -239,7 +239,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "sRGB read as raw", "8-bit auto read as raw", "8-bit data read as sRGB", "ACEScg primaries kept",
             "UDIM tiles read as one image", "UDIM rows one tile wide", "missing UDIM tiles read as 1001",
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
-            "the cap ignored", "lowering ignored", "missing file's fallback ignored", "constant nodes at their default",
+            "the cap ignored", "lowering ignored", "missing file's fallback ignored", "a zero mapped normal left unlit",
+            "constant nodes at their default",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -670,13 +671,18 @@ def preview(surface, time, control=None):
     diffuseColor, emission emissiveColor, a value or the rgb a UsdUVTexture
     samples, or its fallback when its file does not resolve, as Storm draws
     it (hydra/images/fallback.usda), under the specular workflow with a
-    black specularColor, since the rest has no closed form. MaterialX layers
+    black specularColor, since the rest has no closed form. Its normal may
+    be such a texture's rgb where no file resolves and the fallback is the
+    zero vector, which has no direction and leaves the normal as it is, as
+    a normal map's missing UDIM tile does. MaterialX layers
     a Schlick lobe with F90 white over the diffuse, which only grazing
     angles show, so the form holds within 30° of facing."""
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
-    extra = sorted(set(authored) - {"diffuseColor", "emissiveColor", "useSpecularWorkflow", "specularColor"})
-    connected = [n for n, i in authored.items() if i.HasConnectedSource() and n != "emissiveColor"]
+    extra = sorted(set(authored) - {"diffuseColor", "emissiveColor", "useSpecularWorkflow", "specularColor",
+                                    "normal"})
+    connected = [n for n, i in authored.items()
+                 if i.HasConnectedSource() and n not in ("emissiveColor", "normal")]
     if extra or connected:
         raise ValueError(f"{path}: the reference lights a UsdPreviewSurface's diffuseColor and emissiveColor "
                          f"as values; it has no closed form for {extra or connected}")
@@ -691,6 +697,16 @@ def preview(surface, time, control=None):
     if value("useSpecularWorkflow") != 1 or value("specularColor") != (0.0, 0.0, 0.0):
         raise ValueError(f"{path}: the reference has no closed form for a UsdPreviewSurface's specular lobe; "
                          "set useSpecularWorkflow to 1 and specularColor to black")
+    albedo = value("diffuseColor")
+    if "normal" in authored:
+        node = upstream(surface, "normal")
+        source = node and sampled(node, "rgb", time, control)
+        fallback = node and node.GetInput("fallback")
+        if not source or source[0] or (fallback and tuple(fallback.Get(time))[:3] != (0.0, 0.0, 0.0)):
+            raise ValueError(f"{path}: the reference maps a UsdPreviewSurface's normal only by a UsdUVTexture "
+                             "whose file does not resolve and whose fallback is the zero vector")
+        if control == "a zero mapped normal left unlit":
+            albedo = (0.0,) * 3
     image, emission = None, value("emissiveColor")
     if "emissiveColor" in authored and authored["emissiveColor"].HasConnectedSource():
         node = upstream(surface, "emissiveColor")
@@ -704,7 +720,7 @@ def preview(surface, time, control=None):
             if fallback and control != "missing file's fallback ignored":
                 emission = tuple(fallback.Get(time))[:3]
             image = None
-    return Look(value("diffuseColor"), emission, image, None, 30)
+    return Look(albedo, emission, image, None, 30)
 
 
 def look(prim, host, time, control=None):
@@ -1810,7 +1826,8 @@ def compare(image, ref, aovs, trusted=None):
         allowed = TOLERANCE[aov]
         if aov == "color":
             allowed = allowed + np.abs(ref[aov][..., :4]) / 256
-        over = error > allowed
+        # A NaN is over: it is not within any tolerance, and not greater than one either.
+        over = ~(error <= allowed)
         over = over.reshape(over.shape[:2] + (-1,)).any(-1) & (lit if aov == "color" else inner)
         if over.any():
             slack = " plus 1/256 of the value" if aov == "color" else ""
