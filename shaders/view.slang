@@ -256,6 +256,8 @@ struct View
     uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
+    // The instances as the frame before drew them (src/geometry.rs Draws).
+    float4 *previous_instances;
     uint *owners;
     // Per record: the low corner of its mesh's box, then the high one.
     float *boxes;

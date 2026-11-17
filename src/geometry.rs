@@ -153,6 +153,10 @@ pub struct Group {
 
 struct Draws {
     instances: Buffer,
+    /// `instances` as the frame before drew them, which motion is measured from.
+    previous: Buffer,
+    /// `previous` differs from `instances`.
+    moving: bool,
     owners: Buffer,
     boxes: Buffer,
     records: Buffer,
@@ -180,6 +184,7 @@ pub struct Bound {
     pub vertex_texcoord: vk::DeviceAddress,
     pub tangents: vk::DeviceAddress,
     pub instances: vk::DeviceAddress,
+    pub previous_instances: vk::DeviceAddress,
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
@@ -257,7 +262,16 @@ impl Geometry {
         if patched.is_none() {
             rewrite(device, store, layout, tags, &mut self.draws)?;
         }
-        let draws = self.draws.as_ref().expect("rewritten above");
+        let draws = self.draws.as_mut().expect("rewritten above");
+        // An instance that stops has still moved since the frame before, which `previous` holds
+        // until the frame after.
+        if let Some(p) = &patched {
+            if draws.moving || !p.instances.is_empty() {
+                remember(device, commands.buffer(), draws);
+            }
+            draws.moving = !p.instances.is_empty();
+        }
+        let draws = &*draws;
 
         let mut copies = Vec::new();
         if let Some(t) = &tables {
@@ -376,6 +390,7 @@ impl Geometry {
             vertex_texcoord: layout.vertex_texcoord.address,
             tangents: layout.tangents.address,
             instances: draws.instances.address,
+            previous_instances: draws.previous.address,
             owners: draws.owners.address,
             boxes: draws.boxes.address,
             indices: layout.indices.raw,
@@ -488,8 +503,8 @@ impl Geometry {
                 &l.indices,
             ]
         });
-        let draws =
-            (self.draws.iter()).flat_map(|d| [&d.instances, &d.owners, &d.boxes, &d.records]);
+        let draws = (self.draws.iter())
+            .flat_map(|d| [&d.instances, &d.previous, &d.owners, &d.boxes, &d.records]);
         let mut memory = gpu::Memory::default();
         for b in layout.chain(draws).chain(&self.staging) {
             memory += b.memory();
@@ -1408,7 +1423,9 @@ fn rewrite(
             let storage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
             let copied = vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST;
             Draws {
-                instances: Buffer::device_local(device, size(&t.instances), storage)?,
+                instances: Buffer::device_local(device, size(&t.instances), storage | copied)?,
+                previous: Buffer::device_local(device, size(&t.instances), storage)?,
+                moving: false,
                 owners: Buffer::device_local(device, size(&t.owners), storage)?,
                 boxes: Buffer::device_local(device, size(&t.boxes), storage)?,
                 records: Buffer::device_local(device, size(&t.records), storage | copied)?,
@@ -1420,19 +1437,49 @@ fn rewrite(
     *slot = Some(Draws {
         tables: t,
         tags: tags.to_vec(),
+        moving: false,
         ..draws
     });
     Ok(())
 }
 
-fn draw_uploads(d: &Draws) -> [Upload<'_>; 4] {
+/// Rewritten draws renumber the instances, so none can be matched with the frame before's:
+/// each is drawn as if it had not moved, as EEVEE draws an object it cannot match.
+fn draw_uploads(d: &Draws) -> [Upload<'_>; 5] {
     let t = &d.tables;
     [
         Upload::table(bytes(&t.instances), &d.instances),
+        Upload::table(bytes(&t.instances), &d.previous),
         Upload::table(bytes(&t.owners), &d.owners),
         Upload::table(bytes(&t.boxes), &d.boxes),
         Upload::table(bytes(&t.records), &d.records),
     ]
+}
+
+/// Copies the instances the frame before drew into `previous`, before this frame's patch
+/// writes over them.
+fn remember(device: &gpu::Device, cb: vk::CommandBuffer, d: &Draws) {
+    let region = vk::BufferCopy {
+        src_offset: 0,
+        dst_offset: 0,
+        size: size(&d.tables.instances),
+    };
+    let copied = vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY | vk::PipelineStageFlags2::VERTEX_SHADER)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_STORAGE_READ);
+    // SAFETY: `cb` records outside rendering; both buffers are `device`'s and hold the tables,
+    // which a patch never grows. Vulkan has no empty copies.
+    unsafe {
+        if region.size > 0 {
+            (device.raw).cmd_copy_buffer(cb, d.instances.raw, d.previous.raw, &[region]);
+        }
+        (device.raw).cmd_pipeline_barrier2(
+            cb,
+            &vk::DependencyInfo::default().memory_barriers(&[copied]),
+        );
+    }
 }
 
 struct Patch {

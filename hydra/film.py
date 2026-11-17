@@ -1,7 +1,7 @@
 """Checks Pika's film while frames change, through UsdImagingGL as
 hydra/engine.py drives it: that history follows a panning camera, that a
 light's change shows through it, and that a converged still is the same
-whatever came before it.
+whatever came before it, and that history follows objects moving under a still camera.
 
     hython hydra/film.py <panned.usda>
 
@@ -16,6 +16,10 @@ new session's first, which has no history:
 - Panning by STEP pixels a frame, each frame once history has built up must
   be within its bound. The control is the still a frame behind, what
   ghosting shows, which must not be.
+- Sliding the bars and the floor together by STEP pixels a frame under a still camera,
+  likewise: their history must follow their own motion, which the camera's does not show.
+  The sun casts no shadow there: shadow texels are fixed in the light's space, so a caster
+  moving across them changes its shadow each frame, with no motion to follow, in EEVEE as here.
 - Halving the sun's intensity with the camera held, each frame once LIT
   have passed must be within the bound at the new light. The control is the
   old still, which must not be.
@@ -27,7 +31,7 @@ new session's first, which has no history:
 
 import sys
 
-from pxr import Gf, Usd, UsdLux
+from pxr import Gf, Usd, UsdGeom, UsdLux
 
 # Importing the check would leave a __pycache__ in the checkout.
 sys.dont_write_bytecode = True
@@ -51,15 +55,40 @@ def error(a, b):
     return total / (3 * len(a))
 
 
+def shift(frustum, right):
+    """The view-space x that moves the scene's centre `right` pixels across the frustum's image."""
+    depth = -frustum.ComputeViewMatrix().Transform(frustum.ComputeLookAtPoint())[2]
+    # A pixel is 2 / SIZE in normalized device x, which is P[0][0] x / -z.
+    return right * 2 / SIZE * depth / frustum.ComputeProjectionMatrix()[0][0]
+
+
 def camera(stage, right):
     """The framing camera's view and projection, moved `right` pixels at the scene's centre."""
     frustum = framing(stage)
-    view = frustum.ComputeViewMatrix()
-    projection = frustum.ComputeProjectionMatrix()
-    depth = -view.Transform(frustum.ComputeLookAtPoint())[2]
-    # A pixel is 2 / SIZE in normalized device x, which is P[0][0] x / -z.
-    shift = right * 2 / SIZE * depth / projection[0][0]
-    return view * Gf.Matrix4d().SetTranslate(Gf.Vec3d(-shift, 0, 0)), projection
+    moved = Gf.Matrix4d().SetTranslate(Gf.Vec3d(-shift(frustum, right), 0, 0))
+    return frustum.ComputeViewMatrix() * moved, frustum.ComputeProjectionMatrix()
+
+
+def offset(stage, right):
+    """The world offset that moves the scene's centre `right` pixels across the framing camera."""
+    frustum = framing(stage)
+    return frustum.ComputeViewMatrix().GetInverse().TransformDir(Gf.Vec3d(shift(frustum, right), 0, 0))
+
+
+def place(stage, offset):
+    """Moves the bars and the floor in the stage's session layer, as `halve` edits the sun."""
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for path in ("/world/bars", "/world/floor"):
+            mesh = UsdGeom.Xformable(stage.GetPrimAtPath(path))
+            ops = mesh.GetOrderedXformOps()
+            (ops[0] if ops else mesh.AddTranslateOp()).Set(offset)
+
+
+def unshadow(stage):
+    """Turns the sun's shadow off in the stage's session layer."""
+    sun = stage.GetPrimAtPath("/world/sun")
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        UsdLux.ShadowAPI.Apply(sun).CreateShadowEnableAttr(False)
 
 
 def converged(engine, stage, params, fbo, state):
@@ -101,6 +130,40 @@ def pan(path, fbo):
         if behind < bound:
             sys.exit(f"film: the control failed: the still a frame behind is {behind:.2f} from frame {t}'s, within {bound:.2f}")
         print(f"film: panning, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
+
+
+def slide(path, fbo):
+    engine, stage, params = scene(path)
+    reference, reference_stage, _ = scene(path)
+    unshadow(stage)
+    unshadow(reference_stage)
+    state = camera(stage, 0)
+    places = [offset(stage, STEP * (t - FRAMES / 2)) for t in range(FRAMES)]
+    stills = []
+    for p in places:
+        place(reference_stage, p)
+        stills.append(converged(reference, reference_stage, params, fbo, state))
+    place(stage, places[0])
+    converged(engine, stage, params, fbo, state)
+    shown = {}
+    for t in range(1, FRAMES):
+        place(stage, places[t])
+        engine.Render(stage.GetPseudoRoot(), params)
+        if t >= 2:
+            shown[t - 1] = pixels(fbo)
+    for t in range(WARM, FRAMES - 1):
+
+        def moved(s):
+            unshadow(s)
+            place(s, places[t])
+
+        bound = error(alone(path, fbo, state, moved), stills[t])
+        drawn, behind = error(shown[t], stills[t]), error(stills[t - 1], stills[t])
+        if not drawn < bound:
+            sys.exit(f"film: sliding, frame {t} is {drawn:.2f} from its still, not within a frame alone's {bound:.2f}")
+        if behind < bound:
+            sys.exit(f"film: the control failed: the still a frame behind is {behind:.2f} from frame {t}'s, within {bound:.2f}")
+        print(f"film: sliding, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
 
 
 def halve(stage):
@@ -154,6 +217,7 @@ def main(panned):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     pan(panned, fbo)
+    slide(panned, fbo)
     light(panned, fbo)
     path_independence(panned, fbo)
 
