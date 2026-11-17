@@ -32,8 +32,10 @@ const PLAYING_SAMPLES: u32 = 8;
 /// ones: more than history's blend keeps, so each pixel's history averages a penumbra's rays.
 const PLAYING_PATTERNS: u32 = 32;
 
-/// How many still samples the image the view stopped at first counts as. A hypothesis until
-/// recordings of stopping a pan choose it.
+/// How many still samples the image the view stopped at first counts as. Stopping ALab's
+/// trailer camera chose it: at 1 the first still frame jumps nearly twice as far from the image
+/// stopped at for little less error, and at 16 the still keeps that image's error half again
+/// as long.
 const PRIOR: f64 = 4.0;
 
 pub struct Film {
