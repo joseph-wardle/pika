@@ -257,6 +257,8 @@ struct View
     float4 *instances;
     // The instances as the frame before drew them (src/geometry.rs Draws).
     float4 *previous_instances;
+    // The points as the frame before drew them (src/geometry.rs Layout).
+    float *previous_points;
     uint *owners;
     // Per record: the low corner of its mesh's box, then the high one.
     float *boxes;

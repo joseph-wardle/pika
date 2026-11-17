@@ -7,16 +7,16 @@ struct Varyings
 {
     float4 position : SV_Position;
     float3 normal : NORMAL;
-    // Clip space at the frame before's camera and transform.
+    // Clip space at the frame before's camera, transform and point.
     float4 previous : PREVIOUS;
     nointerpolation uint flip : FLIP;
 };
 
-// Where the vertex was at the frame before: rigid motion only, so its points are this frame's.
+// Where the vertex was at the frame before, by its point and its instance's transform then.
 float3 previous_world(uint vertex, uint slot)
 {
     float4 *m = view->previous_instances + 7 * view->visible[slot];
-    float4 p = float4(load3(view->points, view->vertices[vertex].x), 1);
+    float4 p = float4(load3(view->previous_points, view->vertices[vertex].x), 1);
     return float3(dot(m[0], p), dot(m[1], p), dot(m[2], p));
 }
 

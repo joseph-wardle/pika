@@ -1,8 +1,8 @@
 """Checks Pika's film while frames change, through UsdImagingGL as
 hydra/engine.py drives it: that history follows a panning camera, that a
 light's change shows through it, that a converged still is the same
-whatever came before it, that history follows objects moving under a still camera,
-and that it averages a soft shadow's rays while something else moves.
+whatever came before it, that history follows objects moving under a still camera
+by their transforms or by their points, and that it averages a soft shadow's rays while something else moves.
 
     hython hydra/film.py <panned.usda> <penumbra.usda>
 
@@ -21,6 +21,8 @@ new session's first, which has no history:
   likewise: their history must follow their own motion, which the camera's does not show.
   The sun casts no shadow there: shadow texels are fixed in the light's space, so a caster
   moving across them changes its shadow each frame, with no motion to follow, in EEVEE as here.
+- Sliding them by their points instead, the bars refined and the floor not, likewise: a
+  cached character moves so, its transform still.
 - Playing penumbra.usda with the camera still while a quad under its floor moves, the
   frames once history has built up must on average be within the error of HELD still
   samples over the penumbrae: the shadow pattern cycles while anything changes, so history
@@ -101,6 +103,17 @@ def place(stage, offset):
             (ops[0] if ops else mesh.AddTranslateOp()).Set(offset)
 
 
+def bend(stage, offset):
+    """Moves the bars and the floor by their points, their transforms still, and has the bars
+    refined: bilinearly, which leaves their shape."""
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        UsdGeom.Mesh(stage.GetPrimAtPath("/world/bars")).GetSubdivisionSchemeAttr().Set("bilinear")
+        for path in ("/world/bars", "/world/floor"):
+            authored = stage.GetRootLayer().GetAttributeAtPath(path + ".points").default
+            points = [p + Gf.Vec3f(offset) for p in authored]
+            UsdGeom.Mesh(stage.GetPrimAtPath(path)).GetPointsAttr().Set(points)
+
+
 def unshadow(stage):
     """Turns the sun's shadow off in the stage's session layer."""
     sun = stage.GetPrimAtPath("/world/sun")
@@ -149,7 +162,8 @@ def pan(path, fbo):
         print(f"film: panning, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
 
 
-def slide(path, fbo):
+def slide(path, fbo, move, sliding):
+    """`move` moves the bars and the floor (`place` or `bend`); `sliding` names it."""
     engine, stage, params = scene(path)
     reference, reference_stage, _ = scene(path)
     unshadow(stage)
@@ -158,13 +172,13 @@ def slide(path, fbo):
     places = [offset(stage, STEP * (t - FRAMES / 2)) for t in range(FRAMES)]
     stills = []
     for p in places:
-        place(reference_stage, p)
+        move(reference_stage, p)
         stills.append(converged(reference, reference_stage, params, fbo, state))
-    place(stage, places[0])
+    move(stage, places[0])
     converged(engine, stage, params, fbo, state)
     shown = {}
     for t in range(1, FRAMES):
-        place(stage, places[t])
+        move(stage, places[t])
         engine.Render(stage.GetPseudoRoot(), params)
         if t >= 2:
             shown[t - 1] = pixels(fbo)
@@ -172,15 +186,15 @@ def slide(path, fbo):
 
         def moved(s):
             unshadow(s)
-            place(s, places[t])
+            move(s, places[t])
 
         bound = error(alone(path, fbo, state, moved), stills[t])
         drawn, behind = error(shown[t], stills[t]), error(stills[t - 1], stills[t])
         if not drawn < bound:
-            sys.exit(f"film: sliding, frame {t} is {drawn:.2f} from its still, not within a frame alone's {bound:.2f}")
+            sys.exit(f"film: {sliding}, frame {t} is {drawn:.2f} from its still, not within a frame alone's {bound:.2f}")
         if behind < bound:
             sys.exit(f"film: the control failed: the still a frame behind is {behind:.2f} from frame {t}'s, within {bound:.2f}")
-        print(f"film: sliding, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
+        print(f"film: {sliding}, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
 
 
 def tick(stage, t):
@@ -275,7 +289,8 @@ def main(panned, penumbra):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     pan(panned, fbo)
-    slide(panned, fbo)
+    slide(panned, fbo, place, "sliding")
+    slide(panned, fbo, bend, "sliding by points")
     rotate(penumbra, fbo)
     light(panned, fbo)
     path_independence(panned, fbo)

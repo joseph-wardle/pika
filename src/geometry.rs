@@ -48,6 +48,13 @@ struct Range {
     density: Option<f32>,
 }
 
+impl Range {
+    fn points(&self) -> std::ops::Range<u32> {
+        let first = self.first_point as u32;
+        first..first + self.point_count
+    }
+}
+
 /// One material's triangles of a mesh: its faces in no GeomSubset, or one subset's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 struct Part {
@@ -64,6 +71,10 @@ struct Layout {
     /// They come first in `points`, so refined point p's stencil is the pth.
     refined_count: u32,
     points: Buffer,
+    /// `points` as the frame before drew them, which motion is measured from.
+    previous: Buffer,
+    /// The meshes whose `previous` points differ from their `points`.
+    moving: BTreeSet<u64>,
     cage: Buffer,
     stencils: Stencils,
     normals: Buffer,
@@ -177,6 +188,7 @@ pub struct Geometry {
 
 pub struct Bound {
     pub points: vk::DeviceAddress,
+    pub previous_points: vk::DeviceAddress,
     pub normals: vk::DeviceAddress,
     pub smooth: vk::DeviceAddress,
     pub vertices: vk::DeviceAddress,
@@ -255,6 +267,16 @@ impl Geometry {
                 range.density = need::density(&store.meshes()[id]);
             }
         }
+        // A mesh that stops has still moved since the frame before, which `previous` holds
+        // until the frame after. A rebuilt layout's points are not written yet.
+        if !rebuilt {
+            let ids = (layout.moving.union(&moved.points)).filter_map(|id| layout.ranges.get(id));
+            let ranges: Vec<_> = ids.map(Range::points).collect();
+            remember_points(device, commands.buffer(), layout, &ranges);
+            layout.moving = (moved.points.iter().copied())
+                .filter(|id| layout.ranges.contains_key(id))
+                .collect();
+        }
         let layout = &*layout;
 
         let kept = (self.draws.as_ref()).filter(|d| !rebuilt && !moved.draws && d.tags == tags);
@@ -310,6 +332,11 @@ impl Geometry {
             false => moved_ranges(&layout.ranges, moved),
         };
         self.refine(device, commands, layout, &rewrite)?;
+        // A rebuilt layout renumbers the points, so none can be matched with the frame before's:
+        // each is drawn as if it had not moved, as EEVEE draws a mesh whose vertex count changed.
+        if rebuilt {
+            remember_points(device, commands.buffer(), layout, &rewrite.points);
+        }
         Ok(Update {
             bytes,
             layout: rebuilt,
@@ -383,6 +410,7 @@ impl Geometry {
         let (layout, draws) = (self.layout.as_ref()?, self.draws.as_ref()?);
         Some(Bound {
             points: layout.points.address,
+            previous_points: layout.previous.address,
             normals: layout.normals.address,
             smooth: layout.smooth.address,
             vertices: layout.vertices.address,
@@ -482,6 +510,7 @@ impl Geometry {
         let layout = self.layout.iter().flat_map(|l| {
             [
                 &l.points,
+                &l.previous,
                 &l.cage,
                 &l.stencils.offsets,
                 &l.stencils.indices,
@@ -817,11 +846,14 @@ fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String
     let storage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
     let index = vk::BufferUsageFlags::INDEX_BUFFER | storage;
     let written = vk::BufferUsageFlags::STORAGE_BUFFER;
+    let source = vk::BufferUsageFlags::TRANSFER_SRC;
     let layout = Layout {
         point_count: points as u32,
         vertex_count: vertices as u32,
         refined_count,
-        points: Buffer::device_local(device, points * 12, storage)?,
+        points: Buffer::device_local(device, points * 12, storage | source)?,
+        previous: Buffer::device_local(device, points * 12, storage)?,
+        moving: BTreeSet::new(),
         cage: Buffer::device_local(device, cage * 12, storage)?,
         stencils: Stencils::new(device, &tables.stencils)?,
         normals: Buffer::device_local(device, normals * 12, storage)?,
@@ -862,8 +894,7 @@ fn moved_ranges(ranges: &BTreeMap<u64, Range>, moved: &Moved) -> Rewrite {
         vertices: Vec::new(),
     };
     for range in moved.points.iter().filter_map(|id| ranges.get(id)) {
-        let first = range.first_point as u32;
-        let drawn = first..first + range.point_count;
+        let drawn = range.points();
         if range.first_cage.is_some() {
             rewrite.refined.push(drawn.clone());
         }
@@ -1475,6 +1506,58 @@ fn remember(device: &gpu::Device, cb: vk::CommandBuffer, d: &Draws) {
         if region.size > 0 {
             (device.raw).cmd_copy_buffer(cb, d.instances.raw, d.previous.raw, &[region]);
         }
+        (device.raw).cmd_pipeline_barrier2(
+            cb,
+            &vk::DependencyInfo::default().memory_barriers(&[copied]),
+        );
+    }
+}
+
+/// Copies `ranges` of the points into `previous`: the frame before's, before this frame's
+/// uploads and subdivision write over them, or a rebuilt layout's own.
+fn remember_points(
+    device: &gpu::Device,
+    cb: vk::CommandBuffer,
+    l: &Layout,
+    ranges: &[std::ops::Range<u32>],
+) {
+    // Vulkan has no empty copies.
+    let regions: Vec<_> = (ranges.iter().filter(|r| !r.is_empty()))
+        .map(|r| vk::BufferCopy {
+            src_offset: r.start as u64 * 12,
+            dst_offset: r.start as u64 * 12,
+            size: r.len() as u64 * 12,
+        })
+        .collect();
+    if regions.is_empty() {
+        return;
+    }
+    let written = vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+        .dst_access_mask(vk::AccessFlags2::TRANSFER_READ | vk::AccessFlags2::TRANSFER_WRITE);
+    let copied = vk::MemoryBarrier2::default()
+        .src_stage_mask(vk::PipelineStageFlags2::COPY)
+        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+        .dst_stage_mask(
+            vk::PipelineStageFlags2::COPY
+                | vk::PipelineStageFlags2::COMPUTE_SHADER
+                | vk::PipelineStageFlags2::VERTEX_SHADER,
+        )
+        .dst_access_mask(
+            vk::AccessFlags2::TRANSFER_WRITE
+                | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                | vk::AccessFlags2::SHADER_STORAGE_READ,
+        );
+    // SAFETY: `cb` records outside rendering; both buffers are `device`'s and hold every
+    // point's 12 bytes.
+    unsafe {
+        (device.raw).cmd_pipeline_barrier2(
+            cb,
+            &vk::DependencyInfo::default().memory_barriers(&[written]),
+        );
+        (device.raw).cmd_copy_buffer(cb, l.points.raw, l.previous.raw, &regions);
         (device.raw).cmd_pipeline_barrier2(
             cb,
             &vk::DependencyInfo::default().memory_barriers(&[copied]),
