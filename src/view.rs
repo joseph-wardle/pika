@@ -3,7 +3,7 @@
 
 use ash::vk;
 
-use crate::geometry::Bound;
+use crate::geometry::Addresses;
 use crate::gpu::{self, Buffer};
 use crate::light::{Light, Tiles};
 use crate::transform::Camera;
@@ -13,7 +13,7 @@ use crate::transform::Camera;
 #[derive(Clone, Copy)]
 struct Constants {
     camera: Camera,
-    previous: [[f32; 4]; 4],
+    previous_view_projection: [[f32; 4]; 4],
     lights: vk::DeviceAddress,
     light_tiles: vk::DeviceAddress,
     tile_lights: vk::DeviceAddress,
@@ -52,7 +52,7 @@ pub struct View {
 }
 
 impl View {
-    pub fn new(device: &gpu::Device, geometry: &Bound, lights: u64) -> Result<Self, String> {
+    pub fn new(device: &gpu::Device, geometry: &Addresses, lights: u64) -> Result<Self, String> {
         let records = geometry.count as u64 * size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
         Ok(Self {
@@ -89,7 +89,7 @@ impl View {
         })
     }
 
-    pub fn fits(&self, geometry: &Bound, lights: u64) -> bool {
+    pub fn fits(&self, geometry: &Addresses, lights: u64) -> bool {
         let records = geometry.count as u64 * size_of::<vk::DrawIndexedIndirectCommand>() as u64;
         self.records.size >= records
             && self.visible.size >= geometry.instance_count as u64 * 4
@@ -98,7 +98,7 @@ impl View {
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
     /// `pattern` is the frame's index into the shadow pattern's sequence (`Film::pattern`).
-    /// `camera` is jittered by `jitter` (`film::jitter`); `previous` is the frame before's
+    /// `camera` is jittered by `jitter` (`film::jitter`); `previous_view_projection` is the frame before's
     /// view-projection, unjittered, which motion is measured from.
     /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
     #[allow(clippy::too_many_arguments)]
@@ -107,8 +107,8 @@ impl View {
         cb: vk::CommandBuffer,
         camera: &Camera,
         jitter: [f64; 2],
-        previous: &[[f32; 4]; 4],
-        geometry: &Bound,
+        previous_view_projection: &[[f32; 4]; 4],
+        geometry: &Addresses,
         lights: &[Light],
         tiles: &Tiles,
         extent: [u32; 2],
@@ -133,7 +133,7 @@ impl View {
         let address = |i: usize| self.lights.address + offsets[i] as u64;
         let constants = Constants {
             camera: *camera,
-            previous: *previous,
+            previous_view_projection: *previous_view_projection,
             lights: address(0),
             light_tiles: address(1),
             tile_lights: address(2),

@@ -51,7 +51,7 @@ pub struct Film {
     /// Frames drawn while anything changed, which cycle the jitter.
     played: u32,
     /// The camera, unjittered, of the frame `images[shown]` holds; none without one.
-    previous: Option<[[f32; 4]; 4]>,
+    previous_view_projection: Option<[[f32; 4]; 4]>,
     /// The image last shown, the history the next frame drawn while anything changes reads.
     shown: usize,
     /// The image the last frame drawn while anything changed left, which still frames blend in.
@@ -68,6 +68,29 @@ struct Buffers {
     /// Shown images, as the color attachment's pixels: one is copied back in each frame, and
     /// the next reads it. A still frame keeps `stopped`'s and writes the other.
     images: [Buffer; 2],
+}
+
+impl Buffers {
+    /// What both passes share of their constants; each sets the rest.
+    fn push(&self, target: &Target, read: usize, write: usize, weights: [f32; 9]) -> Push {
+        Push {
+            sum: self.sum.address,
+            frame: self.frame.address,
+            depth: self.depth.address,
+            motion: self.motion.address,
+            history: self.images[read].address,
+            image: self.images[write].address,
+            weights,
+            total: 0.0,
+            extent: [target.width, target.height],
+            prior: 0.0,
+            first: 0,
+            count: 0,
+            stride: 0,
+            sample: 0,
+            words: (target.color_bytes / 4) as u32,
+        }
+    }
 }
 
 /// `shaders/film.slang`'s, for both of its passes.
@@ -148,7 +171,7 @@ impl Film {
             drawn: 0,
             total: 0.0,
             played: 0,
-            previous: None,
+            previous_view_projection: None,
             shown: 0,
             stopped: 0,
         })
@@ -190,8 +213,8 @@ impl Film {
     }
 
     /// The camera, unjittered, of the image the frame's history reads; none without one.
-    pub fn previous(&self) -> Option<[[f32; 4]; 4]> {
-        self.previous
+    pub fn previous_view_projection(&self) -> Option<[[f32; 4]; 4]> {
+        self.previous_view_projection
     }
 
     /// Records outside rendering, after the frame's shading, drawn by `camera` (unjittered)
@@ -203,78 +226,109 @@ impl Film {
         target: &Target,
         camera: &Camera,
     ) -> Result<(), String> {
-        let sample = self.sample();
+        self.allocate(device, target)?;
+        let buffers = self.buffers.as_ref().expect("allocated above");
+        target.copy_out(cb, 0, buffers.frame.raw);
+        let written = match self.still {
+            true => self.record_still(cb, target),
+            false => self.record_playing(cb, target),
+        };
+        let buffers = self.buffers.as_ref().expect("allocated above");
+        target.copy_in(cb, 0, buffers.images[written].raw);
+        self.shown = written;
+        self.previous_view_projection = Some(camera.view_projection);
+        Ok(())
+    }
+
+    /// Makes the buffers at the target's size and format, unless they are already.
+    fn allocate(&mut self, device: &gpu::Device, target: &Target) -> Result<(), String> {
         let pixels = u64::from(target.width * target.height);
         let bytes = pixels * target.color_bytes;
-        let buffers = match &mut self.buffers {
-            Some(b) if b.frame.size == bytes && b.sum.size == pixels * 16 => b,
-            slot => {
-                // Free the old buffers before allocating their replacements. Their history is
-                // gone with them.
-                *slot = None;
-                self.previous = None;
-                let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
-                let copied = storage | vk::BufferUsageFlags::TRANSFER_DST;
-                let shown = storage | vk::BufferUsageFlags::TRANSFER_SRC;
-                slot.insert(Buffers {
-                    sum: Buffer::device_local(device, pixels * 16, storage)?,
-                    frame: Buffer::device_local(device, bytes, copied)?,
-                    depth: Buffer::device_local(device, pixels * 4, copied)?,
-                    motion: Buffer::device_local(device, pixels * 4, copied)?,
-                    images: [
-                        Buffer::device_local(device, bytes, shown)?,
-                        Buffer::device_local(device, bytes, shown)?,
-                    ],
-                })
-            }
-        };
+        if (self.buffers.as_ref())
+            .is_some_and(|b| b.frame.size == bytes && b.sum.size == pixels * 16)
+        {
+            return Ok(());
+        }
+        // Free the old buffers before allocating their replacements. Their history is gone
+        // with them.
+        self.buffers = None;
+        self.previous_view_projection = None;
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let copied = storage | vk::BufferUsageFlags::TRANSFER_DST;
+        let shown = storage | vk::BufferUsageFlags::TRANSFER_SRC;
+        self.buffers = Some(Buffers {
+            sum: Buffer::device_local(device, pixels * 16, storage)?,
+            frame: Buffer::device_local(device, bytes, copied)?,
+            depth: Buffer::device_local(device, pixels * 4, copied)?,
+            motion: Buffer::device_local(device, pixels * 4, copied)?,
+            images: [
+                Buffer::device_local(device, bytes, shown)?,
+                Buffer::device_local(device, bytes, shown)?,
+            ],
+        });
+        Ok(())
+    }
+
+    /// Adds the frame to the sum of still samples and writes their mean, blended with the image
+    /// the view stopped at by a weight that fades. Returns the image written.
+    fn record_still(&mut self, cb: vk::CommandBuffer, target: &Target) -> usize {
+        let buffers = self.buffers.as_ref().expect("allocated by record");
+        let sample = self.drawn;
         let weights = weights(jitter(sample));
-        let frame_total = weights.iter().sum::<f32>();
-        let history = self.previous.is_some();
-        target.copy_out(cb, 0, buffers.frame.raw);
-        let (pass, total, prior, read, write) = if self.still {
-            let earlier = if sample == 0 { 0.0 } else { self.total };
-            self.total = earlier + frame_total;
-            let prior = if history { prior(sample + 1) } else { 0.0 };
-            let read = self.stopped;
-            (&self.accumulate, self.total, prior as f32, read, 1 - read)
-        } else {
-            target.copy_out(cb, 1, buffers.depth.raw);
-            target.copy_out(cb, raster::MOTION_ATTACHMENT, buffers.motion.raw);
-            let read = self.shown;
-            let prior = if history { 1.0 } else { 0.0 };
-            (&self.resolve, frame_total, prior, read, 1 - read)
+        let earlier = if sample == 0 { 0.0 } else { self.total };
+        self.total = earlier + weights.iter().sum::<f32>();
+        let prior = match self.previous_view_projection {
+            Some(_) => prior(sample + 1) as f32,
+            None => 0.0,
         };
-        let words = (target.color_bytes / 4) as u32;
-        let all = 0..target.width * target.height;
-        pass.record(cb, &[all], |first, count, stride| Push {
-            sum: buffers.sum.address,
-            frame: buffers.frame.address,
-            depth: buffers.depth.address,
-            motion: buffers.motion.address,
-            history: buffers.images[read].address,
-            image: buffers.images[write].address,
-            weights,
-            total,
-            extent: [target.width, target.height],
+        let (read, write) = (self.stopped, 1 - self.stopped);
+        let push = Push {
+            total: self.total,
             prior,
+            sample,
+            ..buffers.push(target, read, write, weights)
+        };
+        let all = 0..target.width * target.height;
+        (self.accumulate).record(cb, &[all], |first, count, stride| Push {
             first,
             count,
             stride,
-            sample,
-            words,
+            ..push
         });
-        target.copy_in(cb, 0, buffers.images[write].raw);
-        self.shown = write;
-        match self.still {
-            true => self.drawn += 1,
-            false => {
-                self.stopped = write;
-                self.played = self.played.wrapping_add(1);
-            }
-        }
-        self.previous = Some(camera.view_projection);
-        Ok(())
+        self.drawn += 1;
+        write
+    }
+
+    /// Blends the frame into the image shown last, moved to where each pixel was. Returns the
+    /// image written, which is also the one a still view then stops at.
+    fn record_playing(&mut self, cb: vk::CommandBuffer, target: &Target) -> usize {
+        let buffers = self.buffers.as_ref().expect("allocated by record");
+        target.copy_out(cb, 1, buffers.depth.raw);
+        target.copy_out(cb, raster::MOTION_ATTACHMENT, buffers.motion.raw);
+        let sample = self.sample();
+        let weights = weights(jitter(sample));
+        let (read, write) = (self.shown, 1 - self.shown);
+        let push = Push {
+            total: weights.iter().sum(),
+            // The resolve reads it as whether there is a history at all.
+            prior: if self.previous_view_projection.is_some() {
+                1.0
+            } else {
+                0.0
+            },
+            sample,
+            ..buffers.push(target, read, write, weights)
+        };
+        let all = 0..target.width * target.height;
+        (self.resolve).record(cb, &[all], |first, count, stride| Push {
+            first,
+            count,
+            stride,
+            ..push
+        });
+        self.stopped = write;
+        self.played = self.played.wrapping_add(1);
+        write
     }
 
     pub fn memory(&self) -> Memory {

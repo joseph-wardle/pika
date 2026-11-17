@@ -2,7 +2,7 @@
 
 use ash::vk;
 
-use crate::geometry::Bound;
+use crate::geometry::Addresses;
 use crate::gpu;
 use crate::target;
 use crate::view::View;
@@ -91,7 +91,7 @@ impl Raster {
         cb: vk::CommandBuffer,
         color: vk::Format,
         area: vk::Rect2D,
-        geometry: &Bound,
+        geometry: &Addresses,
         view: &View,
     ) {
         if geometry.count == 0 {

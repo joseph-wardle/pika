@@ -28,7 +28,8 @@ float3 load3(float *values, uint i)
     return float3(values[3 * i], values[3 * i + 1], values[3 * i + 2]);
 }
 
-// The Vulkan IDs include the draw's vertex offset and first instance.
+// The Vulkan IDs include the draw's vertex offset and first instance. `slot` is the instance's
+// place among the view's visible ones, which the cull pass filled (cull.slang).
 Vertex pull(uint vertex, uint slot)
 {
     uint2 v = view->vertices[vertex];

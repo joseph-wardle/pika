@@ -234,7 +234,7 @@ struct View
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
     // The frame before's view_projection, unjittered (src/film.rs).
-    float4 previous[4];
+    float4 previous_view_projection[4];
     Light *lights;
     // Per tile, row by row: the first of its tile_lights and how many.
     uint2 *light_tiles;
@@ -255,7 +255,7 @@ struct View
     uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
-    // The instances as the frame before drew them (src/geometry.rs Draws).
+    // The instances as the frame before drew them (src/draw.rs Draws).
     float4 *previous_instances;
     // The points as the frame before drew them (src/geometry.rs Layout).
     float *previous_points;

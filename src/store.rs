@@ -580,7 +580,7 @@ impl Store {
 
     pub fn set_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let mesh = self.meshes.get_mut(&id).ok_or_else(|| stale("mesh", id))?;
-        if write(&mut self.stats.mesh, &mut mesh.transform, transform, 128) {
+        if write(&mut self.stats.mesh, &mut mesh.transform, transform, MATRIX) {
             self.moved.transforms.insert(id);
         }
         Ok(())
@@ -690,7 +690,7 @@ impl Store {
             &mut self.stats.instancer,
             &mut instancer.transform,
             transform,
-            128,
+            MATRIX,
         );
         Ok(())
     }
@@ -851,7 +851,12 @@ impl Store {
 
     pub fn set_light_transform(&mut self, id: u64, transform: [f64; 16]) -> Result<(), String> {
         let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
-        self.moved.lights |= write(&mut self.stats.light, &mut light.transform, transform, 128);
+        self.moved.lights |= write(
+            &mut self.stats.light,
+            &mut light.transform,
+            transform,
+            MATRIX,
+        );
         Ok(())
     }
 
@@ -1242,6 +1247,9 @@ fn repeats<'a>(
 fn stale(kind: &str, id: u64) -> String {
     format!("no {kind} with id {id} in the store: it was removed, or never inserted")
 }
+
+/// A transform's bytes as Hydra sends it, for the stats.
+const MATRIX: usize = size_of::<[f64; 16]>();
 
 /// Counts the bytes as redundant when the value is unchanged; returns whether it changed.
 fn write<T: PartialEq>(stats: &mut Bytes, slot: &mut Option<T>, value: T, bytes: usize) -> bool {

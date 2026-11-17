@@ -1,5 +1,6 @@
 //! `pika`: checks that this machine can run the renderer. Exits 0 only if the first-frame check
 //! matched, its shifted control failed by its predicted count, and validation reported nothing.
+//! The renderer is the library: a host's frame starts at `pika_render` in `src/abi.rs`.
 
 mod check;
 

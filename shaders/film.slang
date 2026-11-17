@@ -192,6 +192,7 @@ void resolve(uint3 thread : SV_DispatchThreadID)
                 nearest = c;
         }
         float2 motion = unpackHalf2x16ToFloat(push.motion[nearest]);
+        // Off the image at mesh.slang's 65504, for a surface that was behind the camera.
         float2 h = float2(q) + motion;
 
         float blend = 1;

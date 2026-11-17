@@ -13,9 +13,9 @@ use std::mem::offset_of;
 use ash::vk;
 
 use crate::commands::Commands;
-use crate::geometry::{Bound, Geometry};
+use crate::geometry::{Addresses, Geometry};
 use crate::gpu::{self, Buffer};
-use crate::light::{self, Light};
+use crate::light::{self, Caster, Light};
 use crate::link;
 use crate::target::Target;
 use crate::transform::{Camera, Instance, invert};
@@ -162,15 +162,6 @@ struct Push {
     count: u32,
     stride: u32,
     pad: u32,
-}
-
-/// A shadowed light, by its index among the view's lights.
-pub struct Caster {
-    /// Its light's id in the store, which keeps its pages from frame to frame.
-    pub id: u64,
-    pub light: usize,
-    /// Its shadow-link bit, 0 when every mesh casts.
-    pub link: u32,
 }
 
 /// What the last frame's shadows held.
@@ -442,7 +433,7 @@ impl Shadows {
         &mut self,
         device: &gpu::Device,
         geometry: &Geometry,
-        bound: &Bound,
+        addresses: &Addresses,
         camera: &Camera,
         projection: &[f64; 16],
         extent: [u32; 2],
@@ -494,7 +485,7 @@ impl Shadows {
         let levels = coarsest.saturating_sub(finest) as u32 + 1;
         let count = (fitted.len() + local.len()).max(1) as u64;
         let pixels = u64::from(extent[0]) * u64::from(extent[1]);
-        let instances = u64::from(bound.instance_count).max(1);
+        let instances = u64::from(addresses.instance_count).max(1);
         if !(self.maps.as_ref()).is_some_and(|m| m.holds(count, pixels, instances)) {
             // Free the old maps before allocating their replacement.
             self.maps = None;
@@ -584,7 +575,7 @@ impl Shadows {
     pub fn record(
         &mut self,
         commands: &mut Commands,
-        geometry: &Bound,
+        geometry: &Addresses,
         camera: &View,
         target: &Target,
         moved: Option<&[u32]>,
@@ -817,7 +808,7 @@ impl Shadows {
     /// Draws the casters listed from draw `first`, as many as the state's word at byte
     /// `counted`, with no attachments, each into a level or face: the fragments find their
     /// pages and write the pool themselves.
-    fn draw(&self, cb: vk::CommandBuffer, geometry: &Bound, first: u32, counted: usize) {
+    fn draw(&self, cb: vk::CommandBuffer, geometry: &Addresses, first: u32, counted: usize) {
         let area = vk::Rect2D {
             offset: vk::Offset2D::default(),
             extent: vk::Extent2D {

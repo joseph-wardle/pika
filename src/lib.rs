@@ -5,6 +5,7 @@ mod bake;
 mod cache;
 pub mod commands;
 mod cull;
+mod draw;
 mod film;
 mod geometry;
 pub mod gpu;

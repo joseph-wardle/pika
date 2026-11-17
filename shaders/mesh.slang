@@ -8,7 +8,7 @@ struct Varyings
     float4 position : SV_Position;
     float3 normal : NORMAL;
     // Clip space at the frame before's camera, transform and point.
-    float4 previous : PREVIOUS;
+    float4 previous_position : PREVIOUS;
     nointerpolation uint flip : FLIP;
 };
 
@@ -27,7 +27,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
     Varyings o;
     o.position = p.position;
     o.normal = p.normal;
-    o.previous = transform(view->previous, float4(previous_world(vertex, slot), 1));
+    o.previous_position = transform(view->previous_view_projection, float4(previous_world(vertex, slot), 1));
     o.flip = p.flip;
     return o;
 }
@@ -57,8 +57,10 @@ Targets fs(Varyings v, bool front : SV_IsFrontFace)
     t.normal = float4(n, 0);
     // The jitter moved what this pixel's centre sees from where it falls unjittered.
     float2 now = v.position.xy + view->jitter;
-    float2 was = (v.previous.xy / v.previous.w * 0.5 + 0.5) * float2(view->extent);
-    // Behind the camera before, so off its image: the resolve drops the history.
-    t.motion = v.previous.w > 0 ? was - now : float2(65504);
+    float2 was = (v.previous_position.xy / v.previous_position.w * 0.5 + 0.5) * float2(view->extent);
+    // Both count a pixel's centre at a half, so their difference is the same counted from whole
+    // numbers, as film.slang's resolve counts. Behind the camera before, so off its image: the
+    // greatest half float takes the resolve's lookup off the image too, where it drops the history.
+    t.motion = v.previous_position.w > 0 ? was - now : float2(65504);
     return t;
 }
