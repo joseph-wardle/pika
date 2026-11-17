@@ -242,9 +242,8 @@ struct View
     uint2 extent;
     // Where view_projection moves each pixel's sample, in pixels from its centre.
     float2 jitter;
-    // The frame's index among those drawn while nothing changes, 0 while anything does
-    // (src/renderer.rs).
-    uint sample;
+    // The frame's index into the shadow pattern's sequence (src/film.rs Film::pattern).
+    uint pattern;
     uint unused;
     float *points;
     float *normals;

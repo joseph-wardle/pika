@@ -410,7 +410,7 @@ impl Renderer {
                 &lights,
                 &tiles,
                 [w, h],
-                sample,
+                self.film.pattern(),
                 shadows,
             );
             self.cull.record(cb, geometry, view);

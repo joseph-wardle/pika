@@ -19,7 +19,7 @@ struct Constants {
     tile_lights: vk::DeviceAddress,
     extent: [u32; 2],
     jitter: [f32; 2],
-    sample: u32,
+    pattern: u32,
     unused: u32,
     points: vk::DeviceAddress,
     normals: vk::DeviceAddress,
@@ -96,7 +96,7 @@ impl View {
     }
 
     /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
-    /// `sample` is the frame's index among those drawn while nothing changes, 0 while anything does.
+    /// `pattern` is the frame's index into the shadow pattern's sequence (`Film::pattern`).
     /// `camera` is jittered by `jitter` (`film::jitter`); `previous` is the frame before's
     /// view-projection, unjittered, which motion is measured from.
     /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
@@ -111,7 +111,7 @@ impl View {
         lights: &[Light],
         tiles: &Tiles,
         extent: [u32; 2],
-        sample: u32,
+        pattern: u32,
         shadows: vk::DeviceAddress,
     ) {
         self.drawn.bytes().fill(0);
@@ -138,7 +138,7 @@ impl View {
             tile_lights: address(2),
             extent,
             jitter: jitter.map(|v| v as f32),
-            sample,
+            pattern,
             unused: 0,
             points: geometry.points,
             normals: geometry.normals,

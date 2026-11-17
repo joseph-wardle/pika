@@ -1,9 +1,10 @@
 """Checks Pika's film while frames change, through UsdImagingGL as
 hydra/engine.py drives it: that history follows a panning camera, that a
-light's change shows through it, and that a converged still is the same
-whatever came before it, and that history follows objects moving under a still camera.
+light's change shows through it, that a converged still is the same
+whatever came before it, that history follows objects moving under a still camera,
+and that it averages a soft shadow's rays while something else moves.
 
-    hython hydra/film.py <panned.usda>
+    hython hydra/film.py <panned.usda> <penumbra.usda>
 
 Needs a display (check.sh runs it on its Xvnc) and the delegate on
 PXR_PLUGINPATH_NAME. The scene's bars and their shadows are thinner than a
@@ -20,6 +21,11 @@ new session's first, which has no history:
   likewise: their history must follow their own motion, which the camera's does not show.
   The sun casts no shadow there: shadow texels are fixed in the light's space, so a caster
   moving across them changes its shadow each frame, with no motion to follow, in EEVEE as here.
+- Playing penumbra.usda with the camera still while a quad under its floor moves, the
+  frames once history has built up must on average be within the error of HELD still
+  samples over the penumbrae: the shadow pattern cycles while anything changes, so history
+  averages its rays as the still sum does. Held at one pattern it was 0.19 against 0.09.
+  The control is fewer still samples, which must not be within it.
 - Halving the sun's intensity with the camera held, each frame once LIT
   have passed must be within the bound at the new light. The control is the
   old still, which must not be.
@@ -47,12 +53,23 @@ WARM = 12
 LIT = 4
 # The still sample at which the images part way are compared.
 PART_WAY = 7
+# The still samples a still camera's history must match in a penumbra, and the fewer that must not.
+HELD = 16
+FEWER = 4
 
 
-def error(a, b):
-    """The mean 8-bit channel difference between two images."""
-    total = sum(abs((p >> s & 255) - (q >> s & 255)) for p, q in zip(a, b) for s in (0, 8, 16))
-    return total / (3 * len(a))
+def error(a, b, mask=None):
+    """The mean 8-bit channel difference between two images, over the pixels `mask` holds."""
+    mask = mask or [True] * len(a)
+    total = sum(abs((p >> s & 255) - (q >> s & 255)) for p, q, m in zip(a, b, mask) if m for s in (0, 8, 16))
+    return total / (3 * sum(mask))
+
+
+def edges(image):
+    """Per pixel, whether any of its 3×3 neighbours differs from it."""
+    def at(x, y):
+        return image[min(max(y, 0), SIZE - 1) * SIZE + min(max(x, 0), SIZE - 1)]
+    return [any(at(x + i, y + j) != at(x, y) for i in (-1, 0, 1) for j in (-1, 0, 1)) for y in range(SIZE) for x in range(SIZE)]
 
 
 def shift(frustum, right):
@@ -166,6 +183,47 @@ def slide(path, fbo):
         print(f"film: sliding, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
 
 
+def tick(stage, t):
+    """Moves a quad hidden under the floor in the stage's session layer: something animating
+    that the image does not show."""
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        quad = UsdGeom.Mesh.Define(stage, "/world/tick")
+        if not quad.GetOrderedXformOps():
+            quad.CreatePointsAttr([(-0.1, -0.1, 0), (0.1, -0.1, 0), (0.1, 0.1, 0), (-0.1, 0.1, 0)])
+            quad.CreateFaceVertexCountsAttr([4])
+            quad.CreateFaceVertexIndicesAttr([0, 1, 2, 3])
+            quad.CreateSubdivisionSchemeAttr("none")
+            quad.AddTranslateOp()
+        quad.GetOrderedXformOps()[0].Set(Gf.Vec3d(0.001 * (t % 7), 0, -3))
+
+
+def rotate(path, fbo):
+    engine, stage, params = scene(path)
+    stills = {s: image for image, s in accumulate(engine, stage, params, fbo)}
+    final = stills[SAMPLES - 1]
+    engine, stage, params = scene(path)
+    unshadow(stage)
+    lit = accumulate(engine, stage, params, fbo)[-1][0]
+    # What the shadow changes, less the edges a shadow's change would mix in.
+    penumbrae = [a != b and not e for a, b, e in zip(final, lit, edges(lit))]
+    bound, fewer = (error(stills[n - 1], final, penumbrae) for n in (HELD, FEWER))
+    if fewer < bound:
+        sys.exit(f"film: the control failed: {FEWER} still samples are {fewer:.2f} from the converged still, within {HELD}'s {bound:.2f}")
+    engine, stage, params = scene(path)
+    tick(stage, 0)
+    accumulate(engine, stage, params, fbo)
+    drawn = []
+    for t in range(1, FRAMES):
+        tick(stage, t)
+        engine.Render(stage.GetPseudoRoot(), params)
+        if t > WARM:
+            drawn.append(error(pixels(fbo), final, penumbrae))
+    mean = sum(drawn) / len(drawn)
+    if not mean < bound:
+        sys.exit(f"film: playing with the camera still, the penumbrae are {mean:.2f} from the converged still, not within {HELD} still samples' {bound:.2f}")
+    print(f"film: playing with the camera still, the penumbrae are {mean:.2f} from the converged still, within {HELD} still samples' {bound:.2f}; {FEWER}'s are {fewer:.2f}")
+
+
 def halve(stage):
     """Halves the sun in the stage's session layer: stages opened from one file share its
     layer, which would edit every session at once."""
@@ -213,16 +271,17 @@ def path_independence(path, fbo):
     print(f"film: converged from either side the same, {differ} pixels apart at sample {PART_WAY}")
 
 
-def main(panned):
+def main(panned, penumbra):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     pan(panned, fbo)
     slide(panned, fbo)
+    rotate(penumbra, fbo)
     light(panned, fbo)
     path_independence(panned, fbo)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
+    if len(sys.argv) != 3:
         sys.exit(__doc__)
     main(*sys.argv[1:])

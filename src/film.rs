@@ -28,6 +28,10 @@ pub const FILTER_RADIUS: f64 = 1.5;
 /// keeps about twenty frames, so each pixel's filter sees all eight positions.
 const PLAYING_SAMPLES: u32 = 8;
 
+/// The shadow pattern's samples while anything changes, cycled as EEVEE cycles its ray-traced
+/// ones: more than history's blend keeps, so each pixel's history averages a penumbra's rays.
+const PLAYING_PATTERNS: u32 = 32;
+
 /// How many still samples the image the view stopped at first counts as. A hypothesis until
 /// recordings of stopping a pan choose it.
 const PRIOR: f64 = 4.0;
@@ -165,6 +169,14 @@ impl Film {
     /// The frame's jitter, as `begin` left it.
     pub fn jitter(&self) -> [f64; 2] {
         jitter(self.sample())
+    }
+
+    /// The frame's index into the shadow pattern's sequence (`shaders/frame.slang`).
+    pub fn pattern(&self) -> u32 {
+        match self.still {
+            true => self.drawn,
+            false => self.played % PLAYING_PATTERNS,
+        }
     }
 
     /// The frame's index into the jitter's sequence.
