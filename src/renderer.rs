@@ -312,6 +312,7 @@ impl Renderer {
         let late = placed.is_some_and(|(b, _)| *b == buffers);
 
         let start = Instant::now();
+        let mut laps = stats::Laps::start();
         self.shadows.reserve(&self.device, inputs.shadow_pool)?;
         let target = match &mut self.target {
             Some(t) if t.fits(&formats, w, h) => t,
@@ -335,9 +336,9 @@ impl Renderer {
             &inputs.render_tags,
             &mut self.commands,
         )?;
-        let estimating = Instant::now();
+        laps.lap("geometry");
         let footprints = (self.geometry).footprints(&camera.view_projection, [w, h]);
-        let need = estimating.elapsed();
+        laps.lap("need");
         let shading = (self.shade).update(
             &self.device,
             &self.store,
@@ -347,6 +348,7 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
+        laps.lap("textures");
         // Asked again, since the update above may have ended a texture swap: a swap begun draws
         // the old image until whole, but its end must start the sum again.
         let sample = (self.film).begin(unchanged && self.shade.settled());
@@ -359,6 +361,7 @@ impl Renderer {
             (self.film.previous_view_projection()).unwrap_or(unjittered.view_projection);
         let addresses = self.geometry.addresses();
         let (mut lights, casters) = light::gather(&self.store);
+        laps.lap("lights");
         if let Some(g) = &addresses {
             let (device, geometry) = (&self.device, &self.geometry);
             let projection = &inputs.projection;
@@ -373,7 +376,9 @@ impl Renderer {
                 &casters,
             )?;
         }
+        laps.lap("fit");
         let tiles = Tiles::new(&lights, &camera, [w, h]);
+        laps.lap("tiles");
         let capacity = light::capacity(lights.len(), [w, h]);
         let mut view = match (&addresses, &mut self.view) {
             (None, _) => None,
@@ -400,6 +405,7 @@ impl Renderer {
             self.cull.record(cb, geometry, view);
         }
         self.commands.mark("cull")?;
+        laps.lap("view");
         let clears = [FAR, 0.0].map(|v| vk::ClearColorValue { float32: [v; 4] });
         target.begin_rendering(
             cb,
@@ -417,6 +423,7 @@ impl Renderer {
         }
         target.end_rendering(cb);
         self.commands.mark("draw")?;
+        laps.lap("draw");
         // Between the prepass and shading, which reads them: pages follow the depth drawn.
         if let Some((geometry, view)) = drawn {
             let moving = self.geometry.moved_instances(&moved, &update);
@@ -425,6 +432,7 @@ impl Renderer {
         } else {
             Shadows::skip(&mut self.commands)?;
         }
+        laps.lap("shadows");
         target.resume_rendering(cb);
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();
@@ -432,8 +440,10 @@ impl Renderer {
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;
+        laps.lap("shade");
         (self.film).record(&self.device, cb, target, &unjittered)?;
         self.commands.mark("film")?;
+        laps.lap("film");
         // A still view's depth and normal are its sample 0's, at the pixels' centres, as
         // EEVEE's data passes keep the sample nearest; the host's buffers hold them after.
         // While anything changes they are each frame's, jittered.
@@ -441,6 +451,7 @@ impl Renderer {
         target.readback(cb, &read);
         self.commands.mark("readback")?;
         self.commands.submit()?;
+        laps.lap("submit");
         let pending = Pending {
             buffers,
             inputs,
@@ -452,7 +463,7 @@ impl Renderer {
                 record: start.elapsed(),
                 update,
                 shading,
-                need,
+                laps: laps.laps,
                 sample,
                 lights: lights.len(),
                 moved: moved.points.len(),
