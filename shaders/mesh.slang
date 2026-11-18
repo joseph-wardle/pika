@@ -7,8 +7,18 @@ struct Varyings
 {
     float4 position : SV_Position;
     float3 normal : NORMAL;
+    // Clip space at the frame before's camera, transform and point.
+    float4 previous_position : PREVIOUS;
     nointerpolation uint flip : FLIP;
 };
+
+// Where the vertex was at the frame before, by its point and its instance's transform then.
+float3 previous_world(uint vertex, uint slot)
+{
+    float4 *m = view->previous_instances + 7 * view->visible[slot];
+    float4 p = float4(load3(view->previous_points, view->vertices[vertex].x), 1);
+    return float3(dot(m[0], p), dot(m[1], p), dot(m[2], p));
+}
 
 [shader("vertex")]
 Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
@@ -17,6 +27,7 @@ Varyings vs(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
     Varyings o;
     o.position = p.position;
     o.normal = p.normal;
+    o.previous_position = transform(view->previous_view_projection, float4(previous_world(vertex, slot), 1));
     o.flip = p.flip;
     return o;
 }
@@ -28,6 +39,7 @@ struct Targets
     float4 color : SV_Target0;
     float depth : SV_Target1;
     float4 normal : SV_Target2;
+    float2 motion : SV_Target3;
 };
 
 [shader("fragment")]
@@ -43,5 +55,12 @@ Targets fs(Varyings v, bool front : SV_IsFrontFace)
     // Hydra's depth is OpenGL's window depth, 0 at the near plane.
     t.depth = 1 - v.position.z;
     t.normal = float4(n, 0);
+    // The jitter moved what this pixel's centre sees from where it falls unjittered.
+    float2 now = v.position.xy + view->jitter;
+    float2 was = (v.previous_position.xy / v.previous_position.w * 0.5 + 0.5) * float2(view->extent);
+    // Both count a pixel's centre at a half, so their difference is the same counted from whole
+    // numbers, as film.slang's resolve counts. Behind the camera before, so off its image: the
+    // greatest half float takes the resolve's lookup off the image too, where it drops the history.
+    t.motion = v.previous_position.w > 0 ? was - now : float2(65504);
     return t;
 }

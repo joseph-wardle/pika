@@ -87,6 +87,20 @@ impl Camera {
             eye: eye.map(|v| v as f32),
         })
     }
+
+    /// The camera whose pixels, over `extent`, sample `jitter` pixels from their centres along
+    /// the attachment's x and y, so the view moves by -`jitter`. Depth is unchanged.
+    pub fn jittered(&self, jitter: [f64; 2], extent: [u32; 2]) -> Self {
+        let mut c = *self;
+        let w = self.view_projection[3].map(f64::from);
+        for axis in 0..2 {
+            // Clip x / w spans 2 across the extent.
+            let shift = -2.0 * jitter[axis] / f64::from(extent[axis]);
+            let row = self.view_projection[axis].map(f64::from);
+            c.view_projection[axis] = std::array::from_fn(|k| (row[k] + shift * w[k]) as f32);
+        }
+        c
+    }
 }
 
 /// The instances a prototype is drawn at: each one's transform, composed as Hydra does (per
@@ -357,6 +371,34 @@ mod tests {
         // A point above the view axis has positive clip y: the top row is last.
         let (c, _) = clip(&camera, [0.0, 1.0, 0.0]);
         assert!(c[1] / c[3] > 0.0);
+    }
+
+    /// Where `p` lands in an image of `extent`, in pixels along the attachment's x and y.
+    fn pixel(camera: &Camera, p: [f64; 3], extent: [u32; 2]) -> [f64; 2] {
+        let (c, _) = clip(camera, p);
+        [0, 1].map(|i| (c[i] / c[3] * 0.5 + 0.5) * f64::from(extent[i]))
+    }
+
+    /// A jittered pixel's centre sees what lies `jitter` from it unjittered, at any depth;
+    /// the control, the jitter's opposite, misses by twice the jitter.
+    #[test]
+    fn jitter_moves_where_pixels_sample() {
+        let camera = Camera::new(&translate(0.0, 0.0, -5.0), &perspective()).unwrap();
+        let extent = [160, 90];
+        let jitter = [0.375, -0.25];
+        let jittered = camera.jittered(jitter, extent);
+        let opposite = camera.jittered(jitter.map(|v| -v), extent);
+        for p in [[0.3, -0.2, -2.0], [-4.0, 1.5, -40.0]] {
+            let [x, y] = pixel(&camera, p, extent);
+            let seen = [x - jitter[0], y - jitter[1]];
+            let error = |c: &Camera| {
+                let [a, b] = pixel(c, p, extent);
+                ((a - seen[0]).powi(2) + (b - seen[1]).powi(2)).sqrt()
+            };
+            assert!(error(&jittered) < 1e-3, "{}", error(&jittered));
+            assert!(error(&opposite) > 0.5);
+            assert_eq!(clip(&jittered, p).1 as f32, clip(&camera, p).1 as f32);
+        }
     }
 
     #[test]

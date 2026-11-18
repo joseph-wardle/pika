@@ -8,11 +8,12 @@ use std::time::Duration;
 use ash::vk;
 
 use crate::bake::{self, Bake, Builder, Built};
-use crate::geometry::{Bound, Group};
+use crate::draw::Group;
+use crate::geometry::Addresses;
 use crate::gpu::{self, Buffer};
 use crate::material::{self, Document, Network, Source};
 use crate::need::Footprint;
-use crate::raster::{COLOR_FORMATS, DEPTH_AOV, NORMAL_AOV};
+use crate::raster::{COLOR_FORMATS, DEPTH_AOV, MOTION, NORMAL_AOV};
 use crate::stats;
 use crate::store::{Moved, Store};
 use crate::target;
@@ -210,8 +211,10 @@ impl Shade {
         if self.builder.is_empty() {
             self.textures.refit(&heaps);
         }
-        let (swapped, bytes, read) = self.textures.swap(device, cb, &heaps);
-        (update.loaded, update.read) = (update.loaded + bytes, update.read + read);
+        let swapped = self.textures.swap(device, cb, &heaps);
+        update.loaded += swapped.bytes;
+        update.read += swapped.read;
+        let swapped = swapped.keys;
         if !swapped.is_empty() {
             for drawn in self.looks.values().filter_map(Look::built) {
                 if drawn.textures.iter().any(|key| swapped.contains(key)) {
@@ -347,7 +350,7 @@ impl Shade {
         cb: vk::CommandBuffer,
         color: vk::Format,
         area: vk::Rect2D,
-        geometry: &Bound,
+        geometry: &Addresses,
         groups: &[Group],
         view: &View,
     ) {
@@ -476,6 +479,7 @@ impl Surface {
                     (color, vk::ColorComponentFlags::RGBA),
                     (DEPTH_AOV.0, vk::ColorComponentFlags::empty()),
                     (NORMAL_AOV.0, vk::ColorComponentFlags::empty()),
+                    (MOTION, vk::ColorComponentFlags::empty()),
                 ];
                 gpu::graphics(
                     d,

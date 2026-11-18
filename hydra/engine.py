@@ -26,9 +26,10 @@ PXR_PLUGINPATH_NAME. The controls are the dictionary before the first
 frame, which has no frame pairs, the converged frame's pixel, which must
 differ from the clay, the edit's converged pixel, which must differ
 from the look it kept, and the fresh sessions' images at each cap, which
-must differ from each other. Accumulation's controls are the clay scene,
-whose hard shadow converges at its first frame, and the moved caster's
-converged image, which must differ from the one before.
+must differ from each other. Accumulation's control is the moved caster's
+converged image, which must differ from the one before; the clay scene,
+whose hard shadow is the same each sample, must still take SAMPLES, which
+its pixel filter's jitter needs.
 """
 
 import glob
@@ -45,7 +46,7 @@ from pxr import Gf, Usd, UsdGeom, UsdImagingGL, UsdShade
 SIZE = 64
 # How long a material's build may take before the check gives up.
 PATIENCE = 60
-# src/accumulation.rs SAMPLES.
+# src/film.rs SAMPLES.
 SAMPLES = 64
 
 
@@ -77,6 +78,15 @@ def centre(fbo):
     return pixel.red(), pixel.green(), pixel.blue()
 
 
+def framing(stage):
+    """The frustum usdview frames a new stage with."""
+    bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
+    frustum = Gf.Camera().frustum
+    frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
+                        bounds.ComputeAlignedRange().GetSize().GetLength() / 2)
+    return frustum
+
+
 def scene(path):
     """The engine rendering the scene with Pika, its stage and the params
     of its frames, framed as usdview frames a new stage."""
@@ -88,10 +98,7 @@ def scene(path):
         sys.exit("engine: cannot use the Pika renderer plugin")
     engine.SetRenderViewport(Gf.Vec4d(0, 0, SIZE, SIZE))
     engine.SetRendererAov("color")
-    bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
-    frustum = Gf.Camera().frustum
-    frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
-                        bounds.ComputeAlignedRange().GetSize().GetLength() / 2)
+    frustum = framing(stage)
     engine.SetCameraState(frustum.ComputeViewMatrix(), frustum.ComputeProjectionMatrix())
     params = UsdImagingGL.RenderParams()
     params.frame = Usd.TimeCode(1)
@@ -207,8 +214,9 @@ def main(clay, painted, mipped, penumbra):
     if stats_hold_a_frame(before):
         sys.exit(f"engine: the stats held a frame before one was drawn: {before}")
     pixels = converge(engine, stage, params, fbo)
-    if len(pixels) != 1:
-        sys.exit(f"engine: the clay's hard shadow took {len(pixels)} frames to converge, not 1")
+    # Its hard shadow is the same each sample, but the pixel filter's jitter is not.
+    if len(pixels) < SAMPLES:
+        sys.exit(f"engine: the clay converged in {len(pixels)} frames, not {SAMPLES} samples")
     after = engine.GetRenderStats()
     if not stats_hold_a_frame(after):
         sys.exit(f"engine: the host does not see the frame in Pika's stats: {after}")

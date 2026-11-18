@@ -233,14 +233,17 @@ struct View
     float4 view_projection[4];
     // The camera position (w = 1), or the direction toward it (w = 0).
     float4 eye;
+    // The frame before's view_projection, unjittered (src/film.rs).
+    float4 previous_view_projection[4];
     Light *lights;
     // Per tile, row by row: the first of its tile_lights and how many.
     uint2 *light_tiles;
     uint *tile_lights;
     uint2 extent;
-    // The frame's index among those drawn while nothing changes, 0 while anything does
-    // (src/renderer.rs).
-    uint sample;
+    // Where view_projection moves each pixel's sample, in pixels from its centre.
+    float2 jitter;
+    // The frame's index into the shadow pattern's sequence (src/film.rs Film::pattern).
+    uint pattern;
     uint unused;
     float *points;
     float *normals;
@@ -252,6 +255,10 @@ struct View
     uint *tangents;
     // 7 per instance (src/transform.rs Instance).
     float4 *instances;
+    // The instances as the frame before drew them (src/draw.rs Draws).
+    float4 *previous_instances;
+    // The points as the frame before drew them (src/geometry.rs Layout).
+    float *previous_points;
     uint *owners;
     // Per record: the low corner of its mesh's box, then the high one.
     float *boxes;
@@ -264,8 +271,12 @@ struct View
     Shadow *shadows;
 };
 
+float4 transform(float4 rows[4], float4 v)
+{
+    return float4(dot(rows[0], v), dot(rows[1], v), dot(rows[2], v), dot(rows[3], v));
+}
+
 float4 project(View *view, float4 world)
 {
-    return float4(dot(view->view_projection[0], world), dot(view->view_projection[1], world),
-                  dot(view->view_projection[2], world), dot(view->view_projection[3], world));
+    return transform(view->view_projection, world);
 }

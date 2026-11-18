@@ -2,7 +2,7 @@
 
 use ash::vk;
 
-use crate::geometry::Bound;
+use crate::geometry::Addresses;
 use crate::gpu;
 use crate::view::View;
 
@@ -32,7 +32,7 @@ impl Cull {
     }
 
     /// Call after `view` began its frame.
-    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Bound, view: &View) {
+    pub fn record(&self, cb: vk::CommandBuffer, geometry: &Addresses, view: &View) {
         if geometry.count == 0 {
             return;
         }

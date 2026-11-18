@@ -3,25 +3,23 @@
 use std::fs::File;
 use std::io::Write;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ash::vk;
 
-use crate::accumulation::{self, Accumulation};
 use crate::commands::Commands;
 use crate::cull::Cull;
-use crate::geometry::{self, Geometry};
+use crate::film::Film;
+use crate::geometry::Geometry;
 use crate::gpu;
 use crate::light::{self, Tiles};
-use crate::link::Links;
 use crate::raster::{self, Raster};
 use crate::shade::Shade;
 use crate::shader;
-use crate::shadow::{Caster, Shadows};
+use crate::shadow::Shadows;
 use crate::stats::{self, Stats};
 use crate::store::{Moved, Store};
 use crate::target::Target;
-use crate::texture::Needs;
 use crate::transform::Camera;
 use crate::view::View;
 
@@ -81,6 +79,53 @@ pub struct Frame<'a> {
     pub shadow_pool: u32,
 }
 
+impl Frame<'_> {
+    fn check(&self) -> Result<(), String> {
+        let [x, y, w, h] = self.window;
+        if w == 0 || h == 0 || x + w > self.width || y + h > self.height {
+            return Err(format!(
+                "the data window ({x}, {y}) {w}×{h} is not inside the {}×{} render buffers",
+                self.width, self.height
+            ));
+        }
+        let pixels = self.width as usize * self.height as usize;
+        let expect = |aov: &Option<Aov>, name, formats: &[Format]| match aov {
+            Some(a) if !formats.contains(&a.format) => Err(format!(
+                "the {name} AOV is {:?}; Pika writes it as {formats:?}",
+                a.format
+            )),
+            Some(a) if a.pixels.len() != pixels * a.format.bytes_per_pixel() => Err(format!(
+                "the {name} render buffer is {} bytes, not {}×{} {:?}",
+                a.pixels.len(),
+                self.width,
+                self.height,
+                a.format
+            )),
+            _ => Ok(()),
+        };
+        expect(
+            &self.color,
+            "color",
+            &[Format::Float16Vec4, Format::Float32Vec4],
+        )?;
+        expect(&self.depth, "depth", &[Format::Float32])?;
+        expect(&self.normal, "normal", &[Format::Float32Vec3])
+    }
+
+    /// Each attachment's format and bytes per pixel, in the AOVs' order: color as the host
+    /// asks, half float without it.
+    fn formats(&self) -> [(vk::Format, usize); 3] {
+        let color = match self.color.as_ref().map(|a| a.format) {
+            Some(Format::Float32Vec4) => (raster::COLOR_FORMATS[1], 16),
+            _ => (raster::COLOR_FORMATS[0], 8),
+        };
+        [color, raster::DEPTH_AOV, raster::NORMAL_AOV]
+    }
+}
+
+/// The color AOV's place among a frame's three: color, depth, normal.
+const COLOR: usize = 0;
+
 /// OpenGL's far plane.
 const FAR: f32 = 1.0;
 
@@ -98,14 +143,17 @@ pub struct Renderer {
     shade: Shade,
     shadows: Shadows,
     cull: Cull,
-    accumulation: Accumulation,
+    film: Film,
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
     /// `PIKA_STORE_DUMP`, for the fixture checks; writing it changes nothing about rendering.
     dump: Option<(String, File)>,
     syncs: usize,
+    /// The frame the last call submitted, when it left placing it to this one.
     pending: Option<Pending>,
+    /// The buffers the last frame was placed in and what it was drawn from. A call with both
+    /// the same draws the next still sample; one with the same buffers may place its frame late.
     placed: Option<(Buffers, Inputs)>,
 }
 
@@ -118,6 +166,19 @@ struct Inputs {
     render_tags: Vec<String>,
     texture_cap: u32,
     shadow_pool: u32,
+}
+
+impl Inputs {
+    fn of(frame: &Frame) -> Self {
+        Self {
+            world_to_view: frame.world_to_view,
+            projection: frame.projection,
+            clear_color: frame.clear_color,
+            render_tags: frame.render_tags.clone(),
+            texture_cap: frame.texture_cap,
+            shadow_pool: frame.shadow_pool,
+        }
+    }
 }
 
 /// The host's buffers are taken to hold the last frame placed into ones that match.
@@ -143,30 +204,16 @@ impl Buffers {
     }
 }
 
+/// A frame submitted and not yet placed in the host's buffers.
 struct Pending {
     buffers: Buffers,
     inputs: Inputs,
     formats: [(vk::Format, usize); 3],
+    /// Per AOV, whether the frame read it back.
     read: [bool; 3],
-    period: Option<Duration>,
-    record: Duration,
-    update: geometry::Update,
     /// Whether the view was culled, so its counts are this frame's.
     culled: bool,
-    sample: u32,
-    lights: usize,
-    moved: usize,
-    transforms: usize,
-    latent: bool,
-    compiled: usize,
-    baked: usize,
-    loaded: u64,
-    texture_read: Duration,
-    pending: usize,
-    pending_textures: usize,
-    lowered_textures: usize,
-    need: Duration,
-    needs: Needs,
+    recorded: stats::Recorded,
 }
 
 impl Renderer {
@@ -193,7 +240,7 @@ impl Renderer {
         let smooth = shader::compile("smooth")?;
         let tangent = shader::compile("tangent")?;
         let shadow = shader::compile("shadow")?;
-        let accumulation = shader::compile("accumulation")?;
+        let film = shader::compile("film")?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -204,7 +251,7 @@ impl Renderer {
             shade: Shade::new(&device)?,
             shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            accumulation: Accumulation::new(&device, &accumulation.spirv)?,
+            film: Film::new(&device, &film.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
             device_name,
@@ -236,65 +283,18 @@ impl Renderer {
     /// its samples all drawn. While frames change, each call returns the frame before and leaves
     /// this one on the GPU, so GPU work overlaps the host's own frame time instead of running in
     /// series with it. While nothing changes, each call draws the next sample until converged.
+    ///
+    /// In order: place the frame before; return if nothing is left to draw; update the geometry,
+    /// materials, lights and view; record the passes; submit; place the frame now or leave it
+    /// pending.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
-        let [x, y, w, h] = frame.window;
-        if w == 0 || h == 0 || x + w > frame.width || y + h > frame.height {
-            return Err(format!(
-                "the data window ({x}, {y}) {w}×{h} is not inside the {}×{} render buffers",
-                frame.width, frame.height
-            ));
-        }
-        let expect = |aov: &Option<Aov>, name, formats: &[Format]| match aov {
-            Some(a) if !formats.contains(&a.format) => Err(format!(
-                "the {name} AOV is {:?}; Pika writes it as {formats:?}",
-                a.format
-            )),
-            Some(a)
-                if a.pixels.len()
-                    != frame.width as usize
-                        * frame.height as usize
-                        * a.format.bytes_per_pixel() =>
-            {
-                Err(format!(
-                    "the {name} render buffer is {} bytes, not {}×{} {:?}",
-                    a.pixels.len(),
-                    frame.width,
-                    frame.height,
-                    a.format
-                ))
-            }
-            _ => Ok(()),
-        };
-        expect(
-            &frame.color,
-            "color",
-            &[Format::Float16Vec4, Format::Float32Vec4],
-        )?;
-        expect(&frame.depth, "depth", &[Format::Float32])?;
-        expect(&frame.normal, "normal", &[Format::Float32Vec3])?;
-        let color = frame
-            .color
-            .as_ref()
-            .map_or(Format::Float16Vec4, |a| a.format);
-        let formats = [
-            match color {
-                Format::Float32Vec4 => (raster::COLOR_FORMATS[1], 16),
-                _ => (raster::COLOR_FORMATS[0], 8),
-            },
-            raster::DEPTH_AOV,
-            raster::NORMAL_AOV,
-        ];
+        frame.check()?;
+        let [_, _, w, h] = frame.window;
+        let formats = frame.formats();
         let camera = Camera::new(&frame.world_to_view, &frame.projection)?;
         let buffers = Buffers::of(&frame);
-        let inputs = Inputs {
-            world_to_view: frame.world_to_view,
-            projection: frame.projection,
-            clear_color: frame.clear_color,
-            render_tags: frame.render_tags.clone(),
-            texture_cap: frame.texture_cap,
-            shadow_pool: frame.shadow_pool,
-        };
+        let inputs = Inputs::of(&frame);
         let mut aovs = [frame.color, frame.depth, frame.normal];
 
         let moved = self.store.take_moved();
@@ -305,10 +305,11 @@ impl Renderer {
         let unchanged = moved == Moved::default()
             && placed == Some(&(buffers, inputs.clone()))
             && self.shade.settled();
-        if unchanged && self.accumulation.converged() {
+        if unchanged && self.film.converged() {
             return Ok(true);
         }
-        let latent = placed.is_some_and(|(b, _)| *b == buffers);
+        // The buffers hold the frame before, so this one may be placed by the next call.
+        let late = placed.is_some_and(|(b, _)| *b == buffers);
 
         let start = Instant::now();
         self.shadows.reserve(&self.device, inputs.shadow_pool)?;
@@ -317,7 +318,13 @@ impl Renderer {
             slot => {
                 // Free the old target before allocating its replacement.
                 *slot = None;
-                slot.insert(Target::new(&self.device, &formats, w, h)?)
+                slot.insert(Target::new(
+                    &self.device,
+                    &formats,
+                    &[raster::MOTION],
+                    w,
+                    h,
+                )?)
             }
         };
         let cb = self.commands.begin()?;
@@ -340,35 +347,19 @@ impl Renderer {
             cb,
         )?;
         self.commands.mark("texture")?;
-        // A swap begun draws the old image until whole, but its end must start the sum again.
-        let still = unchanged && self.shade.settled();
-        if !still {
-            self.accumulation.drawn = 0;
-        }
-        let sample = self.accumulation.drawn;
-        let bound = self.geometry.bound();
-        // A headlight is the host's to send, so a store holding no light draws black.
-        let links = Links::new(&self.store);
-        let mut lights = Vec::new();
-        let mut casters = Vec::new();
-        for (&id, l) in self.store.lights() {
-            let Some(resolved) = light::resolve(l) else {
-                continue;
-            };
-            let link = links.light(l);
-            if l.params.is_some_and(|p| p.shadow) {
-                casters.push(Caster {
-                    id,
-                    light: lights.len(),
-                    link: link.shadow,
-                });
-            }
-            lights.push(light::Light {
-                link: link.light,
-                ..resolved
-            });
-        }
-        if let Some(g) = &bound {
+        // Asked again, since the update above may have ended a texture swap: a swap begun draws
+        // the old image until whole, but its end must start the sum again.
+        let sample = (self.film).begin(unchanged && self.shade.settled());
+        // Texture needs above take the unjittered camera: jitter moves a pixel by under one.
+        let unjittered = camera;
+        let jitter = self.film.jitter();
+        let camera = unjittered.jittered(jitter, [w, h]);
+        // With no frame before, nothing has moved.
+        let previous_view_projection =
+            (self.film.previous_view_projection()).unwrap_or(unjittered.view_projection);
+        let addresses = self.geometry.addresses();
+        let (mut lights, casters) = light::gather(&self.store);
+        if let Some(g) = &addresses {
             let (device, geometry) = (&self.device, &self.geometry);
             let projection = &inputs.projection;
             (self.shadows).fit(
@@ -382,10 +373,9 @@ impl Renderer {
                 &casters,
             )?;
         }
-        self.accumulation.wanted = accumulation::samples(&lights);
         let tiles = Tiles::new(&lights, &camera, [w, h]);
         let capacity = light::capacity(lights.len(), [w, h]);
-        let mut view = match (&bound, &mut self.view) {
+        let mut view = match (&addresses, &mut self.view) {
             (None, _) => None,
             (Some(g), Some(v)) if v.fits(g, capacity) => Some(v),
             (Some(g), slot) => {
@@ -393,16 +383,18 @@ impl Renderer {
                 Some(slot.insert(View::new(&self.device, g, capacity)?))
             }
         };
-        if let (Some(geometry), Some(view)) = (&bound, view.as_deref_mut()) {
+        if let (Some(geometry), Some(view)) = (&addresses, view.as_deref_mut()) {
             let shadows = self.shadows.table();
             view.begin(
                 cb,
                 &camera,
+                jitter,
+                &previous_view_projection,
                 geometry,
                 &lights,
                 &tiles,
                 [w, h],
-                sample,
+                self.film.pattern(),
                 shadows,
             );
             self.cull.record(cb, geometry, view);
@@ -419,9 +411,9 @@ impl Renderer {
                 clears[1],
             ],
         );
-        let drawn = bound.as_ref().zip(view.as_deref());
+        let drawn = addresses.as_ref().zip(view.as_deref());
         if let Some((geometry, view)) = drawn {
-            (self.raster).draw(cb, formats[0].0, target.area(), geometry, view);
+            (self.raster).draw(cb, formats[COLOR].0, target.area(), geometry, view);
         }
         target.end_rendering(cb);
         self.commands.mark("draw")?;
@@ -436,16 +428,16 @@ impl Renderer {
         target.resume_rendering(cb);
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();
-            (self.shade).draw(cb, formats[0].0, target.area(), geometry, groups, view);
+            (self.shade).draw(cb, formats[COLOR].0, target.area(), geometry, groups, view);
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;
-        // A frame drawn while anything changes is shown alone, since the next is drawn anew.
-        if still {
-            self.accumulation.record(&self.device, cb, target)?;
-        }
-        self.commands.mark("accumulate")?;
-        let read = aovs.each_ref().map(Option::is_some);
+        (self.film).record(&self.device, cb, target, &unjittered)?;
+        self.commands.mark("film")?;
+        // A still view's depth and normal are its sample 0's, at the pixels' centres, as
+        // EEVEE's data passes keep the sample nearest; the host's buffers hold them after.
+        // While anything changes they are each frame's, jittered.
+        let read = [0, 1, 2].map(|i| aovs[i].is_some() && (i == COLOR || sample == 0));
         target.readback(cb, &read);
         self.commands.mark("readback")?;
         self.commands.submit()?;
@@ -454,31 +446,26 @@ impl Renderer {
             inputs,
             formats,
             read,
-            period,
-            record: start.elapsed(),
-            update,
             culled: view.is_some(),
-            sample,
-            lights: lights.len(),
-            moved: moved.points.len(),
-            transforms: moved.transforms.len(),
-            latent,
-            compiled: shading.compiled,
-            baked: shading.baked,
-            loaded: shading.loaded,
-            texture_read: shading.read,
-            pending: shading.pending,
-            pending_textures: shading.pending_textures,
-            lowered_textures: shading.lowered_textures,
-            need,
-            needs: shading.needs,
+            recorded: stats::Recorded {
+                period,
+                record: start.elapsed(),
+                update,
+                shading,
+                need,
+                sample,
+                lights: lights.len(),
+                moved: moved.points.len(),
+                transforms: moved.transforms.len(),
+                late,
+            },
         };
-        if latent {
+        if late {
             self.pending = Some(pending);
             return Ok(false);
         }
         self.collect(pending, &buffers, &mut aovs)?;
-        Ok(self.shade.settled() && self.accumulation.converged())
+        Ok(self.shade.settled() && self.film.converged())
     }
 
     /// Places the pending frame only if `aovs` are the buffers it was drawn for.
@@ -500,18 +487,20 @@ impl Renderer {
         let fits = pending.buffers == *buffers;
         if fits {
             for (i, aov) in aovs.iter_mut().enumerate() {
-                if let Some(aov) = aov {
-                    let (width, height) = (buffers.width, buffers.height);
-                    let window = [x, y, w, h];
-                    place(
-                        target.pixels(i),
-                        pending.formats[i].1,
-                        aov,
-                        width,
-                        height,
-                        window,
-                    );
-                }
+                // An AOV not read back keeps what the buffer holds.
+                let Some(aov) = aov.as_mut().filter(|_| pending.read[i]) else {
+                    continue;
+                };
+                let (width, height) = (buffers.width, buffers.height);
+                let window = [x, y, w, h];
+                place(
+                    target.pixels(i),
+                    pending.formats[i].1,
+                    aov,
+                    width,
+                    height,
+                    window,
+                );
             }
         }
         let place = placing.elapsed();
@@ -525,7 +514,7 @@ impl Renderer {
         let vram = self.device.heaps()[local];
         let (vram_used, vram_budget) = (vram.used, vram.allowed);
         let mut targets = target.memory();
-        targets += self.accumulation.memory();
+        targets += self.film.memory();
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
             views: self.view.as_ref().map(View::memory).unwrap_or_default(),
@@ -538,29 +527,13 @@ impl Renderer {
         self.stats.frame(stats::Frame {
             width: w,
             height: h,
-            period: pending.period,
-            record: pending.record,
+            recorded: pending.recorded,
             times,
             place,
-            update: pending.update,
             read_bytes,
             drawn,
-            sample: pending.sample,
-            lights: pending.lights,
             shadow,
             memory,
-            moved: pending.moved,
-            transforms: pending.transforms,
-            latent: pending.latent,
-            compiled: pending.compiled,
-            baked: pending.baked,
-            loaded: pending.loaded,
-            texture_read: pending.texture_read,
-            pending: pending.pending,
-            pending_textures: pending.pending_textures,
-            lowered_textures: pending.lowered_textures,
-            need: pending.need,
-            needs: pending.needs,
         })?;
         self.placed = fits.then_some((pending.buffers, pending.inputs));
         Ok(())

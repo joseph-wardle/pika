@@ -4,7 +4,9 @@ Pika ships this third-party code, each with its notice and licence beside it:
   Copyright Binomial LLC, under the Apache License 2.0 (bake/bc7e/NOTICE),
   compiled into the texture tool.
 - bake/libraries: the texture sampling file of the MaterialX project's Slang
-  generator, modified for Pika's UDIM arrays, under the Apache License 2.0
-  (bake/libraries/NOTICE), compiled into every material shader.
+  generator, modified for Pika's UDIM arrays, and its normal map node's
+  source, modified to leave the normal where a map has no direction, under
+  the Apache License 2.0 (bake/libraries/NOTICE), compiled into every
+  material shader.
 
 A binary distribution of the bake tools carries these notices with it.

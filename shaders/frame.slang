@@ -280,7 +280,8 @@ float2 from_light(Shadow *s, float3 q, float depth, float caster)
     return float2(d, d * caster / max(depth, 1e-30));
 }
 
-// Steps along a shadow ray, and the last at P.
+// Steps along a shadow ray, and the last at P. Fewer is not free: at 3, ALab's converged
+// penumbrae and contact shadows changed visibly, an error no history averages away.
 static const uint STEPS = 6;
 
 // Whether the ray from P, start in light space, to a point across the light, end, meets a
@@ -321,13 +322,13 @@ float noise(float2 pixel)
     return frac(52.9829189 * frac(dot(floor(pixel), float2(0.06711056, 0.00583715))));
 }
 
-// The pattern's three values at a pixel for the view's sample, each shifted per sample along
-// Roberts' R3 sequence, so a pixel's samples spread evenly; sample 0's are the pattern itself.
-// While anything changes it stays at sample 0: a pattern moving each frame would shimmer until
-// temporal history averages it.
+// The pattern's three values at a pixel for the view's index into its sequence, each shifted
+// per index along Roberts' R3 sequence, so a pixel's samples spread evenly; index 0's are the
+// pattern itself. While anything changes the index cycles too, so history averages a
+// penumbra's rays as the still sum does.
 float3 pattern(float2 pixel)
 {
-    float3 shift = float(view->sample) * float3(0.8191725, 0.6710436, 0.5497005);
+    float3 shift = float(view->pattern) * float3(0.8191725, 0.6710436, 0.5497005);
     return frac(float3(noise(pixel), noise(pixel + float2(113, 47)), noise(pixel + float2(59, 193))) + shift);
 }
 

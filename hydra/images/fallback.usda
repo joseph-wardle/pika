@@ -1,6 +1,6 @@
 #usda 1.0
 (
-    doc = "A quad facing the camera, bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb whose file does not exist, so its path arrives empty: the node's fallback is drawn in its place, as Storm draws it, and it changes at frame 2, which builds the material again. The wrap modes are authored, since useMetadata would read the missing file's."
+    doc = "A quad facing the camera, bound to a UsdPreviewSurface emitting a UsdUVTexture's rgb whose file does not exist, so its path arrives empty: the node's fallback is drawn in its place, as Storm draws it, and it changes at frame 2, which builds the material again. Beside it a lit quad whose normal is such a texture's rgb, its fallback the zero vector, as a normal map's missing UDIM tile reads too: a normal with no direction leaves the quad's own. The wrap modes are authored, since useMetadata would read the missing file's."
     subLayers = [@settings.usda@, @light.usda@]
     startTimeCode = 1
     endTimeCode = 2
@@ -28,6 +28,18 @@ def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])
     rel material:binding = </missing>
 }
 
+def Mesh "unmapped" (prepend apiSchemas = ["MaterialBindingAPI"])
+{
+    uniform token subdivisionScheme = "none"
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    point3f[] points = [(1.3, -0.2, -5), (1.7, -0.2, -5), (1.7, 0.2, -5), (1.3, 0.2, -5)]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+    rel material:binding = </zero>
+}
+
 def Material "missing"
 {
     token outputs:surface.connect = </missing/surface.outputs:surface>
@@ -53,6 +65,39 @@ def Material "missing"
         token inputs:wrapS = "repeat"
         token inputs:wrapT = "repeat"
         float2 inputs:st.connect = </missing/st.outputs:result>
+        float3 outputs:rgb
+    }
+
+    def Shader "st"
+    {
+        uniform token info:id = "UsdPrimvarReader_float2"
+        string inputs:varname = "st"
+        float2 outputs:result
+    }
+}
+
+def Material "zero"
+{
+    token outputs:surface.connect = </zero/surface.outputs:surface>
+
+    def Shader "surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor = (0.5, 0.4, 0.3)
+        normal3f inputs:normal.connect = </zero/image.outputs:rgb>
+        int inputs:useSpecularWorkflow = 1
+        color3f inputs:specularColor = (0, 0, 0)
+        token outputs:surface
+    }
+
+    def Shader "image"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @nowhere.exr@ (colorSpace = "raw")
+        float4 inputs:fallback = (0, 0, 0, 1)
+        token inputs:wrapS = "repeat"
+        token inputs:wrapT = "repeat"
+        float2 inputs:st.connect = </zero/st.outputs:result>
         float3 outputs:rgb
     }
 

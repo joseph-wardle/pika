@@ -25,6 +25,8 @@ LINES = (
     # Listing, drawing and copying shadow pages; their lookups are in shade.
     ("shadow", ("gpu_shadow_list_ms", "gpu_shadow_pages_ms", "gpu_shadow_copy_ms",
                 "gpu_shadow_live_ms"), 3.0),
+    # The copies out of the attachments, history's resolve or the still sum, and the copy back.
+    ("film", ("gpu_film_ms",), 1.0),
     ("update", ("gpu_upload_ms", "gpu_subdiv_ms", "gpu_smooth_ms", "gpu_tangent_ms",
                 "gpu_texture_ms"), 1.0),
     ("delivery", ("gpu_readback_ms", "place_ms"), 5.0),

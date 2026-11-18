@@ -4,7 +4,8 @@
 use std::f32::consts::PI;
 use std::ops::Range;
 
-use crate::store::{self, LightParams, Shape};
+use crate::link::Links;
+use crate::store::{self, LightParams, Shape, Store};
 use crate::transform::Camera;
 
 pub const TILE: u32 = 16;
@@ -135,8 +136,43 @@ fn brightest(c: [f32; 3]) -> f32 {
     c.into_iter().fold(0.0, f32::max)
 }
 
+/// A shadowed light, by its index among the view's lights.
+pub struct Caster {
+    /// Its light's id in the store, which keeps its shadow's pages from frame to frame.
+    pub id: u64,
+    pub light: usize,
+    /// Its shadow-link bit, 0 when every mesh casts.
+    pub link: u32,
+}
+
+/// The store's lights that shine, each with its light-link bit, and those of them that cast
+/// shadows. A headlight is the host's to send, so a store holding no light draws black.
+pub fn gather(store: &Store) -> (Vec<Light>, Vec<Caster>) {
+    let links = Links::new(store);
+    let mut lights = Vec::new();
+    let mut casters = Vec::new();
+    for (&id, l) in store.lights() {
+        let Some(resolved) = resolve(l) else {
+            continue;
+        };
+        let link = links.light(l);
+        if l.params.is_some_and(|p| p.shadow) {
+            casters.push(Caster {
+                id,
+                light: lights.len(),
+                link: link.shadow,
+            });
+        }
+        lights.push(Light {
+            link: link.light,
+            ..resolved
+        });
+    }
+    (lights, casters)
+}
+
 /// `None` until Hydra has synced params and transform, while hidden, or when black.
-pub fn resolve(light: &store::Light) -> Option<Light> {
+fn resolve(light: &store::Light) -> Option<Light> {
     let (Some(params), Some(m)) = (&light.params, &light.transform) else {
         return None;
     };

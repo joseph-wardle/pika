@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 use crate::commands::Times;
 use crate::geometry::Update;
 use crate::gpu;
+use crate::shade;
 use crate::shadow;
 use crate::store::{Census, Stats as Pulled};
-use crate::texture::Needs;
 
 pub struct Stats {
     file: Option<(String, File)>,
@@ -30,42 +30,39 @@ pub struct Sync {
     pub census: Census,
 }
 
-pub struct Frame {
-    pub width: u32,
-    pub height: u32,
+/// What is known of a frame once it is submitted.
+pub struct Recorded {
     /// None for the first frame.
     pub period: Option<Duration>,
     /// CPU work before the submit: updating the geometry and recording.
     pub record: Duration,
-    pub times: Times,
-    pub place: Duration,
     pub update: Update,
-    pub read_bytes: u64,
-    /// Instances, then triangles.
-    pub drawn: [u32; 2],
+    pub shading: shade::Update,
+    /// The time estimating the textures' needs.
+    pub need: Duration,
     /// Its index among the frames drawn while nothing changed, 0 while anything did.
     pub sample: u32,
     pub lights: usize,
-    pub shadow: shadow::Counts,
-    pub memory: Memory,
     /// Meshes whose points moved.
     pub moved: usize,
     /// Meshes whose transform moved.
     pub transforms: usize,
     /// Placed a call later than it was drawn.
-    pub latent: bool,
-    pub compiled: usize,
-    pub baked: usize,
-    /// Bytes.
-    pub loaded: u64,
-    pub texture_read: Duration,
-    /// Materials whose build is out, drawn clay or as they were.
-    pub pending: usize,
-    pub pending_textures: usize,
-    /// Textures lowered past the cap's levels to fit the device's memory.
-    pub lowered_textures: usize,
-    pub need: Duration,
-    pub needs: Needs,
+    pub late: bool,
+}
+
+/// A frame placed in the host's buffers.
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub recorded: Recorded,
+    pub times: Times,
+    pub place: Duration,
+    pub read_bytes: u64,
+    /// Instances, then triangles.
+    pub drawn: [u32; 2],
+    pub shadow: shadow::Counts,
+    pub memory: Memory,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -173,7 +170,7 @@ impl Stats {
                 text += &format!("\n  {prefix}{name} {}", percentiles(values));
             }
         }
-        let periods = self.frames.iter().filter_map(|f| f.period).map(ms);
+        let periods = self.frames.iter().filter_map(|f| f.recorded.period).map(ms);
         let (misses, run) = misses(periods);
         text += &format!("\n  frames over {BUDGET_MS} ms: {misses}, longest run {run}");
         let m = &last.memory;
@@ -250,34 +247,36 @@ impl Sync {
 }
 
 impl Frame {
-    /// `layout` and `draws` are 1 when they were rewritten, and `latent`
-    /// when the frame was placed a call late.
+    /// `layout` and `draws` are 1 when they were rewritten, and `late` when
+    /// the frame was placed a call after it was drawn.
     pub fn pairs(&self) -> Vec<(String, f64)> {
         let m = &self.memory;
+        let r = &self.recorded;
+        let s = &r.shading;
         let mut pairs = vec![
             ("width".to_string(), f64::from(self.width)),
             ("height".into(), f64::from(self.height)),
         ];
-        if let Some(period) = self.period {
+        if let Some(period) = r.period {
             pairs.push(("period_ms".into(), ms(period)));
         }
         pairs.extend([
-            ("record_ms".into(), ms(self.record)),
+            ("record_ms".into(), ms(r.record)),
             ("wait_ms".into(), ms(self.times.wait)),
             ("place_ms".into(), ms(self.place)),
-            ("texture_read_ms".into(), ms(self.texture_read)),
-            ("need_ms".into(), ms(self.need)),
+            ("texture_read_ms".into(), ms(s.read)),
+            ("need_ms".into(), ms(r.need)),
         ]);
         pairs.extend(
             (self.times.spans.iter()).map(|(label, t)| (format!("gpu_{label}_ms"), ms(*t))),
         );
         let counts = [
-            ("uploaded_bytes", self.update.bytes),
+            ("uploaded_bytes", r.update.bytes),
             ("read_bytes", self.read_bytes),
             ("drawn_instances", u64::from(self.drawn[0])),
             ("drawn_triangles", u64::from(self.drawn[1])),
-            ("drawn_lights", self.lights as u64),
-            ("sample", u64::from(self.sample)),
+            ("drawn_lights", r.lights as u64),
+            ("sample", u64::from(r.sample)),
             ("shadow_pages_held", u64::from(self.shadow.held)),
             ("shadow_pages_wanted", u64::from(self.shadow.wanted)),
             ("shadow_pages_drawn", u64::from(self.shadow.drawn)),
@@ -295,20 +294,20 @@ impl Frame {
             ),
             ("vram_used_bytes", m.vram_used),
             ("vram_budget_bytes", m.vram_budget),
-            ("moved_meshes", self.moved as u64),
-            ("moved_transforms", self.transforms as u64),
-            ("layout", u64::from(self.update.layout)),
-            ("draws", u64::from(self.update.draws)),
-            ("latent", u64::from(self.latent)),
-            ("compiled_surfaces", self.compiled as u64),
-            ("baked_textures", self.baked as u64),
-            ("texture_uploaded_bytes", self.loaded),
-            ("pending_materials", self.pending as u64),
-            ("pending_textures", self.pending_textures as u64),
-            ("lowered_textures", self.lowered_textures as u64),
-            ("unseen_textures", self.needs.unseen as u64),
-            ("unestimated_textures", self.needs.unestimated as u64),
-            ("blurred_textures", self.needs.blurred as u64),
+            ("moved_meshes", r.moved as u64),
+            ("moved_transforms", r.transforms as u64),
+            ("layout", u64::from(r.update.layout)),
+            ("draws", u64::from(r.update.draws)),
+            ("late", u64::from(r.late)),
+            ("compiled_surfaces", s.compiled as u64),
+            ("baked_textures", s.baked as u64),
+            ("texture_uploaded_bytes", s.loaded),
+            ("pending_materials", s.pending as u64),
+            ("pending_textures", s.pending_textures as u64),
+            ("lowered_textures", s.lowered_textures as u64),
+            ("unseen_textures", s.needs.unseen as u64),
+            ("unestimated_textures", s.needs.unestimated as u64),
+            ("blurred_textures", s.needs.blurred as u64),
         ];
         pairs.extend(counts.map(|(k, v)| (k.to_string(), v as f64)));
         pairs
@@ -357,14 +356,42 @@ pub fn size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::texture::Needs;
 
     fn frame(period: Option<f64>) -> Frame {
         let ms = |t: f64| Duration::from_secs_f64(t / 1e3);
         Frame {
             width: 1620,
             height: 1080,
-            period: period.map(ms),
-            record: ms(1.5),
+            recorded: Recorded {
+                period: period.map(ms),
+                record: ms(1.5),
+                update: Update {
+                    bytes: 4096,
+                    layout: false,
+                    draws: true,
+                },
+                shading: shade::Update {
+                    compiled: 0,
+                    baked: 2,
+                    loaded: 3_145_728,
+                    read: ms(0.25),
+                    pending: 1,
+                    pending_textures: 2,
+                    lowered_textures: 3,
+                    needs: Needs {
+                        unseen: 4,
+                        unestimated: 5,
+                        blurred: 6,
+                    },
+                },
+                need: ms(0.5),
+                sample: 3,
+                lights: 47,
+                moved: 338,
+                transforms: 12,
+                late: true,
+            },
             times: Times {
                 wait: ms(5.25),
                 spans: vec![
@@ -375,15 +402,8 @@ mod tests {
                 ],
             },
             place: ms(4.5),
-            update: Update {
-                bytes: 4096,
-                layout: false,
-                draws: true,
-            },
             read_bytes: 20_995_200,
             drawn: [1274, 11_550_000],
-            sample: 3,
-            lights: 47,
             shadow: shadow::Counts {
                 wanted: 300,
                 held: 256,
@@ -413,22 +433,6 @@ mod tests {
                 vram_used: 2_000_000_000,
                 vram_budget: 15_000_000_000,
             },
-            moved: 338,
-            transforms: 12,
-            latent: true,
-            compiled: 0,
-            baked: 2,
-            loaded: 3_145_728,
-            texture_read: ms(0.25),
-            pending: 1,
-            pending_textures: 2,
-            lowered_textures: 3,
-            need: ms(0.5),
-            needs: Needs {
-                unseen: 4,
-                unestimated: 5,
-                blurred: 6,
-            },
         }
     }
 
@@ -441,7 +445,7 @@ mod tests {
              shadow_pages_held 256 shadow_pages_wanted 300 shadow_pages_drawn 12 shadow_pages_live 5 shadow_draws 9000 \
              shadow_triangles 400000 geometry_bytes 1073741824 view_bytes 40000 target_bytes 14000000 \
              material_bytes 0 shadow_bytes 67108864 host_bytes 22048592 vram_used_bytes 2000000000 vram_budget_bytes 15000000000 \
-             moved_meshes 338 moved_transforms 12 layout 0 draws 1 latent 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
+             moved_meshes 338 moved_transforms 12 layout 0 draws 1 late 1 compiled_surfaces 0 baked_textures 2 texture_uploaded_bytes 3145728 pending_materials 1 \
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \
              blurred_textures 6\n";
         assert_eq!(line("frame", 7, &frame(Some(29.0)).pairs()), expected);

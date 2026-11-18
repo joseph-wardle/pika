@@ -1,11 +1,12 @@
 //! The Pika renderer. The Hydra delegate links it as a static library and calls it through `abi`.
 
 mod abi;
-mod accumulation;
 mod bake;
 mod cache;
 pub mod commands;
 mod cull;
+mod draw;
+mod film;
 mod geometry;
 pub mod gpu;
 mod json;

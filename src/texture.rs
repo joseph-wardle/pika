@@ -1,5 +1,12 @@
 //! Baked texture files and the GPU images holding each one's levels within the
 //! cap, lowered to fit the device's memory budget.
+//!
+//! A level is an index into a texture's mips, 0 the finest, so a greater level is coarser and
+//! lowering a texture raises its first level. Each frame, in `shade`'s order: `begin` drops
+//! what the frame before retired; `need` and `weigh` note the finest level each drawn texture
+//! needs; `refit` sets every texture's target level so that all fit; `swap` moves images toward
+//! their targets, a raise's bytes arriving from the reader threads over several frames while
+//! its old image is still drawn; the materials of the keys swapped are then rebound.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -367,18 +374,18 @@ impl Chain {
         for first in 0..texture.levels.len() {
             let info = image_info(texture, first);
             let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
-            let mut needs = vk::MemoryRequirements2::default();
+            let mut requirements = vk::MemoryRequirements2::default();
             // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
             // outlives the call.
             unsafe {
                 device
                     .raw
-                    .get_device_image_memory_requirements(&ask, &mut needs)
+                    .get_device_image_memory_requirements(&ask, &mut requirements)
             };
-            let needs = needs.memory_requirements;
+            let requirements = requirements.memory_requirements;
             let local = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-            chain.heap = device.heap(needs.memory_type_bits, local)?;
-            chain.sizes.push(needs.size);
+            chain.heap = device.heap(requirements.memory_type_bits, local)?;
+            chain.sizes.push(requirements.size);
         }
         chain.limit(texture, cap);
         Ok(chain)
@@ -542,11 +549,16 @@ impl Image {
                 texture.format
             )
         })?;
-        let needs = unsafe { d.get_image_memory_requirements(i.image) };
-        i.bytes = needs.size;
+        let requirements = unsafe { d.get_image_memory_requirements(i.image) };
+        i.bytes = requirements.size;
         let flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        i.heap = device.heap(needs.memory_type_bits, flags)?;
-        i.memory = gpu::allocate(device, needs, flags, vk::MemoryAllocateFlags::empty())?;
+        i.heap = device.heap(requirements.memory_type_bits, flags)?;
+        i.memory = gpu::allocate(
+            device,
+            requirements,
+            flags,
+            vk::MemoryAllocateFlags::empty(),
+        )?;
         unsafe { d.bind_image_memory(i.image, i.memory, 0) }
             .map_err(|e| format!("vkBindImageMemory failed: {e}"))?;
         let view_info = vk::ImageViewCreateInfo::default()
@@ -698,7 +710,7 @@ impl Staging {
         (self.buffer.size).saturating_sub(self.used.next_multiple_of(16))
     }
 
-    fn room(&mut self, device: &gpu::Device, size: u64) -> Result<(&mut Buffer, u64), String> {
+    fn reserve(&mut self, device: &gpu::Device, size: u64) -> Result<(&mut Buffer, u64), String> {
         // A copy's buffer offset is a multiple of the block size, at most 16 bytes.
         let at = self.used.next_multiple_of(16);
         if at + size <= self.buffer.size {
@@ -723,7 +735,7 @@ fn upload(
     let (mut copies, end) = copies(texture, image.first, part.start, size);
     debug_assert_eq!(end, part.end, "a part not cut by `copies`");
     // Stage the levels alone: the header would misalign the block-size offsets.
-    let (buffer, at) = staging.room(device, size)?;
+    let (buffer, at) = staging.reserve(device, size)?;
     let start = Instant::now();
     fill(&mut buffer.bytes()[at as usize..(at + size) as usize])?;
     let fill = start.elapsed();
@@ -894,6 +906,76 @@ fn fail(key: &str, loaded: &mut Loaded, room: u64, e: &str) {
     loaded.failing = loaded.target != first;
 }
 
+/// What a frame's swaps did.
+#[derive(Default)]
+pub struct Swapped {
+    /// The textures drawn from a new image, to rebind.
+    pub keys: BTreeSet<String>,
+    /// Bytes copied into raises.
+    pub bytes: u64,
+    /// The render thread's time copying them into staging.
+    pub read: Duration,
+}
+
+/// What a swap not yet begun does this frame.
+#[derive(PartialEq, Debug)]
+enum Start {
+    Make,
+    /// Until the images this frame retired are freed.
+    Wait,
+    /// Until a refit leaves `MARGIN`.
+    Crowded,
+    Refuse,
+}
+
+/// A swap whose new image `fits` beside the old is made. A lower frees memory once its old
+/// image goes, so it is made anyway unless the frame already `retired` an image, whose memory
+/// it then waits for. A raise waits for that too, then for a `fresh` fit; after one, no more
+/// room can be made.
+fn start(fits: bool, lowers: bool, retired: bool, fresh: bool) -> Start {
+    if fits || (lowers && !retired) {
+        Start::Make
+    } else if retired {
+        Start::Wait
+    } else if !fresh {
+        Start::Crowded
+    } else {
+        Start::Refuse
+    }
+}
+
+/// Copies into a raise's incoming image the next part the readers have read, and asks them
+/// for the part after. Gives the bytes copied and the time filling staging; `None` when the
+/// part has not arrived or staging has no room for it this frame.
+fn advance(
+    device: &gpu::Device,
+    cb: vk::CommandBuffer,
+    key: &str,
+    loaded: &mut Loaded,
+    reads: &mut Reads,
+    staging: &mut Staging,
+) -> Result<Option<(u64, Duration)>, String> {
+    let incoming = loaded.incoming.as_mut().expect("a raise begun");
+    let first = incoming.image.first;
+    let at = (first, incoming.done);
+    reads.ask(key, &loaded.texture, at);
+    let Some((asked, arrived)) = reads.take(key, at, staging.free()) else {
+        return Ok(None);
+    };
+    let end = asked.part.end;
+    let fill = |into: &mut [u8]| {
+        into.copy_from_slice(&arrived?);
+        Ok(())
+    };
+    let both = (&loaded.texture, &incoming.image);
+    let time = upload(device, cb, both, asked.part.clone(), staging, fill)?;
+    incoming.done = end;
+    if end != loaded.texture.bytes(first) {
+        reads.ask(key, &loaded.texture, (first, end));
+    }
+    Ok(Some((asked.size(), time)))
+}
+
 /// Staging is kept until the next frame begins, when the GPU has read it.
 pub struct Textures {
     device: ash::Device,
@@ -908,6 +990,11 @@ pub struct Textures {
     heaps: Vec<gpu::Heap>,
     /// Each heap's room for textures when the targets were last set.
     room: Vec<u64>,
+    // Four flags carry the fit from frame to frame. `refit` runs only when `dirty`, `crowded`
+    // or `moved` is set or the heaps changed, and clears the three; `fresh` says whether it
+    // then fitted afresh, and `begin` clears it. In `swap`, a raise that does not fit sets
+    // `crowded` for the next frame's refit, unless this frame's was `fresh`: then no more
+    // room can be made, and the raise fails.
     /// The textures or limits changed: fit afresh and release held raises.
     dirty: bool,
     /// A raise did not fit beside its old image: fit afresh, leaving `MARGIN`.
@@ -1041,15 +1128,18 @@ impl Textures {
         (self.dirty, self.crowded) = (false, false);
     }
 
-    /// The old image is drawn until the new one is whole, so a failed swap keeps it.
-    /// The keys swapped must be rebound before the next frame begins.
+    /// Moves each image toward its target: begins the swaps that fit, and copies in the parts
+    /// of the raises begun that the readers have read. The old image is drawn until the new one
+    /// is whole, so a failed swap keeps it. The keys swapped must be rebound before the next
+    /// frame begins.
     pub fn swap(
         &mut self,
         device: &gpu::Device,
         cb: vk::CommandBuffer,
         heaps: &[gpu::Heap],
-    ) -> (BTreeSet<String>, u64, Duration) {
-        let (mut keys, mut bytes, mut read) = (BTreeSet::new(), 0, Duration::ZERO);
+    ) -> Swapped {
+        let mut swapped = Swapped::default();
+        // Per heap, the bytes of the images this frame made.
         let mut added = vec![0; heaps.len()];
         let loaded = &self.loaded;
         self.reads.gather(|read| {
@@ -1079,25 +1169,25 @@ impl Textures {
             if loaded.incoming.is_none() {
                 let (texture, chain) = (&loaded.texture, &loaded.chain);
                 let size = chain.sizes[target];
-                let mut needs = added.clone();
-                needs[chain.heap] += size + RESERVE;
-                // A lower frees memory once its old image goes, so it waits only for
-                // this frame's retirees; a raise also for a refit to leave the margin.
+                let mut with = added.clone();
+                with[chain.heap] += size + RESERVE;
+                let fits = gpu::overflow(heaps, &with).is_none();
                 let lowers = target > first;
-                let fits = gpu::overflow(heaps, &needs).is_none();
-                let made = if fits || (lowers && keys.is_empty()) {
-                    Image::new(device, texture, target)
-                } else if !keys.is_empty() {
-                    continue;
-                } else if !self.fresh {
-                    self.crowded = true;
-                    continue;
-                } else {
-                    let (w, h) = texture.extent(target);
-                    Err(format!(
-                        "its {w}×{h} levels do not fit the device's memory budget beside its \
-                         image now"
-                    ))
+                let retired = !swapped.keys.is_empty();
+                let made = match start(fits, lowers, retired, self.fresh) {
+                    Start::Make => Image::new(device, texture, target),
+                    Start::Wait => continue,
+                    Start::Crowded => {
+                        self.crowded = true;
+                        continue;
+                    }
+                    Start::Refuse => {
+                        let (w, h) = texture.extent(target);
+                        Err(format!(
+                            "its {w}×{h} levels do not fit the device's memory budget beside \
+                             its image now"
+                        ))
+                    }
                 };
                 let image = match made {
                     Ok(image) => image,
@@ -1113,41 +1203,20 @@ impl Textures {
                     self.retired
                         .push(std::mem::replace(&mut loaded.image, image));
                     loaded.failing = false;
-                    keys.insert(key);
+                    swapped.keys.insert(key);
                     continue;
                 }
                 loaded.incoming = Some(Incoming { image, done: 0 });
             }
-            let incoming = loaded.incoming.as_mut().expect("begun above");
-            let at = (incoming.image.first, incoming.done);
-            self.reads.ask(&key, &loaded.texture, at);
-            let Some((asked, arrived)) = self.reads.take(&key, at, self.staging.free()) else {
-                continue;
-            };
-            let end = asked.part.end;
-            let fill = |into: &mut [u8]| {
-                into.copy_from_slice(&arrived?);
-                Ok(())
-            };
-            let both = (&loaded.texture, &incoming.image);
-            match upload(
-                device,
-                cb,
-                both,
-                asked.part.clone(),
-                &mut self.staging,
-                fill,
-            ) {
-                Ok(time) => {
-                    (bytes, read) = (bytes + asked.size(), read + time);
-                    incoming.done = end;
-                    if end == loaded.texture.bytes(incoming.image.first) {
-                        let new = loaded.incoming.take().expect("begun above").image;
+            match advance(device, cb, &key, loaded, &mut self.reads, &mut self.staging) {
+                Ok(None) => {}
+                Ok(Some((bytes, time))) => {
+                    (swapped.bytes, swapped.read) = (swapped.bytes + bytes, swapped.read + time);
+                    let incoming = loaded.incoming.as_ref().expect("advanced above");
+                    if incoming.done == loaded.texture.bytes(incoming.image.first) {
+                        let new = loaded.incoming.take().expect("advanced above").image;
                         self.retired.push(std::mem::replace(&mut loaded.image, new));
-                        keys.insert(key);
-                    } else {
-                        let at = (incoming.image.first, end);
-                        self.reads.ask(&key, &loaded.texture, at);
+                        swapped.keys.insert(key);
                     }
                 }
                 Err(e) => {
@@ -1157,7 +1226,7 @@ impl Textures {
                 }
             }
         }
-        (keys, bytes, read)
+        swapped
     }
 
     pub fn pending(&self) -> usize {
@@ -1819,7 +1888,19 @@ pub mod tests {
     }
 
     #[test]
-    fn swaps_go_begun_then_lowers_then_the_most_blurred_raise() {
+    fn a_swap_without_room_waits_before_it_is_refused() {
+        assert_eq!(start(true, false, true, false), Start::Make);
+        // A lower is made without room, since its old image's is freed.
+        assert_eq!(start(false, true, false, false), Start::Make);
+        assert_eq!(start(false, true, true, false), Start::Wait);
+        assert_eq!(start(false, false, true, true), Start::Wait);
+        assert_eq!(start(false, false, false, false), Start::Crowded);
+        // Control: a raise is refused only once a fresh fit has left no more room to make.
+        assert_eq!(start(false, false, false, true), Start::Refuse);
+    }
+
+    #[test]
+    fn swaps_go_lowers_then_begun_then_the_most_blurred_raise() {
         let (mut near, mut far, unseen, mut lower) =
             (chain(0, 64), chain(0, 64), chain(0, 64), chain(0, 64));
         (near.need, far.need, lower.need) = (Some(0), Some(2), Some(3));

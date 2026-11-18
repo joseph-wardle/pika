@@ -110,9 +110,10 @@ struct State
     Atomic<uint> marked[LEVELS * LEVELS];
     Atomic<uint> parents[LEVELS * LEVELS];
     Atomic<uint> both[LEVELS];
-    // By level, pages ranked and where the level's ranks start.
-    Atomic<uint> next[LEVELS];
-    Atomic<uint> base[LEVELS];
+    // The level the pool cuts (LEVELS for none) and the pages left for it once the coarser
+    // levels are held.
+    Atomic<uint> ranked;
+    Atomic<uint> room;
 };
 
 // Draws each list holds (src/shadow.rs CAPACITY).
@@ -335,8 +336,8 @@ uint wanted_at(uint i, uint top, uint dropped)
 
 // One thread. Past the pool, every shadow's levels from the first dropped one up draw their
 // marks into their parents instead, so the farthest pages drop a LOD first; lookups find the
-// parents by walking up. Tiles rank coarsest first: should even dropping every level
-// overflow, the finest go.
+// parents by walking up. Levels are held coarsest first: should even dropping every level
+// overflow, the finest go, and the level the pool cuts is ranked.
 [shader("compute")]
 [numthreads(1, 1, 1)]
 void choose(uint3 thread : SV_DispatchThreadID)
@@ -366,12 +367,22 @@ void choose(uint3 thread : SV_DispatchThreadID)
             break;
     }
     uint base = 0;
+    uint ranked = LEVELS;
+    uint room = 0;
     for (int i = LEVELS - 1; i >= 0; i--)
     {
-        p->state->base[i].store(base);
+        uint level = 0;
         for (uint top = i; top < LEVELS; top++)
-            base += wanted_at(i, top, dropped);
+            level += wanted_at(i, top, dropped);
+        if (ranked == LEVELS && base + level > p->pool_pages)
+        {
+            ranked = i;
+            room = p->pool_pages - base;
+        }
+        base += level;
     }
+    p->state->ranked.store(ranked);
+    p->state->room.store(room);
     p->state->held.store(base);
     p->state->wanted.store(total);
     p->state->dropped.store(dropped);
@@ -418,9 +429,22 @@ void let_go(uint j, uint e)
     pages(j)[e] = NO_PAGE;
 }
 
-// Over every shadow's tiles: ranks the tiles held this frame by level, coarsest first, and
-// those ranked past the pool are not held. A tile not held lets its page go; one held keeps
-// its page, drawn anew should its light or place have changed, or needs one.
+// Shadow j's tile e, t, keeps its page, drawn anew should its light or place have changed, or
+// needs one.
+void hold(uint j, uint e, Tile t)
+{
+    Constants *p = push.constants;
+    Shadow *s = p->shadows + j;
+    uint page = pages(j)[e];
+    tiles(j)[e] = page;
+    if (page == NO_PAGE)
+        flags(j)[e].or(NEED);
+    else if (s->reset != 0 || any(p->page_owners[page].place != place_of(s, t)))
+        paint(j, e, t, page);
+}
+
+// Over every shadow's tiles: holds those wanted this frame at levels the pool holds whole,
+// and lets the rest go but those at the level it cuts, which rank holds or lets go.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void release(uint3 thread : SV_DispatchThreadID)
@@ -443,18 +467,65 @@ void release(uint3 thread : SV_DispatchThreadID)
             let_go(j, e);
             continue;
         }
-        uint rank = p->state->base[t.level].load() + p->state->next[t.level].increment();
-        if (rank >= p->pool_pages)
-        {
+        uint ranked = p->state->ranked.load();
+        if (ranked == LEVELS || t.level > ranked)
+            hold(j, e, t);
+        else if (t.level < ranked)
             let_go(j, e);
+    }
+}
+
+groupshared uint sums[64];
+
+// Over the group's lanes, the sum of `v` in the lanes before this one, and in all of them.
+uint sum_before(uint lane, uint v, out uint total)
+{
+    sums[lane] = v;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint d = 1; d < 64; d <<= 1)
+    {
+        uint before = lane >= d ? sums[lane - d] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        sums[lane] += before;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    total = sums[63];
+    uint before = sums[lane] - v;
+    GroupMemoryBarrierWithGroupSync();
+    return before;
+}
+
+// One group, after release: holds the wanted tiles of the level the pool cuts in shadow and
+// tile order while there is room, and lets the rest go. In the order threads met them, which
+// tiles kept a page would change from run to run, and the image with them.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void rank(uint3 lane : SV_GroupThreadID)
+{
+    Constants *p = push.constants;
+    uint i = p->state->ranked.load();
+    if (i == LEVELS)
+        return;
+    uint room = p->state->room.load();
+    uint dropped = p->state->dropped.load();
+    uint taken = 0;
+    for (uint j = 0; j < p->count; j++)
+    {
+        Shadow *s = p->shadows + j;
+        if (i >= s->levels)
             continue;
+        for (uint first = start(s, i); first < start(s, i + 1); first += 64)
+        {
+            uint e = first + lane.x;
+            bool held = e < start(s, i + 1) && wanted(flags(j)[e].load(), i, s->levels - 1, dropped);
+            uint total;
+            uint before = sum_before(lane.x, held ? 1 : 0, total);
+            if (held && taken + before < room)
+                hold(j, e, tile_of(s, e));
+            else if (held)
+                let_go(j, e);
+            taken += total;
         }
-        uint page = pages(j)[e];
-        tiles(j)[e] = page;
-        if (page == NO_PAGE)
-            flags(j)[e].or(NEED);
-        else if (s->reset != 0 || any(p->page_owners[page].place != place_of(s, t)))
-            paint(j, e, t, page);
     }
 }
 

@@ -1,8 +1,8 @@
-//! The prepass: draws the culled instances into depth and the depth and normal AOVs.
+//! The prepass: draws the culled instances into depth, the depth and normal AOVs and motion.
 
 use ash::vk;
 
-use crate::geometry::Bound;
+use crate::geometry::Addresses;
 use crate::gpu;
 use crate::target;
 use crate::view::View;
@@ -11,6 +11,12 @@ use crate::view::View;
 /// three-channel formats, so normals are drawn with a fourth.
 pub const DEPTH_AOV: (vk::Format, usize) = (vk::Format::R32_SFLOAT, 4);
 pub const NORMAL_AOV: (vk::Format, usize) = (vk::Format::R32G32B32A32_SFLOAT, 16);
+/// After the AOVs: per pixel, the offset in pixels to where its surface was in the frame before,
+/// which `film` reprojects its history by. Half floats hold it within a sixty-fourth of a pixel
+/// below 32 pixels, where history matters most.
+pub const MOTION: vk::Format = vk::Format::R16G16_SFLOAT;
+/// Motion's place among the target's color attachments.
+pub const MOTION_ATTACHMENT: usize = 3;
 
 /// In the order of `pipelines`.
 pub const COLOR_FORMATS: [vk::Format; 2] = [
@@ -54,6 +60,10 @@ impl Raster {
                     (format, vk::ColorComponentFlags::empty()),
                     (DEPTH_AOV.0, vk::ColorComponentFlags::RGBA),
                     (NORMAL_AOV.0, vk::ColorComponentFlags::RGBA),
+                    (
+                        MOTION,
+                        vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
+                    ),
                 ];
                 gpu::graphics(
                     d,
@@ -74,14 +84,14 @@ impl Raster {
         Ok(r)
     }
 
-    /// Records inside rendering into `color` (one of `COLOR_FORMATS`), `DEPTH_AOV` and
-    /// `NORMAL_AOV`, after the cull pass.
+    /// Records inside rendering into `color` (one of `COLOR_FORMATS`), `DEPTH_AOV`, `NORMAL_AOV`
+    /// and `MOTION`, after the cull pass.
     pub fn draw(
         &self,
         cb: vk::CommandBuffer,
         color: vk::Format,
         area: vk::Rect2D,
-        geometry: &Bound,
+        geometry: &Addresses,
         view: &View,
     ) {
         if geometry.count == 0 {
