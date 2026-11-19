@@ -296,9 +296,15 @@ public:
         delete delegate;
     }
     // Pika brings its own Vulkan device, so the host's GPU setting is irrelevant.
+#if PXR_VERSION >= 2611
+    bool IsSupported(HdRendererCreateArgsSchema const &, std::string *) const override {
+        return true;
+    }
+#else
     bool IsSupported(bool) const override { return true; }
 #if PXR_VERSION >= 2605
     bool IsSupported(HdRendererCreateArgs const &, std::string *) const override { return true; }
+#endif
 #endif
 };
 
