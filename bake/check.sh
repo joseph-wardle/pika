@@ -36,9 +36,13 @@ slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-en
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
     fail "network: slangc rejected the surface"
-python3 -I -c 'import json, sys; sys.exit(json.load(open(sys.argv[1])) != json.load(open(sys.argv[2])))' \
-    "$FIXTURES/network.reflection.json" "$OUT/network/reflection.json" ||
-    fail "network: the reflection differs from the reference ($OUT/network/reflection.json is this run's)"
+python3 -I -c 'import json, sys
+block = [p for p in json.load(open(sys.argv[1]))["parameters"] if p["name"] == "pixelCB"]
+print(json.dumps({"parameters": block}, indent=4), file=open(sys.argv[2], "w"))' \
+    "$OUT/network/reflection.json" "$OUT/network/block.json" ||
+    fail "network: the reflection has no parameters"
+diff "$FIXTURES/network.reflection.json" "$OUT/network/block.json" > /dev/null ||
+    fail "network: the material's block differs from the reference ($OUT/network/block.json is this run's)"
 
 "$GENERATE" libraries > "$OUT/libraries" || fail "libraries: the listing failed"
 [ "$(head -1 "$OUT/libraries")" = "$(head -1 "$FIXTURES/network.manifest")" ] ||

@@ -282,7 +282,6 @@ pub mod tests {
 
     pub const MANIFEST: &str = include_str!("../bake/fixtures/network.manifest");
 
-    // Copied from bake/check.sh's run when slangc or the libraries change.
     const REFLECTION: &str = include_str!("../bake/fixtures/network.reflection.json");
 
     pub fn fixture_manifest() -> Manifest {
