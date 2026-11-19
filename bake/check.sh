@@ -3,6 +3,8 @@ set -euo pipefail
 
 PYTHON=${HFS:+$HFS/bin/hython}
 PYTHON=${PYTHON:-python3}
+# hython must not import the flake's Python packages.
+[ -z "${HFS:-}" ] || unset PYTHONPATH
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$ROOT/target/bake/check
 GENERATE=$ROOT/target/bake/generate

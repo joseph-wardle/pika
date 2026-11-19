@@ -4,15 +4,20 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RENDERS=8
 if [ -n "${HFS:-}" ]; then
-    BAKE_HFS=${BAKE_HFS:-/opt/hfs22.0}
+    BAKE_HFS=${BAKE_HFS:-$HFS}
     OUT=$ROOT/target/hydra/check/$(basename "$HFS")
     PYTHON=hython
     make -C "$ROOT/hydra" --no-print-directory HFS="$HFS" OUT="$OUT/plugin"
     flock "$ROOT/target/bake.lock" make -C "$ROOT/bake" --no-print-directory HFS="$BAKE_HFS"
+    # Houdini must not load the shell's Python packages or Qt plugins.
+    unset PYTHONPATH QT_PLUGIN_PATH
+    LOADER=${LD_LIBRARY_PATH:-}
     # houdini_setup_bash reads unset variables.
     set +u
     cd "$HFS" && source ./houdini_setup_bash >/dev/null && cd "$ROOT"
     set -u
+    # Houdini's Vulkan loader is too old for the validation layer's settings.
+    export LD_LIBRARY_PATH=$LOADER:${LD_LIBRARY_PATH:-}
     export MATERIALX=$HFS/houdini/materialx
 else
     OUT=$ROOT/target/hydra/check/usd

@@ -18,7 +18,7 @@ Today Pika draws meshes, synced from the host with their subdivision, instancing
 | Bake | MaterialX 1.39.5 or newer (the first with a Slang generator), OpenImageIO, `g++`, `make` and [`ispc`](https://github.com/ispc/ispc/releases) | Tested with MaterialX 1.39.5, OpenImageIO 3.1 and ispc 1.32. `MATERIALX` names the directory holding MaterialX's `libraries/`. Two tools the renderer runs, so build them before rendering: `generate` turns material documents into shaders, and `texture` bakes textures. They compile in the paths of MaterialX and of `bake/`, so rebuild them after moving either. Textures are converted through the OCIO config named in `OCIO`, else OpenImageIO's default. |
 | Check | A display, or `Xvfb`; `curl` and `unzip` to fetch ALab | `hydra/check.sh` starts its own Xvfb. |
 
-Houdini is a second host: with `HFS` naming a Houdini (22.0 for the bake tools, as 21.0 has no Slang generator), the Makefiles and the checks build against its USD and MaterialX and render through husk, which also checks depth, normals and the render settings. That path was last tested with Houdini 21.0.596 and 22.0.466.
+Houdini is a second host: with `HFS` naming a Houdini (22.0 for the bake tools, as 21.0 has no Slang generator), the Makefiles and the checks build against its USD and MaterialX and render through husk, which also checks depth, normals and the render settings. That path was last tested with Houdini 21.0.596 and 22.0.466. `BAKE_HFS` names the bake tools' Houdini when `HFS` is a 21.0. On NixOS, Houdini runs inside an FHS environment, so a check is `HFS=~/sidefx/hfs22.0.466 nix develop --command houdini-fhs hydra/check.sh`.
 
 ## Build and check
 

@@ -17,6 +17,8 @@ CAMERA=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
 make -C "$ROOT/hydra" --no-print-directory ${HFS:+HFS="$HFS"}
 mkdir -p "$OUT"
 if [ -n "${HFS:-}" ]; then
+    # Houdini must not load the shell's Python packages or Qt plugins.
+    unset PYTHONPATH QT_PLUGIN_PATH
     # houdini_setup_bash reads unset variables.
     set +u
     cd "$HFS" && source ./houdini_setup_bash >/dev/null && cd "$ROOT"
