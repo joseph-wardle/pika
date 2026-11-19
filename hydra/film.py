@@ -1,7 +1,7 @@
 """Checks Pika's film while frames change, through UsdImagingGL. Each frame is compared with the
 converged still at its camera, and must be nearer to it than a frame drawn alone.
 
-    hython hydra/film.py <panned.usda> <penumbra.usda>
+    python3 hydra/film.py <panned.usda> <penumbra.usda>
 
 Needs a display and the delegate on PXR_PLUGINPATH_NAME.
 """

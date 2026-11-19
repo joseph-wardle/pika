@@ -2,7 +2,7 @@
 from USD. husk's color, depth and normals are compared where there is a husk; usdrecord's color
 is compared when asked for. Each control perturbs the reference and must then fail.
 
-    hython hydra/image.py <out dir> [usdrecord]
+    python3 hydra/image.py <out dir> [usdrecord]
 
 Run it from hydra/check.sh's environment; usdrecord needs a display.
 """

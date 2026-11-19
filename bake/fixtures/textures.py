@@ -1,6 +1,6 @@
 """Writes the bake check's source images, once; they are tracked.
 
-    hython bake/fixtures/textures.py
+    python3 bake/fixtures/textures.py
 
 ramp.exr    8×8, two float channels, a scanline EXR: texel (x, y) holds its
             own centre, ((x + 0.5) / 8, (y + 0.5) / 8), so a sample inside

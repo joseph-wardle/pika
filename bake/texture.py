@@ -2,7 +2,7 @@
 from the fixtures in bake/fixtures/ (textures.py says what they hold) and
 compares them with what the sources say they must decode to.
 
-    hython bake/texture.py <out dir>
+    python3 bake/texture.py <out dir>
 
 Block-compressed levels are decoded by OpenImageIO through a DDS wrapper
 written beside each file, so the check never trusts Pika's own decoding.

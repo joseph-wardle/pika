@@ -1,6 +1,6 @@
 """Checks what a host sees of Pika through UsdImagingGL
 
-    hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda> <penumbra.usda>
+    python3 hydra/engine.py <clay.usda> <painted.usda> <mipped.usda> <penumbra.usda>
 
 Needs a display and the delegate on PXR_PLUGINPATH_NAME.
 """
