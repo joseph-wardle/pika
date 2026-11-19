@@ -55,6 +55,7 @@
           pkgs.vulkan-loader
           pkgs.vulkan-validation-layers
         ];
+        MATERIALX = "${pkgs.materialx}";
         VK_ADD_LAYER_PATH = "${pkgs.vulkan-validation-layers}/share/vulkan/explicit_layer.d";
       };
     };

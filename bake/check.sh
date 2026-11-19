@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# The bake tools' check, run where Houdini 22 and slangc are (not in CI).
 set -euo pipefail
 
-HFS=${HFS:-/opt/hfs22.0}
+PYTHON=${HFS:+$HFS/bin/hython}
+PYTHON=${PYTHON:-python3}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=$ROOT/target/bake/check
 GENERATE=$ROOT/target/bake/generate
 TEXTURE=$ROOT/target/bake/texture
 
-make -C "$ROOT/bake" --no-print-directory HFS="$HFS"
+make -C "$ROOT/bake" --no-print-directory ${HFS:+HFS="$HFS"}
 rm -rf "$OUT"
 mkdir -p "$OUT/network" "$OUT/missing" "$OUT/primvar" "$OUT/uv0" "$OUT/perfuv" "$OUT/time" \
     "$OUT/textures"
@@ -32,8 +32,6 @@ grep -qF "lights_at(" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage does not run Pika's light loop"
 ! grep -qE "LightData|sampleLightSource|numActiveLightSources" "$OUT/network/pixel.slang" ||
     fail "network: the pixel stage holds MaterialX's light code"
-# The renderer's flags (src/shader.rs). Copy reflection.json over the fixture
-# when slangc or the libraries change.
 slangc "$OUT/network/surface.slang" -I "$ROOT/shaders" -target spirv -fvk-use-entrypoint-name \
     -warnings-as-errors all -warnings-disable 31106,31107 -o "$OUT/network/surface.spv" \
     -reflection-json "$OUT/network/reflection.json" ||
@@ -79,7 +77,6 @@ if "$GENERATE" "$OUT/perfuv.mtlx" "$OUT/perfuv" 2> "$OUT/perfuv.err"; then
     fail "perfuv: a surface reading UV0 beside perfuv generated"
 fi
 grep -q "perfuv and st" "$OUT/perfuv.err" || fail "perfuv: the error does not name the primvars"
-# A time node asks the generator for u_time, which the view does not hold.
 sed -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="roughness" nodename="n3" />|' \
     -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_time_float" />\n  <surfacematerial|' \
     "$ROOT/bake/fixtures/network.mtlx" > "$OUT/time.mtlx"
@@ -103,7 +100,6 @@ texture swatch.png auto color swatch_auto
 cmp "$OUT/textures/swatch.texture" "$OUT/textures/swatch_auto.texture" || fail "swatch_auto: auto is not sRGB for a PNG"
 texture ramp.exr auto float ramp_auto
 cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_auto: auto is not raw for an EXR"
-# A JPEG reads, and a space the config knows beyond sRGB is converted.
 texture greys.jpg auto color greys
 texture acescg.exr acescg color acescg
 # A UDIM set is one array with a tile table; a tile past 1100 is refused.
@@ -116,7 +112,7 @@ if "$TEXTURE" raw float "" "$OUT/textures/none.texture" 1101 "$FIXTURES/udim.100
 fi
 grep -q "1101" "$OUT/textures/none.err" || fail "none: the error does not name the tile"
 ! cmp -s "$OUT/textures/swatch.texture" "$OUT/textures/swatch_raw.texture" || fail "swatch_raw: raw and sRGB bake alike, so the auto checks prove nothing"
-"$HFS/bin/hython" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
+"$PYTHON" "$ROOT/bake/texture.py" "$OUT/textures" || fail "textures: a bake does not decode to its source"
 if "$TEXTURE" bogus color "" "$OUT/textures/bogus.texture" 0 "$FIXTURES/swatch.png" 2> "$OUT/textures/bogus.err"; then
     fail "bogus: a texture in an unknown colour space baked"
 fi

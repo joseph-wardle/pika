@@ -27,8 +27,7 @@ namespace mx = MaterialX;
 
 namespace {
 
-// HFS and BAKE come from the Makefile.
-const std::string materialx = HFS "/houdini/materialx";
+const std::string materialx = MATERIALX;
 const std::string bake = BAKE;
 
 void write(std::string const &path, std::string const &text) {
@@ -54,9 +53,6 @@ std::string lines(mx::VariableBlock const &block, std::string const &kind) {
     return text;
 }
 
-// Every float2 primvar the surface reads is the mesh's one texcoord: a geomprop, or
-// UV0, which is st as Storm and Karma read it. Only the nodedefs say which inputs
-// read UV0, so a surface reading two is refused here.
 std::string vertex(mx::ShaderStage const &stage) {
     std::string text = "// Written by bake/generate.cpp: the vertex stage for the pixel stage beside it.\n\n"
                        "#include \"pixel.slang\"\n#include \"vertex.slang\"\n\n"
@@ -105,9 +101,6 @@ std::string vertex(mx::ShaderStage const &stage) {
     return text + "    return o;\n}\n";
 }
 
-// MaterialX's surface with Pika's light loop. The generator is told of no lights;
-// the loop asks frame.slang for them, so lights change frame.slang alone. Editing
-// the text emitted here changes the tool, which re-bakes every texture.
 class Surface : public mx::HwSurfaceNode {
   public:
     static mx::ShaderNodeImplPtr create() { return std::make_shared<Surface>(); }
@@ -115,8 +108,6 @@ class Surface : public mx::HwSurfaceNode {
     void createVariables(mx::ShaderNode const &node, mx::GenContext &context,
                          mx::Shader &shader) const override {
         mx::HwSurfaceNode::createVariables(node, context, shader);
-        // An int, as MaterialX has no uint (and Slang does not interpolate ints). Only the
-        // loop reads it; Slang drops an unread input, unmatching the vertex stage's output.
         if (bsdf(node))
             mx::addStageInput(mx::HW::VERTEX_DATA, mx::Type::INTEGER, "link",
                               shader.getStage(mx::Stage::PIXEL));
@@ -152,7 +143,6 @@ class Surface : public mx::HwSurfaceNode {
                        ".response",
                    stage);
         g.emitScopeEnd(stage);
-        // The environment and emission after the loop read it unshadowed.
         g.emitLine("occlusion = 1.0", stage);
         g.emitLineBreak(stage);
     }
@@ -164,8 +154,6 @@ class Surface : public mx::HwSurfaceNode {
     }
 };
 
-// The pixel block holds the public uniforms alone; the eye comes from the view.
-// A surface reading another private uniform (a time node's u_time) is refused.
 class Generator : public mx::SlangShaderGenerator {
   public:
     Generator() : mx::SlangShaderGenerator(mx::TypeSystem::create()) {
@@ -206,7 +194,7 @@ void generate(std::string const &path, std::string const &out) {
     for (char const *name : {"IM_normalmap_float_genglsl", "IM_normalmap_vector2_genglsl"}) {
         mx::ImplementationPtr impl = libraries->getImplementation(name);
         if (!impl)
-            throw std::runtime_error(std::string("Houdini's MaterialX libraries have no ") + name);
+            throw std::runtime_error(std::string("the MaterialX libraries have no ") + name);
         impl->setFile(bake + "/libraries/stdlib/genglsl/mx_normalmap.glsl");
     }
     mx::DocumentPtr doc = mx::createDocument();
@@ -216,7 +204,7 @@ void generate(std::string const &path, std::string const &out) {
         if (!node->getNodeDef())
             throw std::runtime_error("node " + node->getName() + " names the nodedef " +
                                      node->getNodeDefString() +
-                                     ", which Houdini's MaterialX libraries do not define");
+                                     ", which the MaterialX libraries do not define");
     }
     mx::NodePtr material = doc->getNode("material");
     if (!material)
@@ -224,7 +212,7 @@ void generate(std::string const &path, std::string const &out) {
 
     mx::ShaderGeneratorPtr generator = std::make_shared<Generator>();
     mx::GenContext context(generator);
-    // A library file under bake/ shadows Houdini's of the same path.
+    // A library file under bake/ shadows MaterialX's of the same path.
     context.registerSourceCodeSearchPath(mx::FilePath(bake));
     context.registerSourceCodeSearchPath(mx::FilePath(materialx));
     mx::GenOptions &options = context.getOptions();
@@ -246,8 +234,6 @@ void generate(std::string const &path, std::string const &out) {
     write(out + "/manifest", manifest);
 }
 
-// Size and modification time rather than bytes: a Houdini build stamps every file,
-// so the listing also changes with the generator's shared objects.
 void libraries() {
     std::filesystem::path root = materialx + "/libraries";
     std::vector<std::string> lines;
