@@ -1,40 +1,9 @@
-"""Checks Pika's film while frames change, through UsdImagingGL as
-hydra/engine.py drives it: that history follows a panning camera, that a
-light's change shows through it, that a converged still is the same
-whatever came before it, that history follows objects moving under a still camera
-by their transforms or by their points, and that it averages a soft shadow's rays while something else moves.
+"""Checks Pika's film while frames change, through UsdImagingGL. Each frame is compared with the
+converged still at its camera, and must be nearer to it than a frame drawn alone.
 
     hython hydra/film.py <panned.usda> <penumbra.usda>
 
-Needs a display (check.sh runs it on its Xvnc) and the delegate on
-PXR_PLUGINPATH_NAME. The scene's bars and their shadows are thinner than a
-pixel, so a frame alone aliases. Temporal history has no closed form
-(design.md), so each frame is compared with the converged still at its
-camera, drawn in a session of its own, by the mean of their 8-bit channel
-differences. A frame's bound is the error of a frame drawn alone there, a
-new session's first, which has no history:
-
-- Panning by STEP pixels a frame, each frame once history has built up must
-  be within its bound. The control is the still a frame behind, what
-  ghosting shows, which must not be.
-- Sliding the bars and the floor together by STEP pixels a frame under a still camera,
-  likewise: their history must follow their own motion, which the camera's does not show.
-  The sun casts no shadow there: shadow texels are fixed in the light's space, so a caster
-  moving across them changes its shadow each frame, with no motion to follow, in EEVEE as here.
-- Sliding them by their points instead, the bars refined and the floor not, likewise: a
-  cached character moves so, its transform still.
-- Playing penumbra.usda with the camera still while a quad under its floor moves, the
-  frames once history has built up must on average be within the error of HELD still
-  samples over the penumbrae: the shadow pattern cycles while anything changes, so history
-  averages its rays as the still sum does. Held at one pattern it was 0.19 against 0.09.
-  The control is fewer still samples, which must not be within it.
-- Halving the sun's intensity with the camera held, each frame once LIT
-  have passed must be within the bound at the new light. The control is the
-  old still, which must not be.
-- Converging at one camera reached from two others must give the same
-  image bit for bit, as the image the view stopped at fades out of the
-  samples by the last. The control is the images part way, which must
-  differ: the image stopped at counts there, so the check is not vacuous.
+Needs a display and the delegate on PXR_PLUGINPATH_NAME.
 """
 
 import sys
@@ -45,11 +14,10 @@ from pxr import Gf, Usd, UsdGeom, UsdLux
 sys.dont_write_bytecode = True
 from engine import SAMPLES, SIZE, accumulate, framing, gl_context, pixels, scene  # noqa: E402
 
-# The camera's step a frame, in pixels at the scene's centre: not a whole number, so the bars
-# fall across pixels differently each frame.
+# The camera's step a frame, in pixels at the scene's centre.
 STEP = 1.35
 FRAMES = 32
-# Frames before history is judged: its blend keeps about 20.
+# Frames before history is judged.
 WARM = 12
 # Frames the light's change may take to show.
 LIT = 4
@@ -105,7 +73,7 @@ def place(stage, offset):
 
 def bend(stage, offset):
     """Moves the bars and the floor by their points, their transforms still, and has the bars
-    refined: bilinearly, which leaves their shape."""
+    refined."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         UsdGeom.Mesh(stage.GetPrimAtPath("/world/bars")).GetSubdivisionSchemeAttr().Set("bilinear")
         for path in ("/world/bars", "/world/floor"):
@@ -130,7 +98,7 @@ def converged(engine, stage, params, fbo, state):
 
 
 def alone(path, fbo, state, edit=None):
-    """A frame drawn with no history: a new session's first, after `edit(stage)`."""
+    """A frame drawn with no history."""
     engine, stage, params = scene(path)
     if edit:
         edit(stage)
@@ -163,7 +131,7 @@ def pan(path, fbo):
 
 
 def slide(path, fbo, move, sliding):
-    """`move` moves the bars and the floor (`place` or `bend`); `sliding` names it."""
+    """`move` moves the bars and the floor (`place` or `bend`)."""
     engine, stage, params = scene(path)
     reference, reference_stage, _ = scene(path)
     unshadow(stage)
@@ -198,8 +166,7 @@ def slide(path, fbo, move, sliding):
 
 
 def tick(stage, t):
-    """Moves a quad hidden under the floor in the stage's session layer: something animating
-    that the image does not show."""
+    """Moves a quad hidden under the floor in the stage's session layer."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         quad = UsdGeom.Mesh.Define(stage, "/world/tick")
         if not quad.GetOrderedXformOps():
@@ -239,8 +206,7 @@ def rotate(path, fbo):
 
 
 def halve(stage):
-    """Halves the sun in the stage's session layer: stages opened from one file share its
-    layer, which would edit every session at once."""
+    """Halves the sun in the stage's session layer."""
     sun = UsdLux.DistantLight(stage.GetPrimAtPath("/world/sun"))
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         sun.GetIntensityAttr().Set(sun.GetIntensityAttr().Get() / 2)

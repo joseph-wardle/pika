@@ -39,6 +39,7 @@
           pkgs.vulkan-tools
           pkgs.gnumake
           pkgs.ispc
+          pkgs.xvfb
           python
           openusd
         ];

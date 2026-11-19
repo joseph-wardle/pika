@@ -5,13 +5,11 @@
     upAxis = "Y"
 )
 
-# A material whose surface shader names a nodedef the MaterialX libraries do
-# not define cannot be built: the frame renders with it pink and one warning,
-# and the material is not tried again until its network moves.
+# A material whose nodedef is unknown draws pink with one warning, until its network changes.
 #
 # compiles: 0 then 1
 # warnings: 1
-# warned: material /world/mtl/glow: the bake tool failed: generate: error: node n0 names the nodedef ND_surfac, which Houdini's MaterialX libraries do not define; drawn pink
+# warned: material /world/mtl/glow: the bake tool failed
 def Xform "world"
 {
     def Camera "camera" {}
