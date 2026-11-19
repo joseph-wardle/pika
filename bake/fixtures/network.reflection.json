@@ -1,29 +1,12 @@
 {
     "parameters": [
         {
-            "name": "view",
-            "binding": {"kind": "pushConstantBuffer", "index": 0},
-            "type": {
-                "kind": "constantBuffer",
-                "elementType": {
-                    "kind": "pointer",
-                    "valueType": "View"
-                },
-                "containerVarLayout": {
-                    "binding": {"kind": "pushConstantBuffer", "index": 0}
-                },
-                "elementVarLayout": {
-                    "type": {
-                        "kind": "pointer",
-                        "valueType": "View"
-                    },
-                    "binding": {"kind": "uniform", "offset": 0, "size": 8, "elementStride": 0}
-                }
-            }
-        },
-        {
             "name": "pixelCB",
-            "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4},
+            "binding": {
+                "kind": "descriptorTableSlot",
+                "index": 0,
+                "count": 4
+            },
             "type": {
                 "kind": "constantBuffer",
                 "elementType": {
@@ -43,9 +26,21 @@
                                             "elementType": {
                                                 "kind": "scalar",
                                                 "scalarType": "float32"
-                                            }
+                                            },
+                                            "sizes": [
+                                                {
+                                                    "kind": "uniform",
+                                                    "value": 12,
+                                                    "alignment": 16
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "uniform", "offset": 0, "size": 12, "elementStride": 4}
+                                        "binding": {
+                                            "kind": "uniform",
+                                            "offset": 0,
+                                            "size": 12,
+                                            "elementStride": 4
+                                        }
                                     },
                                     {
                                         "name": "transparency",
@@ -55,13 +50,37 @@
                                             "elementType": {
                                                 "kind": "scalar",
                                                 "scalarType": "float32"
-                                            }
+                                            },
+                                            "sizes": [
+                                                {
+                                                    "kind": "uniform",
+                                                    "value": 12,
+                                                    "alignment": 16
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "uniform", "offset": 16, "size": 12, "elementStride": 4}
+                                        "binding": {
+                                            "kind": "uniform",
+                                            "offset": 16,
+                                            "size": 12,
+                                            "elementStride": 4
+                                        }
+                                    }
+                                ],
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 32,
+                                        "alignment": 16
                                     }
                                 ]
                             },
-                            "binding": {"kind": "uniform", "offset": 0, "size": 32, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 0,
+                                "size": 32,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "displacementshader1",
@@ -77,21 +96,57 @@
                                             "elementType": {
                                                 "kind": "scalar",
                                                 "scalarType": "float32"
-                                            }
+                                            },
+                                            "sizes": [
+                                                {
+                                                    "kind": "uniform",
+                                                    "value": 12,
+                                                    "alignment": 16
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "uniform", "offset": 0, "size": 12, "elementStride": 4}
+                                        "binding": {
+                                            "kind": "uniform",
+                                            "offset": 0,
+                                            "size": 12,
+                                            "elementStride": 4
+                                        }
                                     },
                                     {
                                         "name": "scale",
                                         "type": {
                                             "kind": "scalar",
-                                            "scalarType": "float32"
+                                            "scalarType": "float32",
+                                            "sizes": [
+                                                {
+                                                    "kind": "uniform",
+                                                    "value": 4,
+                                                    "alignment": 4
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "uniform", "offset": 12, "size": 4, "elementStride": 0}
+                                        "binding": {
+                                            "kind": "uniform",
+                                            "offset": 12,
+                                            "size": 4,
+                                            "elementStride": 0
+                                        }
+                                    }
+                                ],
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 16,
+                                        "alignment": 16
                                     }
                                 ]
                             },
-                            "binding": {"kind": "uniform", "offset": 32, "size": 16, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 32,
+                                "size": 16,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n1_file",
@@ -112,16 +167,34 @@
                                                     "kind": "scalar",
                                                     "scalarType": "float32"
                                                 }
-                                            }
+                                            },
+                                            "sizes": [
+                                                {
+                                                    "kind": "descriptorTableSlot",
+                                                    "value": 1
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "descriptorTableSlot", "index": 0}
+                                        "binding": {
+                                            "kind": "descriptorTableSlot",
+                                            "index": 0
+                                        }
                                     },
                                     {
                                         "name": "sampler",
                                         "type": {
-                                            "kind": "samplerState"
+                                            "kind": "samplerState",
+                                            "sizes": [
+                                                {
+                                                    "kind": "descriptorTableSlot",
+                                                    "value": 1
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "descriptorTableSlot", "index": 1}
+                                        "binding": {
+                                            "kind": "descriptorTableSlot",
+                                            "index": 1
+                                        }
                                     },
                                     {
                                         "name": "tiles",
@@ -130,30 +203,80 @@
                                             "baseShape": "structuredBuffer",
                                             "resultType": {
                                                 "kind": "scalar",
-                                                "scalarType": "uint32"
-                                            }
+                                                "scalarType": "uint32",
+                                                "sizes": [
+                                                    {
+                                                        "kind": "uniform",
+                                                        "value": 4,
+                                                        "alignment": 4
+                                                    }
+                                                ]
+                                            },
+                                            "sizes": [
+                                                {
+                                                    "kind": "descriptorTableSlot",
+                                                    "value": 1
+                                                }
+                                            ]
                                         },
-                                        "binding": {"kind": "descriptorTableSlot", "index": 2}
+                                        "binding": {
+                                            "kind": "descriptorTableSlot",
+                                            "index": 2
+                                        }
+                                    }
+                                ],
+                                "sizes": [
+                                    {
+                                        "kind": "descriptorTableSlot",
+                                        "value": 3
                                     }
                                 ]
                             },
-                            "binding": {"kind": "descriptorTableSlot", "index": 1, "count": 3}
+                            "binding": {
+                                "kind": "descriptorTableSlot",
+                                "index": 1,
+                                "count": 3
+                            }
                         },
                         {
                             "name": "n1_wrapS",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "int32"
+                                "scalarType": "int32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 48, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 48,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n1_wrapT",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "int32"
+                                "scalarType": "int32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 52, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 52,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n1_fallback",
@@ -163,9 +286,21 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 16,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 64, "size": 16, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 64,
+                                "size": 16,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n1_scale",
@@ -175,9 +310,21 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 16,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 80, "size": 16, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 80,
+                                "size": 16,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n1_bias",
@@ -187,9 +334,21 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 16,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 96, "size": 16, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 96,
+                                "size": 16,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n0_emissiveColor",
@@ -199,17 +358,41 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 12,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 112, "size": 12, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 112,
+                                "size": 12,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n0_useSpecularWorkflow",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "int32"
+                                "scalarType": "int32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 124, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 124,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_specularColor",
@@ -219,73 +402,181 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 12,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 128, "size": 12, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 128,
+                                "size": 12,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n0_metallic",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 140, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 140,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_roughness",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 144, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 144,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_clearcoat",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 148, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 148,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_clearcoatRoughness",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 152, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 152,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_opacity",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 156, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 156,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_opacityMode",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "int32"
+                                "scalarType": "int32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 160, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 160,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_opacityThreshold",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 164, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 164,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_ior",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 168, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 168,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_normal",
@@ -295,30 +586,80 @@
                                 "elementType": {
                                     "kind": "scalar",
                                     "scalarType": "float32"
-                                }
+                                },
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 12,
+                                        "alignment": 16
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 176, "size": 12, "elementStride": 4}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 176,
+                                "size": 12,
+                                "elementStride": 4
+                            }
                         },
                         {
                             "name": "n0_displacement",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 188, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 188,
+                                "size": 4,
+                                "elementStride": 0
+                            }
                         },
                         {
                             "name": "n0_occlusion",
                             "type": {
                                 "kind": "scalar",
-                                "scalarType": "float32"
+                                "scalarType": "float32",
+                                "sizes": [
+                                    {
+                                        "kind": "uniform",
+                                        "value": 4,
+                                        "alignment": 4
+                                    }
+                                ]
                             },
-                            "binding": {"kind": "uniform", "offset": 192, "size": 4, "elementStride": 0}
+                            "binding": {
+                                "kind": "uniform",
+                                "offset": 192,
+                                "size": 4,
+                                "elementStride": 0
+                            }
+                        }
+                    ],
+                    "sizes": [
+                        {
+                            "kind": "descriptorTableSlot",
+                            "value": 3
+                        },
+                        {
+                            "kind": "uniform",
+                            "value": 208,
+                            "alignment": 16
                         }
                     ]
                 },
                 "containerVarLayout": {
-                    "binding": {"kind": "descriptorTableSlot", "index": 0}
+                    "binding": {
+                        "kind": "descriptorTableSlot",
+                        "index": 0
+                    }
                 },
                 "elementVarLayout": {
                     "type": {
@@ -338,9 +679,21 @@
                                                 "elementType": {
                                                     "kind": "scalar",
                                                     "scalarType": "float32"
-                                                }
+                                                },
+                                                "sizes": [
+                                                    {
+                                                        "kind": "uniform",
+                                                        "value": 12,
+                                                        "alignment": 16
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "uniform", "offset": 0, "size": 12, "elementStride": 4}
+                                            "binding": {
+                                                "kind": "uniform",
+                                                "offset": 0,
+                                                "size": 12,
+                                                "elementStride": 4
+                                            }
                                         },
                                         {
                                             "name": "transparency",
@@ -350,13 +703,37 @@
                                                 "elementType": {
                                                     "kind": "scalar",
                                                     "scalarType": "float32"
-                                                }
+                                                },
+                                                "sizes": [
+                                                    {
+                                                        "kind": "uniform",
+                                                        "value": 12,
+                                                        "alignment": 16
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "uniform", "offset": 16, "size": 12, "elementStride": 4}
+                                            "binding": {
+                                                "kind": "uniform",
+                                                "offset": 16,
+                                                "size": 12,
+                                                "elementStride": 4
+                                            }
+                                        }
+                                    ],
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 32,
+                                            "alignment": 16
                                         }
                                     ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 0, "size": 32, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 0,
+                                    "size": 32,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "displacementshader1",
@@ -372,21 +749,57 @@
                                                 "elementType": {
                                                     "kind": "scalar",
                                                     "scalarType": "float32"
-                                                }
+                                                },
+                                                "sizes": [
+                                                    {
+                                                        "kind": "uniform",
+                                                        "value": 12,
+                                                        "alignment": 16
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "uniform", "offset": 0, "size": 12, "elementStride": 4}
+                                            "binding": {
+                                                "kind": "uniform",
+                                                "offset": 0,
+                                                "size": 12,
+                                                "elementStride": 4
+                                            }
                                         },
                                         {
                                             "name": "scale",
                                             "type": {
                                                 "kind": "scalar",
-                                                "scalarType": "float32"
+                                                "scalarType": "float32",
+                                                "sizes": [
+                                                    {
+                                                        "kind": "uniform",
+                                                        "value": 4,
+                                                        "alignment": 4
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "uniform", "offset": 12, "size": 4, "elementStride": 0}
+                                            "binding": {
+                                                "kind": "uniform",
+                                                "offset": 12,
+                                                "size": 4,
+                                                "elementStride": 0
+                                            }
+                                        }
+                                    ],
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 16,
+                                            "alignment": 16
                                         }
                                     ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 32, "size": 16, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 32,
+                                    "size": 16,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n1_file",
@@ -407,16 +820,34 @@
                                                         "kind": "scalar",
                                                         "scalarType": "float32"
                                                     }
-                                                }
+                                                },
+                                                "sizes": [
+                                                    {
+                                                        "kind": "descriptorTableSlot",
+                                                        "value": 1
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "descriptorTableSlot", "index": 0}
+                                            "binding": {
+                                                "kind": "descriptorTableSlot",
+                                                "index": 0
+                                            }
                                         },
                                         {
                                             "name": "sampler",
                                             "type": {
-                                                "kind": "samplerState"
+                                                "kind": "samplerState",
+                                                "sizes": [
+                                                    {
+                                                        "kind": "descriptorTableSlot",
+                                                        "value": 1
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "descriptorTableSlot", "index": 1}
+                                            "binding": {
+                                                "kind": "descriptorTableSlot",
+                                                "index": 1
+                                            }
                                         },
                                         {
                                             "name": "tiles",
@@ -425,30 +856,80 @@
                                                 "baseShape": "structuredBuffer",
                                                 "resultType": {
                                                     "kind": "scalar",
-                                                    "scalarType": "uint32"
-                                                }
+                                                    "scalarType": "uint32",
+                                                    "sizes": [
+                                                        {
+                                                            "kind": "uniform",
+                                                            "value": 4,
+                                                            "alignment": 4
+                                                        }
+                                                    ]
+                                                },
+                                                "sizes": [
+                                                    {
+                                                        "kind": "descriptorTableSlot",
+                                                        "value": 1
+                                                    }
+                                                ]
                                             },
-                                            "binding": {"kind": "descriptorTableSlot", "index": 2}
+                                            "binding": {
+                                                "kind": "descriptorTableSlot",
+                                                "index": 2
+                                            }
+                                        }
+                                    ],
+                                    "sizes": [
+                                        {
+                                            "kind": "descriptorTableSlot",
+                                            "value": 3
                                         }
                                     ]
                                 },
-                                "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 3}
+                                "binding": {
+                                    "kind": "descriptorTableSlot",
+                                    "index": 0,
+                                    "count": 3
+                                }
                             },
                             {
                                 "name": "n1_wrapS",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "int32"
+                                    "scalarType": "int32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 48, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 48,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n1_wrapT",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "int32"
+                                    "scalarType": "int32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 52, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 52,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n1_fallback",
@@ -458,9 +939,21 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 16,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 64, "size": 16, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 64,
+                                    "size": 16,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n1_scale",
@@ -470,9 +963,21 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 16,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 80, "size": 16, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 80,
+                                    "size": 16,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n1_bias",
@@ -482,9 +987,21 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 16,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 96, "size": 16, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 96,
+                                    "size": 16,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n0_emissiveColor",
@@ -494,17 +1011,41 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 12,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 112, "size": 12, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 112,
+                                    "size": 12,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n0_useSpecularWorkflow",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "int32"
+                                    "scalarType": "int32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 124, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 124,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_specularColor",
@@ -514,73 +1055,181 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 12,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 128, "size": 12, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 128,
+                                    "size": 12,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n0_metallic",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 140, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 140,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_roughness",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 144, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 144,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_clearcoat",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 148, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 148,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_clearcoatRoughness",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 152, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 152,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_opacity",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 156, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 156,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_opacityMode",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "int32"
+                                    "scalarType": "int32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 160, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 160,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_opacityThreshold",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 164, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 164,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_ior",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 168, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 168,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_normal",
@@ -590,303 +1239,96 @@
                                     "elementType": {
                                         "kind": "scalar",
                                         "scalarType": "float32"
-                                    }
+                                    },
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 12,
+                                            "alignment": 16
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 176, "size": 12, "elementStride": 4}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 176,
+                                    "size": 12,
+                                    "elementStride": 4
+                                }
                             },
                             {
                                 "name": "n0_displacement",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 188, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 188,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
                             },
                             {
                                 "name": "n0_occlusion",
                                 "type": {
                                     "kind": "scalar",
-                                    "scalarType": "float32"
+                                    "scalarType": "float32",
+                                    "sizes": [
+                                        {
+                                            "kind": "uniform",
+                                            "value": 4,
+                                            "alignment": 4
+                                        }
+                                    ]
                                 },
-                                "binding": {"kind": "uniform", "offset": 192, "size": 4, "elementStride": 0}
+                                "binding": {
+                                    "kind": "uniform",
+                                    "offset": 192,
+                                    "size": 4,
+                                    "elementStride": 0
+                                }
+                            }
+                        ],
+                        "sizes": [
+                            {
+                                "kind": "descriptorTableSlot",
+                                "value": 3
+                            },
+                            {
+                                "kind": "uniform",
+                                "value": 208,
+                                "alignment": 16
                             }
                         ]
                     },
                     "bindings": [
-                        {"kind": "descriptorTableSlot", "index": 1, "count": 3},
-                        {"kind": "uniform", "offset": 0, "size": 208, "elementStride": 0}
-                    ]
-                }
-            }
-        }
-    ],
-    "entryPoints": [
-        {
-            "name": "fragmentMain",
-            "stage": "fragment",
-            "parameters": [
-                {
-                    "name": "_vd",
-                    "stage": "fragment",
-                    "binding": {"kind": "varyingInput", "index": 0, "count": 6},
-                    "type": {
-                        "kind": "struct",
-                        "name": "VertexData",
-                        "fields": [
-                            {
-                                "name": "SV_Position",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 4,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "semanticName": "SV_POSITION"
-                            },
-                            {
-                                "name": "i_geomprop_st",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 2,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 0},
-                                "semanticName": "I_GEOMPROP_ST"
-                            },
-                            {
-                                "name": "normalWorld",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 3,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 1},
-                                "semanticName": "NORMALWORLD"
-                            },
-                            {
-                                "name": "tangentWorld",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 3,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 2},
-                                "semanticName": "TANGENTWORLD"
-                            },
-                            {
-                                "name": "bitangentWorld",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 3,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 3},
-                                "semanticName": "BITANGENTWORLD"
-                            },
-                            {
-                                "name": "positionWorld",
-                                "type": {
-                                    "kind": "vector",
-                                    "elementCount": 3,
-                                    "elementType": {
-                                        "kind": "scalar",
-                                        "scalarType": "float32"
-                                    }
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 4},
-                                "semanticName": "POSITIONWORLD"
-                            },
-                            {
-                                "name": "link",
-                                "type": {
-                                    "kind": "scalar",
-                                    "scalarType": "int32"
-                                },
-                                "stage": "fragment",
-                                "binding": {"kind": "varyingInput", "index": 5},
-                                "semanticName": "LINK"
-                            }
-                        ]
-                    }
-                }
-            ],
-            "result": {
-                "stage": "fragment",
-                "binding": {"kind": "varyingOutput", "index": 0},
-                "semanticName": "SV_TARGET",
-                "type": {
-                    "kind": "vector",
-                    "elementCount": 4,
-                    "elementType": {
-                        "kind": "scalar",
-                        "scalarType": "float32"
-                    }
-                }
-            },
-            "bindings": [
-                {
-                    "name": "view",
-                    "binding": {"kind": "pushConstantBuffer", "index": 0}
-                },
-                {
-                    "name": "pixelCB",
-                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4}
-                }
-            ]
-        },
-        {
-            "name": "vs",
-            "stage": "vertex",
-            "parameters": [
-                {
-                    "name": "vertex",
-                    "semanticName": "SV_VULKANVERTEXID",
-                    "type": {
-                        "kind": "scalar",
-                        "scalarType": "uint32"
-                    }
-                },
-                {
-                    "name": "slot",
-                    "semanticName": "SV_VULKANINSTANCEID",
-                    "type": {
-                        "kind": "scalar",
-                        "scalarType": "uint32"
-                    }
-                }
-            ],
-            "result": {
-                "stage": "vertex",
-                "binding": {"kind": "varyingOutput", "index": 0, "count": 6},
-                "type": {
-                    "kind": "struct",
-                    "name": "VertexData",
-                    "fields": [
                         {
-                            "name": "SV_Position",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 4,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "semanticName": "SV_POSITION"
+                            "kind": "descriptorTableSlot",
+                            "index": 1,
+                            "count": 3
                         },
                         {
-                            "name": "i_geomprop_st",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 2,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 0},
-                            "semanticName": "I_GEOMPROP_ST"
-                        },
-                        {
-                            "name": "normalWorld",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 3,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 1},
-                            "semanticName": "NORMALWORLD"
-                        },
-                        {
-                            "name": "tangentWorld",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 3,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 2},
-                            "semanticName": "TANGENTWORLD"
-                        },
-                        {
-                            "name": "bitangentWorld",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 3,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 3},
-                            "semanticName": "BITANGENTWORLD"
-                        },
-                        {
-                            "name": "positionWorld",
-                            "type": {
-                                "kind": "vector",
-                                "elementCount": 3,
-                                "elementType": {
-                                    "kind": "scalar",
-                                    "scalarType": "float32"
-                                }
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 4},
-                            "semanticName": "POSITIONWORLD"
-                        },
-                        {
-                            "name": "link",
-                            "type": {
-                                "kind": "scalar",
-                                "scalarType": "int32"
-                            },
-                            "stage": "vertex",
-                            "binding": {"kind": "varyingOutput", "index": 5},
-                            "semanticName": "LINK"
+                            "kind": "uniform",
+                            "offset": 0,
+                            "size": 208,
+                            "elementStride": 0
                         }
                     ]
-                }
-            },
-            "bindings": [
-                {
-                    "name": "view",
-                    "binding": {"kind": "pushConstantBuffer", "index": 0}
                 },
-                {
-                    "name": "pixelCB",
-                    "binding": {"kind": "descriptorTableSlot", "index": 0, "count": 4}
-                }
-            ]
+                "sizes": [
+                    {
+                        "kind": "descriptorTableSlot",
+                        "value": 4
+                    }
+                ]
+            }
         }
-    ],
-    "bindlessSpaceIndex": 1
+    ]
 }

@@ -1,35 +1,8 @@
-"""Renders two scenes through UsdImagingGL in this process, as usdview
-does, and checks what the host then sees of Pika: the render stats
-dictionary with the last frame's pairs and gpuMemoryUsed, which usdview's
-HUD shows, and, for the second scene, whose geometry is the first's under a
-material, that its first frame is not converged and shows the first scene's
-clay while the material's build is out, that the converged frame does not,
-and that a structural edit, which builds the material again, keeps the
-converged look while its build is out, neither clay nor the new one,
-whether the host edits the material in place (Houdini 22) or resyncs it,
-removing it and inserting it again at its path (Houdini 21). Then, for a
-third scene, a texture magnified, that changing the texture cap in one
-session, from none to 4, 2 and none again, builds no material and draws
-at each cap what a session started at it draws, that a raise whose
-read fails, its baked file cut short, keeps the image it had and still
-converges, and that once the file is whole again a cap change releases
-it, drawing what a session at that cap draws. Last, for a fourth scene
-under a soft shadow, that frames drawn while nothing changes accumulate:
-the image is not converged until the 64th sample, nears the converged
-image as samples add up, and then stays bit-identical with no frame
-drawn; and that moving the caster starts the samples again.
+"""Checks what a host sees of Pika through UsdImagingGL
 
-    hython hydra/engine.py <clay.usda> <painted.usda> <mipped.usda> <penumbra.usda>
+    python3 hydra/engine.py <clay.usda> <painted.usda> <mipped.usda> <penumbra.usda>
 
-Needs a display (check.sh runs it on its Xvnc) and the delegate on
-PXR_PLUGINPATH_NAME. The controls are the dictionary before the first
-frame, which has no frame pairs, the converged frame's pixel, which must
-differ from the clay, the edit's converged pixel, which must differ
-from the look it kept, and the fresh sessions' images at each cap, which
-must differ from each other. Accumulation's control is the moved caster's
-converged image, which must differ from the one before; the clay scene,
-whose hard shadow is the same each sample, must still take SAMPLES, which
-its pixel filter's jitter needs.
+Needs a display and the delegate on PXR_PLUGINPATH_NAME.
 """
 
 import glob
@@ -51,8 +24,7 @@ SAMPLES = 64
 
 
 def gl_context():
-    """A current GL context with a bound framebuffer the engine's present
-    task draws into, as a window's would be."""
+    """A current GL context with a bound framebuffer the engine's present task draws into"""
     application = QApplication(sys.argv)
     surface = QOffscreenSurface()
     surface.setFormat(QSurfaceFormat())
@@ -66,8 +38,7 @@ def gl_context():
 
 
 def stats_hold_a_frame(stats):
-    """Whether the dictionary says Pika drew a frame: a frame count, the
-    draw's GPU time and the memory key usdview shows."""
+    """Whether the dictionary says Pika drew a frame."""
     return (stats.get("frames", 0) >= 1 and "gpu_draw_ms" in stats
             and stats.get("gpuMemoryUsed", 0) > 0 and stats.get("drawn_triangles", 0) >= 1)
 
@@ -88,8 +59,7 @@ def framing(stage):
 
 
 def scene(path):
-    """The engine rendering the scene with Pika, its stage and the params
-    of its frames, framed as usdview frames a new stage."""
+    """The engine rendering the scene with Pika, its stage and the params of its frame"""
     stage = Usd.Stage.Open(path)
     engine = UsdImagingGL.Engine()
     plugin = next(p for p in engine.GetRendererPlugins()
@@ -118,8 +88,8 @@ def pixels(fbo):
 
 
 def capped(path, cap, fbo):
-    """The converged image of the scene at `path` in a session of its own
-    under the texture cap `cap`, 0 for none, as the host's setting."""
+    """The converged image of the scene at `path` in a session of its own under the texture cap
+    `cap`, 0 for none, as the host's setting."""
     engine, stage, params = scene(path)
     engine.SetRendererSetting("pika:textureCap", cap)
     converge(engine, stage, params, fbo)
@@ -127,8 +97,8 @@ def capped(path, cap, fbo):
 
 
 def recap(engine, stage, params, fbo, cap):
-    """Sets the texture cap to `cap` in the engine's session and renders
-    until converged, failing on any frame that builds a material."""
+    """Sets the texture cap to `cap` in the engine's session and renders until converged, failing
+    on any frame that builds a material."""
     engine.SetRendererSetting("pika:textureCap", cap)
     deadline = time.monotonic() + PATIENCE
     frames = 0
@@ -158,8 +128,8 @@ def converge(engine, stage, params, fbo):
 
 
 def accumulate(engine, stage, params, fbo):
-    """Renders until converged and gives each frame's image and sample
-    index, from the first drawn with nothing changed."""
+    """Renders until converged and gives each frame's image and sample index, from the first drawn
+    with nothing changed."""
     frames = []
     deadline = time.monotonic() + PATIENCE
     while True:
@@ -177,14 +147,14 @@ def distance(a, b):
 
 
 def accumulates(path, fbo):
-    """Checks that the scene's soft shadow accumulates while nothing
-    changes, stays once converged and starts again when its caster moves."""
+    """Checks that the scene's soft shadow accumulates while nothing changes, stays once converged
+    and starts again when its caster moves."""
     engine, stage, params = scene(path)
     frames = accumulate(engine, stage, params, fbo)
     samples = [s for _, s in frames]
     if samples[-1] != SAMPLES - 1 or len(frames) < SAMPLES:
         sys.exit(f"engine: the soft shadow converged after {len(frames)} frames at sample {samples[-1]}, not {SAMPLES - 1}")
-    # Each image is the frame placed a call after it was drawn; the sample stat is the last placed.
+    # Each image is the frame placed a call after it was drawn.
     images = {s: image for image, s in frames}
     final = images[SAMPLES - 1]
     early, late = distance(images[3], final), distance(images[31], final)
@@ -239,15 +209,12 @@ def main(clay, painted, mipped, penumbra):
         sys.exit(f"engine: the painted cube stayed clay {pixels[-1]} once built: {last}")
     print("engine: the painted cube was clay %s for %d frames, then %s" % (grey, len(pixels), pixels[-1]))
 
-    # Connecting the diffuse colour to the green node changes the structure, so it is built
-    # again: meanwhile the cube keeps its look.
+    # Connecting the diffuse colour to the green node changes the structure, so it is built again.
     red = pixels[-1]
     surface = UsdShade.Shader.Get(stage, "/world/mtl/paint/surface")
     green = UsdShade.Shader.Get(stage, "/world/mtl/paint/green")
     surface.GetInput("diffuseColor").ConnectToSource(green.ConnectableAPI(), "out")
-    # While frames change, a render delivers the frame before and leaves
-    # its own on the GPU: the first after the edit delivers the converged
-    # frame, and the next delivers the first drawn with the build out.
+    # While frames change, a render delivers the frame before and leaves its own on the GPU.
     frame(engine, stage, params, fbo)
     pixel = frame(engine, stage, params, fbo)
     edited = engine.GetRenderStats()
@@ -273,8 +240,7 @@ def main(clay, painted, mipped, penumbra):
             sys.exit(f"engine: under the cap {cap}, {differ} pixels differ from a session started at it")
         print(f"engine: the cap changed to {cap} in {frames} frames, building nothing, as a session at it draws")
     recap(engine, stage, params, fbo, 2)
-    # The file the raise back to every level reads, cut to its header: the
-    # read fails, and the texture is held at its 2×2 levels.
+    # The file the raise back to every level reads, cut to its header.
     baked = glob.glob(os.path.join(os.environ["PIKA_CACHE"], "textures", "**", "mips.exr", "*"), recursive=True)
     if not baked:
         sys.exit("engine: mips.exr has no bake under PIKA_CACHE")
@@ -287,8 +253,7 @@ def main(clay, painted, mipped, penumbra):
     if image != fresh[2]:
         sys.exit("engine: a raise whose read failed did not keep the 2×2 levels")
     print(f"engine: a raise whose read failed kept the cap 2 image, converged in {frames} frames")
-    # Written back in place, as the session reads the file it holds open. Unreleased, it would
-    # draw the 2×2 levels, which differ from the cap 4 image (the control above).
+    # Written back in place, as the session reads the file it holds open.
     for path, data in whole.items():
         with open(path, "r+b") as f:
             f.write(data)

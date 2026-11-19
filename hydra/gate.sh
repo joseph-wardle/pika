@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# The gate run, on your own display: ALab in usdview at 1080p, frames 1004-1057 played twice
+# The gate run, on your own display: ALab (corpus/fetch.sh) in usdview at 1080p, frames 1004-1057 played twice
 # (hydra/gate.py); the second loop's period p95 and misses are the gate's numbers. The
 # validation layer stays off: it would be timed too.
 #
-#   hydra/gate.sh /path/to/ALab/entry.usda <out dir>
+# The host is the flake's usdview, or Houdini's when HFS names one.
+#
+#   hydra/gate.sh <out dir>
 set -euo pipefail
 
-HFS=${HFS:-/opt/hfs21.0}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-STAGE=${1:?usage: gate.sh <ALab entry.usda> <out dir>}
-OUT=${2:?usage: gate.sh <ALab entry.usda> <out dir>}
+STAGE=$ROOT/corpus/ALab-2.3.0/ALab/entry.usda
+OUT=${1:?usage: gate.sh <out dir>}
+[ -e "$STAGE" ] || { echo "ALab is not in corpus/: run corpus/fetch.sh"; exit 1; }
 CAMERA=/root/camera01/GEO/renderCam_hrc/renderCam_buffer/renderCam_srt/renderCam
 
-make -C "$ROOT/hydra" --no-print-directory
+make -C "$ROOT/hydra" --no-print-directory ${HFS:+HFS="$HFS"}
 mkdir -p "$OUT"
-# houdini_setup_bash reads unset variables.
-set +u
-cd "$HFS" && source ./houdini_setup_bash >/dev/null && cd "$ROOT"
-set -u
+if [ -n "${HFS:-}" ]; then
+    # houdini_setup_bash reads unset variables.
+    set +u
+    cd "$HFS" && source ./houdini_setup_bash >/dev/null && cd "$ROOT"
+    set -u
+fi
 export PXR_PLUGINPATH_NAME=$ROOT/target/hydra
+# The flake's shell names the validation layer, which Pika turns on when it finds it.
+unset VK_ADD_LAYER_PATH
 
 # The driver lowers clocks while the GPU is mostly idle, so runs compare
 # only at the same clocks.
