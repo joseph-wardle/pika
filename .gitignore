@@ -1,13 +1,9 @@
 /target/
-
-# Machine-local Cargo settings (paths, linkers).
 /.cargo/config.toml
 
-# Production scenes and textures are private and live outside the repository.
 *.usdc
 *.usdz
 *.exr
-# The bake check's sources are a few hundred bytes each.
 !bake/fixtures/*.exr
 *.tx
 *.tex
@@ -15,5 +11,5 @@
 *.vdb
 *.bgeo*
 
-# Python byte code of the check scripts.
 __pycache__/
+/.direnv/

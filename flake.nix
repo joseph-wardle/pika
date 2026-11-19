@@ -17,6 +17,19 @@
         inherit system;
         overlays = [ rust-overlay.overlays.default ];
       };
+
+      openusd = pkgs.python313Packages.openusd.override {
+        withUsdView = true;
+        withTools = true;
+      };
+
+      python = pkgs.python313.withPackages (p: [
+        openusd
+        p.numpy
+        p.openimageio
+        p.materialx
+        p.pyside6
+      ]);
     in
     {
       devShells.${system}.default = pkgs.mkShell {
@@ -24,6 +37,17 @@
           pkgs.rust-bin.stable.latest.default
           pkgs.shader-slang
           pkgs.vulkan-tools
+          pkgs.gnumake
+          pkgs.ispc
+          python
+          openusd
+        ];
+        buildInputs = [
+          openusd
+          pkgs.opensubdiv
+          pkgs.onetbb
+          pkgs.openimageio
+          pkgs.materialx
         ];
         # ash loads libvulkan at run time, and the validation layer's manifest names its
         # library without a path.
