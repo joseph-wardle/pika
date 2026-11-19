@@ -40,6 +40,8 @@
           pkgs.gnumake
           pkgs.ispc
           pkgs.xvfb
+          pkgs.curl
+          pkgs.unzip
           python
           openusd
         ];
