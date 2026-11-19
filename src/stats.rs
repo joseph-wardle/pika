@@ -38,8 +38,7 @@ pub struct Recorded {
     pub record: Duration,
     pub update: Update,
     pub shading: shade::Update,
-    /// The time estimating the textures' needs.
-    pub need: Duration,
+    pub laps: Vec<(&'static str, Duration)>,
     /// Its index among the frames drawn while nothing changed, 0 while anything did.
     pub sample: u32,
     pub lights: usize,
@@ -49,6 +48,28 @@ pub struct Recorded {
     pub transforms: usize,
     /// Placed a call later than it was drawn.
     pub late: bool,
+}
+
+/// `record`'s time in named parts: CPU time from each lap to the next.
+pub struct Laps {
+    last: Instant,
+    pub laps: Vec<(&'static str, Duration)>,
+}
+
+impl Laps {
+    pub fn start() -> Self {
+        Self {
+            last: Instant::now(),
+            laps: Vec::new(),
+        }
+    }
+
+    /// Ends the part since the lap before, or the start.
+    pub fn lap(&mut self, label: &'static str) {
+        let now = Instant::now();
+        self.laps.push((label, now - self.last));
+        self.last = now;
+    }
 }
 
 /// A frame placed in the host's buffers.
@@ -265,8 +286,8 @@ impl Frame {
             ("wait_ms".into(), ms(self.times.wait)),
             ("place_ms".into(), ms(self.place)),
             ("texture_read_ms".into(), ms(s.read)),
-            ("need_ms".into(), ms(r.need)),
         ]);
+        pairs.extend((r.laps.iter()).map(|(label, t)| (format!("record_{label}_ms"), ms(*t))));
         pairs.extend(
             (self.times.spans.iter()).map(|(label, t)| (format!("gpu_{label}_ms"), ms(*t))),
         );
@@ -385,7 +406,7 @@ mod tests {
                         blurred: 6,
                     },
                 },
-                need: ms(0.5),
+                laps: vec![("need", ms(0.5)), ("fit", ms(0.75))],
                 sample: 3,
                 lights: 47,
                 moved: 338,
@@ -439,7 +460,7 @@ mod tests {
     #[test]
     fn frame_line_is_key_value_pairs_named_by_mark() {
         let expected = "frame 7 width 1620 height 1080 period_ms 29.000 record_ms 1.500 \
-             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 need_ms 0.500 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
+             wait_ms 5.250 place_ms 4.500 texture_read_ms 0.250 record_need_ms 0.500 record_fit_ms 0.750 gpu_upload_ms 0.875 gpu_cull_ms 0.125 \
              gpu_draw_ms 2.000 gpu_readback_ms 1.375 uploaded_bytes 4096 \
              read_bytes 20995200 drawn_instances 1274 drawn_triangles 11550000 drawn_lights 47 sample 3 \
              shadow_pages_held 256 shadow_pages_wanted 300 shadow_pages_drawn 12 shadow_pages_live 5 shadow_draws 9000 \
