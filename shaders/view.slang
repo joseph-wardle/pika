@@ -223,6 +223,34 @@ bool lit_by(Light light, float3 P, uint link)
     return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
 }
 
+// The dome light's irradiance image, a latlong (src/dome.rs).
+static const uint2 IRRADIANCE = uint2(64, 32);
+
+// The dome light a view is lit by; black when it has none.
+struct Dome
+{
+    // World to its image's axes, a row each.
+    float3 axes[3];
+    float3 radiance;
+    // Per IRRADIANCE texel from the top row, 3 floats: its image's irradiance over π.
+    float *irradiance;
+};
+
+// Where a latlong image holds direction d, as OpenEXR and so UsdLux lay it out: +y along the
+// top row, +z at the centre, +x a quarter in from the left.
+float2 latlong(float3 d)
+{
+    // atan2 is undefined at a pole, where any column serves.
+    float longitude = d.x == 0 && d.z == 0 ? 0 : atan2(d.x, d.z);
+    return float2(0.5 - longitude / 6.2831853, acos(clamp(d.y, -1, 1)) / 3.1415927);
+}
+
+float3 from_latlong(float2 uv)
+{
+    float2 angle = (0.5 - uv) * float2(6.2831853, 3.1415927);
+    return float3(cos(angle.y) * sin(angle.x), sin(angle.y), cos(angle.y) * cos(angle.x));
+}
+
 // The side of a light tile in pixels (src/light.rs TILE).
 static const uint LIGHT_TILE = 16;
 
@@ -269,6 +297,7 @@ struct View
     Atomic<uint> *drawn;
     // Each shadowed light's, at its Light.shadow.
     Shadow *shadows;
+    Dome dome;
 };
 
 float4 transform(float4 rows[4], float4 v)

@@ -10,7 +10,7 @@ use crate::material::{Connection, Network, Node, Value};
 use crate::renderer::{Aov, Format, Frame, Renderer};
 use crate::store::{
     InstanceCategories, InstancePrimvars, Instancing, Interpolation, LightParams, Link, Normals,
-    Refined, RefinedTexcoord, Scheme, Shape, Stencils, Subset, Texcoord, Topology,
+    Refined, RefinedTexcoord, Scheme, Shape, Stencils, Subset, Texcoord, Texture, Topology,
 };
 
 pub const OK: i32 = 0;
@@ -930,6 +930,7 @@ pub unsafe extern "C" fn pika_light_params(
                 length: p.length,
                 radius: p.radius,
             },
+            "domeLight" => Shape::Dome,
             other => return Err(format!("Pika draws no {other}")),
         };
         let params = LightParams {
@@ -957,6 +958,23 @@ pub unsafe extern "C" fn pika_light_transform(
         // SAFETY: the caller guarantees the renderer and the matrix.
         let (handle, matrix) = unsafe { (&*renderer, *matrix) };
         lock(handle)?.store.set_light_transform(id, matrix)
+    })
+}
+
+/// # Safety
+/// `renderer` must be live, and `file` and `format` NUL-terminated strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pika_light_texture(
+    renderer: *const Handle,
+    id: u64,
+    file: *const c_char,
+    format: *const c_char,
+) -> i32 {
+    call(|| {
+        // SAFETY: the caller guarantees the renderer and the strings.
+        let (handle, file, format) = unsafe { (&*renderer, string(file)?, string(format)?) };
+        let texture = Texture { file, format };
+        lock(handle)?.store.set_light_texture(id, texture)
     })
 }
 

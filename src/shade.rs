@@ -92,8 +92,7 @@ pub struct Update {
 }
 
 impl Shade {
-    pub fn new(device: &gpu::Device) -> Result<Self, String> {
-        let bake = Bake::new()?;
+    pub fn new(device: &gpu::Device, bake: Bake) -> Result<Self, String> {
         let mut textures = Textures::new(device)?;
         let mut surfaces = BTreeMap::new();
         let mut builtin = |network: Network| -> Result<Material, String> {
