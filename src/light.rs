@@ -24,6 +24,9 @@ pub const RECT: u32 = 2;
 pub const DISK: u32 = 3;
 pub const CYLINDER: u32 = 4;
 
+/// A lifted sun's angle in degrees, the real one's.
+const SUN: f32 = 0.53;
+
 /// Scales a disk's octagon axes to give the octagon the disk's area.
 const OCTAGON: f32 = 1.053_907_4;
 
@@ -145,9 +148,21 @@ pub struct Caster {
     pub link: u32,
 }
 
-/// The store's lights that shine, each with its light-link bit, and those of them that cast
-/// shadows. A headlight is the host's to send, so a store holding no light draws black.
-pub fn gather(store: &Store) -> (Vec<Light>, Vec<Caster>) {
+/// The sun lifted out of a dome's sky (`dome.rs`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Sun {
+    /// Its dome's id in the store, whose links and shadow switch it takes.
+    pub dome: u64,
+    /// The unit direction toward it.
+    pub direction: [f32; 3],
+    /// Lux.
+    pub illuminance: [f32; 3],
+}
+
+/// The store's lights that shine and then `sun`, each with its light-link bit, and those of
+/// them that cast shadows. A headlight is the host's to send, so a store holding no light
+/// draws black.
+pub fn gather(store: &Store, sun: Option<Sun>) -> (Vec<Light>, Vec<Caster>) {
     let links = Links::new(store);
     let mut lights = Vec::new();
     let mut casters = Vec::new();
@@ -166,6 +181,22 @@ pub fn gather(store: &Store) -> (Vec<Light>, Vec<Caster>) {
         lights.push(Light {
             link: link.light,
             ..resolved
+        });
+    }
+    if let Some((sun, dome)) = sun.and_then(|s| Some((s, store.lights().get(&s.dome)?))) {
+        let link = links.light(dome);
+        if dome.params.is_some_and(|p| p.shadow) {
+            // A dome is no caster itself, so its id is free.
+            casters.push(Caster {
+                id: sun.dome,
+                light: lights.len(),
+                link: link.shadow,
+            });
+        }
+        lights.push(Light {
+            radius: (SUN.to_radians() / 2.0).tan(),
+            link: link.light,
+            ..Light::distant(sun.direction, sun.illuminance)
         });
     }
     (lights, casters)

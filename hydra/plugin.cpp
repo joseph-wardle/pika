@@ -32,7 +32,8 @@ namespace {
 
 // husk reads these off the render settings prim; usdview offers them in Renderer Settings.
 TF_DEFINE_PRIVATE_TOKENS(_tokens,
-                         ((textureCap, "pika:textureCap"))((shadowPool, "pika:shadowPool")));
+                         ((textureCap, "pika:textureCap"))((shadowPool, "pika:shadowPool"))(
+                             (sunThreshold, "pika:sunThreshold")));
 
 class PikaRenderPass final : public HdRenderPass {
 public:
@@ -61,6 +62,9 @@ protected:
         frame.texture_cap = uint32_t(std::max(cap, 0));
         int pool = delegate->GetRenderSetting<int>(_tokens->shadowPool, 256);
         frame.shadow_pool = uint32_t(std::max(pool, 0));
+        // usdview sends a double, husk a float.
+        VtValue sun = VtValue::Cast<float>(delegate->GetRenderSetting(_tokens->sunThreshold));
+        frame.sun_threshold = sun.IsEmpty() ? 10.0f : sun.UncheckedGet<float>();
         std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
         GfVec4f clear(0.0f);
         PikaRenderBuffer *first = nullptr;
@@ -278,7 +282,9 @@ private:
     // None by default: textures are expected at their own size.
     HdRenderSettingDescriptorList _settings = {
         {"Texture cap (texels a side, 0 for none)", _tokens->textureCap, VtValue(0)},
-        {"Shadow pool (MB)", _tokens->shadowPool, VtValue(256)}};
+        {"Shadow pool (MB)", _tokens->shadowPool, VtValue(256)},
+        {"Sun threshold (dome light above it casts shadows, 0 for none)", _tokens->sunThreshold,
+         VtValue(10.0f)}};
 };
 
 } // namespace

@@ -161,6 +161,8 @@ typedef struct pika_frame {
     // The shadow page pool's megabytes (pika:shadowPool), in quarter-megabyte pages; 0 is an
     // error.
     uint32_t shadow_pool;
+    // A dome's light above this becomes a sun (pika:sunThreshold); 0 is none.
+    float sun_threshold;
 } pika_frame;
 
 // A key ending in _ms is milliseconds; any other value is a count.

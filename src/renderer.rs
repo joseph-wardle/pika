@@ -79,6 +79,8 @@ pub struct Frame<'a> {
     pub texture_cap: u32,
     /// `pika:shadowPool`, in MB.
     pub shadow_pool: u32,
+    /// `pika:sunThreshold`, 0 for no sun.
+    pub sun_threshold: f32,
 }
 
 impl Frame<'_> {
@@ -169,6 +171,7 @@ struct Inputs {
     render_tags: Vec<String>,
     texture_cap: u32,
     shadow_pool: u32,
+    sun_threshold: f32,
 }
 
 impl Inputs {
@@ -180,6 +183,7 @@ impl Inputs {
             render_tags: frame.render_tags.clone(),
             texture_cap: frame.texture_cap,
             shadow_pool: frame.shadow_pool,
+            sun_threshold: frame.sun_threshold,
         }
     }
 }
@@ -366,8 +370,9 @@ impl Renderer {
         let previous_view_projection =
             (self.film.previous_view_projection()).unwrap_or(unjittered.view_projection);
         let addresses = self.geometry.addresses();
-        let (mut lights, casters) = light::gather(&self.store);
-        let dome = self.dome.update(&self.device, &self.store, cb)?;
+        let (dome, sun) =
+            (self.dome).update(&self.device, &self.store, cb, inputs.sun_threshold)?;
+        let (mut lights, casters) = light::gather(&self.store, sun);
         laps.lap("lights");
         if let Some(g) = &addresses {
             let (device, geometry) = (&self.device, &self.geometry);

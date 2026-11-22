@@ -1,4 +1,8 @@
-//! The dome light a view is lit by, and its sky's irradiance toward every direction.
+//! The dome light a view is lit by: its sky's irradiance toward every direction, and the sun
+//! lifted out of its sky.
+
+use std::f64::consts::{PI, TAU};
+use std::ops::Range;
 
 use ash::vk;
 
@@ -14,6 +18,10 @@ const IRRADIANCE: u32 = 64 * 32;
 const SUMMED: u32 = 256;
 /// A sky of one value, with texels enough that their sum is as near as an image's.
 const FLAT: [u32; 2] = [SUMMED, SUMMED / 2];
+/// The least share of a sky's light worth lifting into a sun.
+const SHARE: f64 = 0.01;
+/// Rows of an image read at a time.
+const BAND: u32 = 64;
 
 /// `shaders/view.slang`'s `Dome`.
 #[repr(C)]
@@ -47,6 +55,18 @@ enum Sky {
     Image(store::Texture),
 }
 
+/// A sky's light over the threshold, as EEVEE lifts it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Lifted {
+    /// The unit direction toward it in the dome's axes.
+    toward: [f32; 3],
+    /// Its texels' sum over their solid angles, before the dome's colour and intensity.
+    light: [f32; 3],
+}
+
+/// A sky's extent, its texels from the top row, 3 floats each, and its sun.
+type Texels = ([u32; 2], Vec<f32>, Option<Lifted>);
+
 pub struct Dome {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
@@ -55,7 +75,9 @@ pub struct Dome {
     /// The sky's texels, 3 floats each, which the pass reads the frame the sky changes.
     sky: Buffer,
     irradiance: Buffer,
-    summed: Option<Sky>,
+    /// The sky summed, and what takes its texels to 1 at the sun's threshold.
+    summed: Option<(Sky, [f32; 3])>,
+    sun: Option<Lifted>,
     /// The domes last warned of as giving no light.
     warned: Vec<String>,
 }
@@ -73,18 +95,20 @@ impl Dome {
                 vk::BufferUsageFlags::STORAGE_BUFFER,
             )?,
             summed: None,
+            sun: None,
             warned: Vec::new(),
         })
     }
 
-    /// Records the irradiance pass into `cb`, outside rendering, when the sky changed. No GPU
-    /// work may be pending.
+    /// Records the irradiance pass into `cb`, outside rendering, when the sky or what
+    /// `threshold` lifts from it changed. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
         store: &Store,
         cb: vk::CommandBuffer,
-    ) -> Result<Constants, String> {
+        threshold: f32,
+    ) -> Result<(Constants, Option<light::Sun>), String> {
         let (lit, rest) = choose(store);
         if rest != self.warned {
             if !rest.is_empty() {
@@ -95,36 +119,55 @@ impl Dome {
             }
             self.warned = rest;
         }
-        let (sky, axes, radiance) = match lit {
-            Some((light, params, transform)) => {
+        let (id, sky, axes, radiance) = match lit {
+            Some((id, light, params, transform)) => {
                 let sky = match &light.texture {
                     Some(texture) if !texture.file.is_empty() => Sky::Image(texture.clone()),
                     _ => Sky::White,
                 };
-                (sky, axes(transform), light::radiance(params))
+                (id, sky, axes(transform), light::radiance(params))
             }
-            None => (Sky::Black, [[0.0; 3]; 3], [0.0; 3]),
+            None => (0, Sky::Black, [[0.0; 3]; 3], [0.0; 3]),
         };
-        if self.summed.as_ref() != Some(&sky) {
+        // The threshold is of the light a view sees, as EEVEE's is.
+        let scale = if threshold > 0.0 && matches!(sky, Sky::Image(_)) {
+            radiance.map(|l| l / threshold)
+        } else {
+            [0.0; 3]
+        };
+        let summed = (sky, scale);
+        if self.summed.as_ref() != Some(&summed) {
             // A failed image is not tried again until the sky changes.
-            let (extent, texels) = self.texels(&sky).unwrap_or_else(|e| {
+            let (extent, texels, sun) = self.texels(&summed.0, scale).unwrap_or_else(|e| {
                 eprintln!("pika: warning: a dome light's image: {e}; it gives no light");
                 flat(0.0)
             });
             self.sky = sky_buffer(device, texels.len() as u64 * 4)?;
             self.sky.bytes().copy_from_slice(gpu::bytes(&texels));
             self.record(cb, extent);
-            self.summed = Some(sky);
+            self.sun = sun;
+            self.summed = Some(summed);
         }
-        Ok(Constants {
+        let constants = Constants {
             axes,
             radiance,
             irradiance: self.irradiance.address,
-        })
+        };
+        let sun = self.sun.and_then(|sun| {
+            // The axes' transpose turns back, exact for a dome unsheared.
+            let d = [0, 1, 2].map(|c| (0..3).map(|r| axes[r][c] * sun.toward[r]).sum::<f32>());
+            let length = d.iter().map(|c| c * c).sum::<f32>().sqrt();
+            (length > 0.0).then(|| light::Sun {
+                dome: id,
+                direction: d.map(|c| c / length),
+                illuminance: [0, 1, 2].map(|c| sun.light[c] * radiance[c]),
+            })
+        });
+        Ok((constants, sun))
     }
 
-    /// A sky's extent and texels from the top row, 3 floats each.
-    fn texels(&self, sky: &Sky) -> Result<([u32; 2], Vec<f32>), String> {
+    /// A sky's texels, with what `scale` takes over 1 lifted out of an image's.
+    fn texels(&self, sky: &Sky, scale: [f32; 3]) -> Result<Texels, String> {
         let image = match sky {
             Sky::Black => return Ok(flat(0.0)),
             Sky::White => return Ok(flat(1.0)),
@@ -151,21 +194,38 @@ impl Dome {
             vk::Format::R32G32B32A32_SFLOAT => 4,
             _ => return Err(format!("{} has two channels", image.file)),
         };
-        let level = texture.first(SUMMED);
-        let (width, height) = texture.extent(level);
-        // A set of tiles' first.
-        let mut bytes = vec![0; (width * height) as usize * channels * 4];
-        (texture.read_at(texture.levels[level].start, &mut bytes))
-            .map_err(|e| format!("cannot read the bake of {}: {e}", image.file))?;
-        let texels = (bytes.chunks_exact(channels * 4))
-            .flat_map(|texel| {
+        // Rows of a level of a set of tiles' first, 3 floats a texel.
+        let rows = |level: usize, rows: Range<u32>| -> Result<Vec<f32>, String> {
+            let row = texture.extent(level).0 as usize * channels * 4;
+            let mut bytes = vec![0; rows.len() * row];
+            let from = texture.levels[level].start + rows.start as usize * row;
+            (texture.read_at(from, &mut bytes))
+                .map_err(|e| format!("cannot read the bake of {}: {e}", image.file))?;
+            let texels = bytes.chunks_exact(channels * 4).flat_map(|texel| {
                 [0, 1, 2].map(|c| {
                     let at = 4 * c.min(channels - 1);
                     f32::from_le_bytes(texel[at..at + 4].try_into().unwrap())
                 })
-            })
-            .collect();
-        Ok(([width, height], texels))
+            });
+            Ok(texels.collect())
+        };
+        let level = texture.first(SUMMED);
+        let (width, height) = texture.extent(level);
+        if scale != [0.0; 3] {
+            // The whole image: a level's average hides a sun.
+            let (w, h) = texture.extent(0);
+            let mut lift = Lift::new(scale, [w, h], [width, height]);
+            for y in (0..h).step_by(BAND as usize) {
+                let band = rows(0, y..(y + BAND).min(h))?;
+                for (row, texels) in (y..).zip(band.chunks_exact(3 * w as usize)) {
+                    lift.row(row, texels);
+                }
+            }
+            if let Some((texels, sun)) = lift.finish() {
+                return Ok(([width, height], texels, Some(sun)));
+            }
+        }
+        Ok(([width, height], rows(level, 0..height)?, None))
     }
 
     fn record(&self, cb: vk::CommandBuffer, extent: [u32; 2]) {
@@ -200,8 +260,95 @@ impl Dome {
     }
 }
 
-fn flat(value: f32) -> ([u32; 2], Vec<f32>) {
-    (FLAT, vec![value; (FLAT[0] * FLAT[1] * 3) as usize])
+fn flat(value: f32) -> Texels {
+    (FLAT, vec![value; (FLAT[0] * FLAT[1] * 3) as usize], None)
+}
+
+/// A latlong's texels over a threshold summed into a sun, and the rest averaged down.
+struct Lift {
+    /// What takes a texel's channels to 1 at the threshold.
+    scale: [f32; 3],
+    from: [u32; 2],
+    to: [u32; 2],
+    sums: Vec<f32>,
+    counts: Vec<u32>,
+    light: [f64; 3],
+    toward: [f64; 3],
+    lifted: f64,
+    total: f64,
+}
+
+impl Lift {
+    /// `to` is no wider or taller than `from`.
+    fn new(scale: [f32; 3], from: [u32; 2], to: [u32; 2]) -> Self {
+        let texels = (to[0] * to[1]) as usize;
+        Self {
+            scale,
+            from,
+            to,
+            sums: vec![0.0; 3 * texels],
+            counts: vec![0; texels],
+            light: [0.0; 3],
+            toward: [0.0; 3],
+            lifted: 0.0,
+            total: 0.0,
+        }
+    }
+
+    /// Row `y` from the top, 3 floats a texel.
+    fn row(&mut self, y: u32, texels: &[f32]) {
+        let [w, h] = self.from.map(|v| v as usize);
+        let [to_w, to_h] = self.to.map(|v| v as usize);
+        // The row's band of the sphere, shared evenly by its texels, as `shaders/dome.slang`.
+        let edge = |y: u32| (PI * y as f64 / h as f64).cos();
+        let solid_angle = (edge(y) - edge(y + 1)) * TAU / w as f64;
+        let latitude = (0.5 - (y as f64 + 0.5) / h as f64) * PI;
+        let first = (y as usize * to_h / h) * to_w;
+        for (x, texel) in texels.as_chunks::<3>().0.iter().enumerate() {
+            let scaled = [0, 1, 2].map(|c| texel[c] * self.scale[c]);
+            let over = scaled.into_iter().fold(0.0, f32::max);
+            // The colour kept, its largest channel at the threshold.
+            let kept = if over > 1.0 { 1.0 / over } else { 1.0 };
+            let bin = first + x * to_w / w;
+            self.counts[bin] += 1;
+            for c in 0..3 {
+                self.sums[3 * bin + c] += texel[c] * kept;
+            }
+            let power = scaled.iter().sum::<f32>() as f64 * solid_angle;
+            self.total += power;
+            if over > 1.0 {
+                let gone = (1.0 - kept) as f64;
+                // `shaders/view.slang`'s `from_latlong`.
+                let longitude = (0.5 - (x as f64 + 0.5) / w as f64) * TAU;
+                let toward = [
+                    latitude.cos() * longitude.sin(),
+                    latitude.sin(),
+                    latitude.cos() * longitude.cos(),
+                ];
+                for c in 0..3 {
+                    self.light[c] += texel[c] as f64 * gone * solid_angle;
+                    self.toward[c] += toward[c] * power * gone;
+                }
+                self.lifted += power * gone;
+            }
+        }
+    }
+
+    /// The texels left and the sun, or none when too little was lifted to be one.
+    fn finish(self) -> Option<(Vec<f32>, Lifted)> {
+        let length = self.toward.iter().map(|c| c * c).sum::<f64>().sqrt();
+        if self.lifted < SHARE * self.total || length == 0.0 {
+            return None;
+        }
+        let texels = (self.sums.as_chunks::<3>().0.iter().zip(&self.counts))
+            .flat_map(|(sum, &count)| [0, 1, 2].map(|c| sum[c] / count.max(1) as f32))
+            .collect();
+        let sun = Lifted {
+            toward: self.toward.map(|c| (c / length) as f32),
+            light: self.light.map(|c| c as f32),
+        };
+        Some((texels, sun))
+    }
 }
 
 fn sky_buffer(device: &gpu::Device, size: u64) -> Result<Buffer, String> {
@@ -213,22 +360,22 @@ fn sky_buffer(device: &gpu::Device, size: u64) -> Result<Buffer, String> {
     )
 }
 
-type Lit<'a> = (&'a store::Light, &'a store::LightParams, &'a [f64; 16]);
+type Lit<'a> = (u64, &'a store::Light, &'a store::LightParams, &'a [f64; 16]);
 
 /// The dome that lights, the first shown with an image or else the first shown, as Storm
 /// chooses; and the paths of the other domes shown.
 fn choose(store: &Store) -> (Option<Lit<'_>>, Vec<String>) {
-    let shown: Vec<Lit> = (store.lights().values())
-        .filter_map(|l| match (&l.params, &l.transform) {
-            (Some(p), Some(m)) if p.shape == Shape::Dome && p.visible => Some((l, p, m)),
+    let shown: Vec<Lit> = (store.lights().iter())
+        .filter_map(|(&id, l)| match (&l.params, &l.transform) {
+            (Some(p), Some(m)) if p.shape == Shape::Dome && p.visible => Some((id, l, p, m)),
             _ => None,
         })
         .collect();
     let imaged = |l: &store::Light| l.texture.as_ref().is_some_and(|t| !t.file.is_empty());
-    let lit = shown.iter().position(|(l, ..)| imaged(l)).unwrap_or(0);
+    let lit = shown.iter().position(|(_, l, ..)| imaged(l)).unwrap_or(0);
     let rest = (shown.iter().enumerate())
         .filter(|(i, _)| *i != lit)
-        .map(|(_, (l, ..))| l.path.clone())
+        .map(|(_, (_, l, ..))| l.path.clone())
         .collect();
     (shown.get(lit).copied(), rest)
 }
@@ -280,7 +427,7 @@ mod tests {
 
     fn chosen(store: &Store) -> (Option<&str>, Vec<String>) {
         let (lit, rest) = choose(store);
-        (lit.map(|(l, ..)| l.path.as_str()), rest)
+        (lit.map(|(_, l, ..)| l.path.as_str()), rest)
     }
 
     #[test]
@@ -297,6 +444,42 @@ mod tests {
         // Negative control: the first dome shown has no image, so it is not the one.
         let rest = vec!["/debug".to_string(), "/other".to_string()];
         assert_eq!(chosen(&store), (Some("/sky"), rest));
+    }
+
+    #[test]
+    fn a_sun_is_lifted_out_of_a_sky() {
+        // A grey sky of 1 with one texel of 1001, an eighth of a turn up and round from +z.
+        let lifted = |scale: f32| {
+            let mut lift = Lift::new([scale; 3], [8, 4], [4, 2]);
+            for y in 0..4 {
+                let mut row = [1.0; 24];
+                if y == 1 {
+                    row[9..12].fill(1001.0);
+                }
+                lift.row(y, &row);
+            }
+            lift.finish()
+        };
+        // A threshold of 10: the texel keeps 10 and gives 991 over its solid angle.
+        let (texels, sun) = lifted(0.1).unwrap();
+        let solid_angle = (PI / 4.0).cos() * TAU / 8.0;
+        let close = |a: f32, b: f64| (a as f64 - b).abs() < 1e-4 * b.abs().max(1.0);
+        assert!(sun.light.iter().all(|&l| close(l, 991.0 * solid_angle)));
+        let toward = [(PI / 8.0).cos() * (PI / 8.0).sin(), (PI / 8.0).sin()];
+        assert!(close(sun.toward[0], toward[0]) && close(sun.toward[1], toward[1]));
+        // Its bin averages 10 with three 1s; the others are untouched.
+        assert_eq!(texels.len(), 4 * 2 * 3);
+        assert!(close(texels[3], 13.0 / 4.0) && close(texels[0], 1.0));
+        // Negative control: nothing is over a threshold of 2000, so there is no sun.
+        assert!(lifted(0.0005).is_none());
+        // Under a hundredth of the sky's light is no sun either: 1 over 4π.
+        let mut faint = Lift::new([1.0; 3], [8, 4], [4, 2]);
+        for y in 0..4 {
+            let mut row = [1.0; 24];
+            row[9] = if y == 1 { 1.1 } else { 1.0 };
+            faint.row(y, &row);
+        }
+        assert!(faint.finish().is_none());
     }
 
     #[test]
