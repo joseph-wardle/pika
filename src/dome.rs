@@ -1,5 +1,5 @@
-//! The dome light a view is lit by: its sky's irradiance toward every direction, and the sun
-//! lifted out of its sky.
+//! The dome light a view is lit by: its sky's irradiance toward every direction, its sky
+//! blurred for each roughness's reflection, and the sun lifted out of its sky.
 
 use std::f64::consts::{PI, TAU};
 use std::ops::Range;
@@ -16,6 +16,17 @@ use crate::store::{self, Shape, Store};
 const IRRADIANCE: u32 = 64 * 32;
 /// The widest level of an image summed: irradiance is too smooth to tell a finer one.
 const SUMMED: u32 = 256;
+/// The widest level of an image reflected: a `REFLECTION` square's detail at the horizon.
+const REFLECTED: u32 = 2 * REFLECTION;
+/// `shaders/view.slang`'s `REFLECTION`, `REFLECTION_LEVELS`, `REFLECTION_LEAST`,
+/// `REFLECTION_ROUGHEST` and `REFLECTION_SPACING`.
+const REFLECTION: u32 = 1024;
+const LEVELS: u32 = 8;
+const LEAST: u32 = 128;
+const ROUGHEST: f32 = 0.6;
+const SPACING: f32 = 0.75;
+/// Directions of the sky a blurred texel reads.
+const SAMPLES: u32 = 4096;
 /// A sky of one value, with texels enough that their sum is as near as an image's.
 const FLAT: [u32; 2] = [SUMMED, SUMMED / 2];
 /// The least share of a sky's light worth lifting into a sun.
@@ -30,6 +41,7 @@ pub struct Constants {
     axes: [[f32; 3]; 3],
     radiance: [f32; 3],
     irradiance: vk::DeviceAddress,
+    reflection: vk::DeviceAddress,
 }
 
 /// `shaders/dome.slang`'s `Push`.
@@ -37,12 +49,14 @@ pub struct Constants {
 #[derive(Clone, Copy)]
 struct Push {
     sky: vk::DeviceAddress,
-    irradiance: vk::DeviceAddress,
+    into: vk::DeviceAddress,
     extent: [u32; 2],
     first: u32,
     count: u32,
     stride: u32,
-    unused: u32,
+    level: u32,
+    alpha: f32,
+    samples: u32,
 }
 
 /// What a dome shows before its colour and intensity.
@@ -64,17 +78,23 @@ struct Lifted {
     light: [f32; 3],
 }
 
-/// A sky's extent, its texels from the top row, 3 floats each, and its sun.
+/// A sky's extent within `REFLECTED`, its texels from the top row, 3 floats each, and its sun.
 type Texels = ([u32; 2], Vec<f32>, Option<Lifted>);
 
 pub struct Dome {
     // A copy of the owner's device table, which outlives this (field order).
     device: ash::Device,
-    compute: gpu::Compute,
+    sum: gpu::Compute,
+    fold: gpu::Compute,
+    halve: gpu::Compute,
+    blur: gpu::Compute,
     bake: Bake,
-    /// The sky's texels, 3 floats each, which the pass reads the frame the sky changes.
-    sky: Buffer,
+    /// The sky's texels within `SUMMED` and within `REFLECTED`, 3 floats each, which the
+    /// passes read the frame the sky changes.
+    summed_sky: Buffer,
+    reflected_sky: Buffer,
     irradiance: Buffer,
+    reflection: Buffer,
     /// The sky summed, and what takes its texels to 1 at the sun's threshold.
     summed: Option<(Sky, [f32; 3])>,
     sun: Option<Lifted>,
@@ -84,15 +104,24 @@ pub struct Dome {
 
 impl Dome {
     pub fn new(device: &gpu::Device, spirv: &[u32], bake: Bake) -> Result<Self, String> {
+        let compute = |name| gpu::Compute::new(device, spirv, name, size_of::<Push>());
+        let local = |texels: u32| {
+            let usage = vk::BufferUsageFlags::STORAGE_BUFFER;
+            Buffer::device_local(device, texels as u64 * 12, usage)
+        };
         Ok(Self {
             device: device.raw.clone(),
-            compute: gpu::Compute::new(device, spirv, c"cs", size_of::<Push>())?,
+            sum: compute(c"sum")?,
+            fold: compute(c"fold")?,
+            halve: compute(c"halve")?,
+            blur: compute(c"blur")?,
             bake,
-            sky: sky_buffer(device, 12)?,
-            irradiance: Buffer::device_local(
-                device,
-                IRRADIANCE as u64 * 12,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
+            summed_sky: sky_buffer(device, 12)?,
+            reflected_sky: sky_buffer(device, 12)?,
+            irradiance: local(IRRADIANCE)?,
+            // The blurred levels, then the plain halvings past the sharp square.
+            reflection: local(
+                level(LEVELS) + (1..=HALVINGS).map(|h| halving(h).pow(2)).sum::<u32>(),
             )?,
             summed: None,
             sun: None,
@@ -127,7 +156,8 @@ impl Dome {
                 };
                 (id, sky, axes(transform), light::radiance(params))
             }
-            None => (0, Sky::Black, [[0.0; 3]; 3], [0.0; 3]),
+            // Unturned, not zero: a zero direction has no place in a folded square.
+            None => (0, Sky::Black, axes(&IDENTITY), [0.0; 3]),
         };
         // The threshold is of the light a view sees, as EEVEE's is.
         let scale = if threshold > 0.0 && matches!(sky, Sky::Image(_)) {
@@ -142,9 +172,13 @@ impl Dome {
                 eprintln!("pika: warning: a dome light's image: {e}; it gives no light");
                 flat(0.0)
             });
-            self.sky = sky_buffer(device, texels.len() as u64 * 4)?;
-            self.sky.bytes().copy_from_slice(gpu::bytes(&texels));
-            self.record(cb, extent);
+            let coarse = summed_extent(extent);
+            let summed_texels = average(extent, &texels, coarse);
+            self.summed_sky = sky_buffer(device, summed_texels.len() as u64 * 4)?;
+            (self.summed_sky.bytes()).copy_from_slice(gpu::bytes(&summed_texels));
+            self.reflected_sky = sky_buffer(device, texels.len() as u64 * 4)?;
+            (self.reflected_sky.bytes()).copy_from_slice(gpu::bytes(&texels));
+            self.record(cb, coarse, extent);
             self.sun = sun;
             self.summed = Some(summed);
         }
@@ -152,6 +186,7 @@ impl Dome {
             axes,
             radiance,
             irradiance: self.irradiance.address,
+            reflection: self.reflection.address,
         };
         let sun = self.sun.and_then(|sun| {
             // The axes' transpose turns back, exact for a dome unsheared.
@@ -209,7 +244,7 @@ impl Dome {
             });
             Ok(texels.collect())
         };
-        let level = texture.first(SUMMED);
+        let level = texture.first(REFLECTED);
         let (width, height) = texture.extent(level);
         if scale != [0.0; 3] {
             // The whole image: a level's average hides a sun.
@@ -228,36 +263,124 @@ impl Dome {
         Ok(([width, height], rows(level, 0..height)?, None))
     }
 
-    fn record(&self, cb: vk::CommandBuffer, extent: [u32; 2]) {
-        let texels = std::slice::from_ref(&(0..IRRADIANCE));
-        (self.compute).record(cb, texels, |first, count, stride| Push {
-            sky: self.sky.address,
-            irradiance: self.irradiance.address,
-            extent,
-            first,
-            count,
-            stride,
-            unused: 0,
-        });
-        let summed = vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-        // SAFETY: `cb` is recording outside any rendering.
-        unsafe {
-            (self.device).cmd_pipeline_barrier2(
-                cb,
-                &vk::DependencyInfo::default().memory_barriers(&[summed]),
-            );
+    /// The irradiance image; then the sharp square, its halvings each from the one before,
+    /// and the blurred levels from those.
+    fn record(&self, cb: vk::CommandBuffer, summed: [u32; 2], reflected: [u32; 2]) {
+        let pass = |compute: &gpu::Compute, texels: u32, push: Push| {
+            let texels = 0..texels;
+            compute.record(cb, std::slice::from_ref(&texels), |first, count, stride| {
+                Push {
+                    first,
+                    count,
+                    stride,
+                    ..push
+                }
+            });
+        };
+        let written = |reader| {
+            let barrier = vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .dst_stage_mask(reader)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
+            // SAFETY: `cb` is recording outside any rendering.
+            unsafe {
+                (self.device).cmd_pipeline_barrier2(
+                    cb,
+                    &vk::DependencyInfo::default().memory_barriers(&[barrier]),
+                );
+            }
+        };
+        let push = Push {
+            sky: self.summed_sky.address,
+            into: self.irradiance.address,
+            extent: summed,
+            first: 0,
+            count: 0,
+            stride: 0,
+            level: 0,
+            alpha: 0.0,
+            samples: SAMPLES,
+        };
+        pass(&self.sum, IRRADIANCE, push);
+        let push = Push {
+            sky: self.reflected_sky.address,
+            into: self.reflection.address,
+            extent: reflected,
+            ..push
+        };
+        pass(&self.fold, side(0).pow(2), push);
+        for level in 1..=HALVINGS {
+            written(vk::PipelineStageFlags2::COMPUTE_SHADER);
+            pass(&self.halve, halving(level).pow(2), Push { level, ..push });
         }
+        written(vk::PipelineStageFlags2::COMPUTE_SHADER);
+        for level in 1..LEVELS {
+            let alpha = roughness(level).powi(2);
+            let push = Push {
+                level,
+                alpha,
+                ..push
+            };
+            pass(&self.blur, side(level).pow(2), push);
+        }
+        written(vk::PipelineStageFlags2::FRAGMENT_SHADER);
     }
 
     pub fn memory(&self) -> gpu::Memory {
-        let mut memory = self.sky.memory();
+        let mut memory = self.summed_sky.memory();
+        memory += self.reflected_sky.memory();
         memory += self.irradiance.memory();
+        memory += self.reflection.memory();
         memory
     }
+}
+
+/// The sharp square's halvings, down to one texel.
+const HALVINGS: u32 = REFLECTION.ilog2();
+
+/// `shaders/view.slang`'s `reflection_side`.
+fn side(level: u32) -> u32 {
+    (REFLECTION >> level).max(LEAST)
+}
+
+/// A halving's side in texels.
+fn halving(halving: u32) -> u32 {
+    REFLECTION >> halving
+}
+
+/// `shaders/view.slang`'s `reflection_level`.
+fn level(level: u32) -> u32 {
+    (0..level).map(|l| side(l).pow(2)).sum()
+}
+
+/// The roughness a blurred level holds, as `shaders/frame.slang`'s `dome_radiance` reads it.
+fn roughness(level: u32) -> f32 {
+    ROUGHEST * (level as f32 / (LEVELS - 1) as f32).powf(1.0 / SPACING)
+}
+
+/// The extent of an image's level within `SUMMED`.
+fn summed_extent(extent: [u32; 2]) -> [u32; 2] {
+    let over = (0..).take_while(|l| (extent[0].max(extent[1]) >> l) > SUMMED);
+    extent.map(|side| (side >> over.clone().count()).max(1))
+}
+
+/// A latlong's texels averaged down to `to`, no wider or taller than `from`.
+fn average(from: [u32; 2], texels: &[f32], to: [u32; 2]) -> Vec<f32> {
+    let [w, h] = from.map(|v| v as usize);
+    let [to_w, to_h] = to.map(|v| v as usize);
+    let mut sums = vec![0.0; 3 * to_w * to_h];
+    let mut counts = vec![0u32; to_w * to_h];
+    for (i, texel) in texels.as_chunks::<3>().0.iter().enumerate() {
+        let bin = (i / w * to_h / h) * to_w + (i % w) * to_w / w;
+        counts[bin] += 1;
+        for c in 0..3 {
+            sums[3 * bin + c] += texel[c];
+        }
+    }
+    (sums.as_chunks::<3>().0.iter().zip(&counts))
+        .flat_map(|(sum, &count)| [0, 1, 2].map(|c| sum[c] / count.max(1) as f32))
+        .collect()
 }
 
 fn flat(value: f32) -> Texels {
@@ -360,6 +483,10 @@ fn sky_buffer(device: &gpu::Device, size: u64) -> Result<Buffer, String> {
     )
 }
 
+const IDENTITY: [f64; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
 type Lit<'a> = (u64, &'a store::Light, &'a store::LightParams, &'a [f64; 16]);
 
 /// The dome that lights, the first shown with an image or else the first shown, as Storm
@@ -401,10 +528,6 @@ mod tests {
     use super::*;
     use crate::store::{LightParams, Texture};
 
-    const IDENTITY: [f64; 16] = [
-        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
-    ];
-
     fn light(store: &mut Store, path: &str, shape: Shape, visible: bool, file: &str) {
         let id = store.insert_light(path.into());
         let params = LightParams {
@@ -444,6 +567,36 @@ mod tests {
         // Negative control: the first dome shown has no image, so it is not the one.
         let rest = vec!["/debug".to_string(), "/other".to_string()];
         assert_eq!(chosen(&store), (Some("/sky"), rest));
+    }
+
+    #[test]
+    fn a_sky_is_averaged_down_within_the_summed_width() {
+        assert_eq!(summed_extent([2048, 1024]), [SUMMED, SUMMED / 2]);
+        assert_eq!(summed_extent([64, 32]), [64, 32]);
+        // Two texels a bin: grey 1 and 3 on the left, 5 and 7 on the right.
+        let texels: Vec<f32> = [1.0, 3.0, 5.0, 7.0]
+            .into_iter()
+            .flat_map(|v| [v; 3])
+            .collect();
+        assert_eq!(
+            average([4, 1], &texels, [2, 1]),
+            [2.0, 2.0, 2.0, 6.0, 6.0, 6.0]
+        );
+        // Negative control: a bin takes nothing from its neighbour.
+        assert_ne!(average([4, 1], &texels, [2, 1])[0], 4.0);
+    }
+
+    #[test]
+    fn the_blurred_levels_span_mirror_to_the_roughest() {
+        assert_eq!(roughness(0), 0.0);
+        assert!((roughness(LEVELS - 1) - ROUGHEST).abs() < 1e-6);
+        assert!((1..LEVELS).all(|l| roughness(l) > roughness(l - 1)));
+        // Negative control: a level past the last is rougher than any read.
+        assert!(roughness(LEVELS) > ROUGHEST);
+        assert_eq!(level(2), REFLECTION.pow(2) + (REFLECTION / 2).pow(2));
+        assert_eq!(side(LEVELS - 1), LEAST);
+        // Negative control: a plain halving goes on below the least blurred side.
+        assert!(halving(LEVELS - 1) < LEAST);
     }
 
     #[test]

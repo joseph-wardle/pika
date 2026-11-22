@@ -234,7 +234,82 @@ struct Dome
     float3 radiance;
     // Per IRRADIANCE texel from the top row, 3 floats: its image's irradiance over π.
     float *irradiance;
+    // Its image in folded squares, 3 floats a texel: the sharp one, REFLECTION wide; each
+    // blurred level, half as wide as the one before down to REFLECTION_LEAST; then the sharp
+    // one's plain halvings.
+    float *reflection;
 };
+
+// The sharp square's side, and the levels a roughness reads (src/dome.rs).
+static const uint REFLECTION = 1024;
+static const uint REFLECTION_LEVELS = 8;
+// A coarser level creases along the fold's edges, where four texels blend across a bend.
+static const uint REFLECTION_LEAST = 128;
+// The last level's roughness, the roughness that reads the irradiance alone, and the power
+// of roughness the levels are spaced evenly in.
+static const float REFLECTION_ROUGHEST = 0.6;
+static const float REFLECTION_MATTE = 0.9;
+static const float REFLECTION_SPACING = 0.75;
+
+// Where a folded (octahedral) square holds direction d: +y at its centre, -y at its corners.
+float2 folded(float3 d)
+{
+    d /= abs(d.x) + abs(d.y) + abs(d.z);
+    float2 p = d.y >= 0 ? d.xz : (1 - abs(d.zx)) * float2(d.x >= 0 ? 1 : -1, d.z >= 0 ? 1 : -1);
+    return p * 0.5 + 0.5;
+}
+
+float3 from_folded(float2 uv)
+{
+    float2 p = uv * 2 - 1;
+    float y = 1 - abs(p.x) - abs(p.y);
+    float2 below = (1 - abs(p.yx)) * float2(p.x >= 0 ? 1 : -1, p.y >= 0 ? 1 : -1);
+    return normalize(y >= 0 ? float3(p.x, y, p.y) : float3(below.x, y, below.y));
+}
+
+uint reflection_side(uint level)
+{
+    return max(REFLECTION >> level, REFLECTION_LEAST);
+}
+
+// A blurred level's first texel, or a plain halving's, in a dome's reflection.
+uint reflection_level(uint level)
+{
+    uint first = 0;
+    for (uint l = 0; l < level; l++)
+        first += reflection_side(l) * reflection_side(l);
+    return first;
+}
+
+uint reflection_halving(uint halving)
+{
+    uint first = halving == 0 ? 0 : reflection_level(REFLECTION_LEVELS);
+    for (uint h = 1; h < halving; h++)
+        first += (REFLECTION >> h) * (REFLECTION >> h);
+    return first;
+}
+
+float3 reflection_texel(float *square, int side, int2 t)
+{
+    // Past an edge is the edge's own texel mirrored about the edge's middle.
+    if (t.x < 0 || t.x >= side)
+        t = int2(clamp(t.x, 0, side - 1), side - 1 - t.y);
+    if (t.y < 0 || t.y >= side)
+        t = int2(side - 1 - t.x, clamp(t.y, 0, side - 1));
+    float *texel = square + 3 * (t.y * side + t.x);
+    return float3(texel[0], texel[1], texel[2]);
+}
+
+// A square's four texels about uv.
+float3 reflection_square(float *square, int side, float2 uv)
+{
+    float2 at = uv * side - 0.5;
+    int2 t = int2(floor(at));
+    float2 f = at - floor(at);
+    float3 a = lerp(reflection_texel(square, side, t), reflection_texel(square, side, t + int2(1, 0)), f.x);
+    float3 b = lerp(reflection_texel(square, side, t + int2(0, 1)), reflection_texel(square, side, t + int2(1, 1)), f.x);
+    return lerp(a, b, f.y);
+}
 
 // Where a latlong image holds direction d, as OpenEXR and so UsdLux lay it out: +y along the
 // top row, +z at the centre, +x a quarter in from the left.

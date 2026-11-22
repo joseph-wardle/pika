@@ -55,6 +55,25 @@ float3 mx_environment_irradiance(float3 N)
     return dome.radiance * lerp(rows[0], rows[1], f.y);
 }
 
+// The dome's light reflected about N toward L by a surface of GGX alpha, for
+// mx_environment_radiance: the two levels about its roughness, and past the last the
+// irradiance, as EEVEE fades.
+float3 dome_radiance(float3 N, float3 L, float alpha)
+{
+    Dome dome = view->dome;
+    float roughness = sqrt(alpha);
+    float matte = saturate((roughness - REFLECTION_ROUGHEST) / (REFLECTION_MATTE - REFLECTION_ROUGHEST));
+    if (matte == 1)
+        return mx_environment_irradiance(N);
+    float2 uv = folded(float3(dot(dome.axes[0], L), dot(dome.axes[1], L), dot(dome.axes[2], L)));
+    float level = pow(saturate(roughness / REFLECTION_ROUGHEST), REFLECTION_SPACING) * (REFLECTION_LEVELS - 1);
+    uint l = min(uint(level), REFLECTION_LEVELS - 2);
+    float3 a = reflection_square(dome.reflection + 3 * reflection_level(l), int(reflection_side(l)), uv);
+    float3 b = reflection_square(dome.reflection + 3 * reflection_level(l + 1), int(reflection_side(l + 1)), uv);
+    float3 radiance = dome.radiance * lerp(a, b, level - l);
+    return matte == 0 ? radiance : lerp(radiance, mx_environment_irradiance(N), matte);
+}
+
 // Lambert's formula over the light's outline as P sees it, a polygon of up to 8 corners;
 // dot(N, it) is exact while the light is wholly above the horizon.
 float3 illuminance_vector(Light light, float3 c)
