@@ -16,9 +16,8 @@ def Camera "camera"
     float2 clippingRange = (0.1, 100)
 }
 
-# MaterialX attenuates OpenPBR's base by its dielectric layer's directional
-# albedo even at specular weight 0 (see hydra/image.py), so this quad stays
-# within 35° of facing the camera, fan included, and its base under 1.
+# MaterialX attenuates OpenPBR's base by its dielectric layer's albedo even at specular weight 0,
+# so this quad stays within 35° of facing the camera, fan included, and its base under 1.
 def Mesh "facing" (prepend apiSchemas = ["MaterialBindingAPI"])
 {
     uniform token subdivisionScheme = "none"

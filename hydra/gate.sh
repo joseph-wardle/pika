@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# The gate run, on your own display: ALab (corpus/fetch.sh) in usdview at 1080p, frames 1004-1057 played twice
-# (hydra/gate.py); the second loop's period p95 and misses are the gate's numbers. The
-# validation layer stays off: it would be timed too.
-#
-# The host is the flake's usdview, or Houdini's when HFS names one.
+# The gate run, on your own display: ALab (corpus/fetch.sh) in usdview at 1080p, frames 1004-1057
+# played twice (hydra/gate.py). The second loop's period p95 and misses are the gate's numbers.
+# The validation layer stays off, as it would be timed too. The host is the flake's usdview, or
+# Houdini's when HFS names one.
 #
 #   hydra/gate.sh <out dir>
 set -euo pipefail
@@ -28,14 +27,13 @@ export PXR_PLUGINPATH_NAME=$ROOT/target/hydra
 # The flake's shell names the validation layer, which Pika turns on when it finds it.
 unset VK_ADD_LAYER_PATH
 
-# The driver lowers clocks while the GPU is mostly idle, so runs compare
-# only at the same clocks.
+# The driver lowers clocks while the GPU is mostly idle, so runs compare only at the same clocks.
 nvidia-smi --query-gpu=timestamp,clocks.gr,clocks.mem,pstate,utilization.gpu,power.draw,temperature.gpu,clocks_throttle_reasons.active \
     --format=csv,noheader -lms 200 >"$OUT/clocks.csv" &
 smi=$!
 trap 'kill $smi' EXIT
-# Hosts start with the usual soft limit of 1024 open files; a shell raised past it
-# would hide a leak.
+# Hosts start with the usual soft limit of 1024 open files. A shell raised past it would hide a
+# leak.
 ulimit -Sn 1024
 PIKA_STATS=$OUT/gate.stats testusdview --renderer Pika --camera "$CAMERA" \
     --sessionLayer "$ROOT/hydra/scenes/alab_nofur.usda" --testScript "$ROOT/hydra/gate.py" \

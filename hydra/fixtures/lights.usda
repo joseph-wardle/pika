@@ -5,12 +5,10 @@
     upAxis = "Y"
 )
 
-# Distant, sphere, rect, disk and cylinder lights are stored with their
-# UsdLux inputs, UsdLux's fallbacks where none is authored (the panel's
-# shadows are off), and their world transforms. Frame 2 edits a distant light, turning its parent, removes the
-# other, edits the sphere's radius and the cylinder's length, and turns the
-# panel's shadows on: a light is
-# no material, so its edits compile nothing.
+# Lights are stored with their UsdLux inputs, its fallbacks where none is authored (the panel's
+# shadows are off), and world transforms. Frame 2 turns a distant light's parent, removes the
+# other, edits the sphere's radius and cylinder's length, and turns the panel's shadows on. A
+# light is no material, so its edits compile nothing.
 #
 # compiles: 1 then 0
 def Xform "world"

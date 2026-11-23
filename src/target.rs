@@ -1,11 +1,11 @@
-//! The images a frame renders into, its depth buffer and the buffers read back from them.
+//! The images a frame renders into, its depth buffer, and the buffers read back from them.
 
 use ash::vk;
 
 use crate::gpu::{self, Buffer, Memory};
 
-/// Pika's depth is reversed: 1 at the near plane, 0 at the far plane and
-/// beyond, so the depth buffer is cleared to 0.
+/// Pika's depth is reversed, 1 at the near plane and 0 at the far plane and beyond, so the
+/// depth buffer is cleared to 0.
 pub const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 struct Attachment {
@@ -14,13 +14,13 @@ struct Attachment {
     memory: vk::DeviceMemory,
     bytes: u64,
     view: vk::ImageView,
-    /// None for an attachment only the GPU reads.
+    /// `None` for an attachment only the GPU reads.
     readback: Option<Buffer>,
 }
 
 /// Every handle starts null, so a failed `new` can drop a partly built value.
 pub struct Target {
-    // A copy of the owner's device table; the owner outlives this (field order), as `drop` needs.
+    // A copy of the owner's device table. The owner outlives this, by field order.
     device: ash::Device,
     pub width: u32,
     pub height: u32,
@@ -29,13 +29,12 @@ pub struct Target {
     depth_memory: vk::DeviceMemory,
     depth_bytes: u64,
     depth_view: vk::ImageView,
-    /// Per pixel, the first color attachment's bytes.
     pub color_bytes: u64,
 }
 
 impl Target {
-    /// `formats` pairs each read-back color format with its bytes per pixel; the color
-    /// attachments `unread`, which only the GPU reads, follow them.
+    /// `formats` pairs each read-back colour format with its bytes per pixel. The `unread` colour
+    /// attachments, which only the GPU reads, come after them.
     pub fn new(
         device: &gpu::Device,
         formats: &[(vk::Format, usize)],
@@ -93,7 +92,7 @@ impl Target {
         same && (self.width, self.height) == (width, height)
     }
 
-    /// Tightly packed rows, safe to read only between the frame's wait and its next submit.
+    /// Tightly packed rows. Only safe to read between the frame's wait and its next submit.
     pub fn pixels(&mut self, index: usize) -> &mut [u8] {
         let readback = self.colors[index].readback.as_mut();
         readback.expect("only motion has no readback").bytes()
@@ -113,7 +112,7 @@ impl Target {
         memory
     }
 
-    /// Each color is cleared to its value in `clears`, motion to none, the depth to the far plane.
+    /// Clears each colour to its value in `clears`, motion to none, and depth to the far plane.
     pub fn begin_rendering(&self, cb: vk::CommandBuffer, clears: &[vk::ClearColorValue]) {
         let d = &self.device;
         let mut barriers: Vec<_> = (self.colors.iter())
@@ -168,8 +167,7 @@ impl Target {
             .layer_count(1)
             .color_attachments(&attachments)
             .depth_attachment(&depth);
-        // SAFETY: `cb` is recording outside rendering, every handle was
-        // created on `d`, and the info structs outlive the calls.
+        // SAFETY: recording outside a render pass, with handles from this device.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -179,8 +177,8 @@ impl Target {
         }
     }
 
-    /// Records after `end_rendering`: copies color attachment `index` row by row into `buffer`,
-    /// for compute passes to read and write before `resume_rendering` or `copy_in`.
+    /// Records after `end_rendering`. Copies colour attachment `index` row by row into `buffer`, for
+    /// compute passes to read and write before `resume_rendering` or `copy_in`.
     pub fn copy_out(&self, cb: vk::CommandBuffer, index: usize, buffer: vk::Buffer) {
         let attachment_image = self.colors[index].image;
         let barrier =
@@ -242,8 +240,8 @@ impl Target {
                 depth: 1,
             });
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, every handle was created on `d`, and
-        // `buffer` holds `width`×`height` of the attachment's pixels (the caller's).
+        // SAFETY: the command buffer is recording outside a render pass, every handle was created on
+        // this device, and the caller's `buffer` holds `width`×`height` of the attachment's pixels.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -265,8 +263,8 @@ impl Target {
         }
     }
 
-    /// Records after compute passes that wrote `buffer`, `copy_out`'s of attachment `index`:
-    /// copies it back into the attachment, as `readback` or `resume_rendering` then find it.
+    /// Records after the compute passes that wrote `buffer`, and copies it back into attachment
+    /// `index`.
     pub fn copy_in(&self, cb: vk::CommandBuffer, index: usize, buffer: vk::Buffer) {
         let written = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
@@ -307,8 +305,8 @@ impl Target {
                 depth: 1,
             });
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, every handle was created on `d`, and
-        // `buffer` holds `width`×`height` of the attachment's pixels (the caller's).
+        // SAFETY: the command buffer is recording outside a render pass, every handle was created on
+        // this device, and the caller's `buffer` holds `width`×`height` of the attachment's pixels.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -330,7 +328,7 @@ impl Target {
         }
     }
 
-    /// Renders on into what the last rendering stored, colors and depth alike.
+    /// Carries on rendering into what the last rendering stored, colours and depth alike.
     pub fn resume_rendering(&self, cb: vk::CommandBuffer) {
         let stages = vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
             | vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
@@ -366,8 +364,8 @@ impl Target {
             .color_attachments(&attachments)
             .depth_attachment(&depth);
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, after a rendering of these attachments
-        // that stored them; the info structs outlive the calls.
+        // SAFETY: the command buffer is recording outside a render pass, after a rendering of these
+        // attachments that stored them, and the info structs outlive the calls.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -378,11 +376,12 @@ impl Target {
     }
 
     pub fn end_rendering(&self, cb: vk::CommandBuffer) {
-        // SAFETY: `cb` is recording inside that rendering.
+        // SAFETY: the command buffer is recording inside that rendering.
         unsafe { self.device.cmd_end_rendering(cb) };
     }
 
-    /// Records after `end_rendering`; host-visible once the frame is waited for.
+    /// Records after `end_rendering`. The results are visible to the host once the frame has been
+    /// waited for.
     pub fn readback(&self, cb: vk::CommandBuffer, read: &[bool]) {
         let d = &self.device;
         let read: Vec<(&Attachment, &Buffer)> = (self.colors.iter().zip(read))
@@ -402,7 +401,7 @@ impl Target {
                     .subresource_range(COLOR)
             })
             .collect();
-        // Host-coherent memory still needs this for the copies to be visible to the host.
+        // Host-coherent memory still needs this barrier for the copies to be visible to the host.
         let to_host: Vec<_> = (read.iter())
             .map(|(_, buffer)| {
                 vk::BufferMemoryBarrier2::default()
@@ -427,8 +426,7 @@ impl Target {
                 height: self.height,
                 depth: 1,
             });
-        // SAFETY: `cb` is recording outside rendering, every handle was
-        // created on `d`, and the info structs outlive the calls.
+        // SAFETY: recording outside a render pass, with handles from this device.
         unsafe {
             d.cmd_pipeline_barrier2(
                 cb,
@@ -464,8 +462,8 @@ impl Target {
 impl Drop for Target {
     fn drop(&mut self) {
         let d = &self.device;
-        // SAFETY: every handle is `d`'s or null, which destroy calls accept, and after waiting for
-        // idle none is in use. The readback buffers drop with `colors`, after this.
+        // SAFETY: every handle came from this device or is null, which the destroy calls accept, and
+        // after waiting for idle none is in use. The readback buffers drop with `colors`, after this.
         unsafe {
             let _ = d.device_wait_idle();
             for a in &self.colors {
@@ -514,8 +512,9 @@ fn image(
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .usage(usage);
-    // SAFETY (this and every call below): `d` is live, each info outlives its call, and each
-    // handle was created on `d` above. On an error, the handles made so far are destroyed here.
+    // SAFETY (this and every call below): the device is alive, each info outlives its call, and
+    // each handle was created on this device above. On an error, the handles made so far are
+    // destroyed here.
     let image = unsafe { d.create_image(&info, None) }
         .map_err(|e| format!("vkCreateImage ({width}×{height} {format:?}) failed: {e}"))?;
     let needs = unsafe { d.get_image_memory_requirements(image) };

@@ -17,14 +17,14 @@ from PySide6.QtWidgets import QApplication
 from pxr import Gf, Usd, UsdGeom, UsdImagingGL, UsdShade
 
 SIZE = 64
-# How long a material's build may take before the check gives up.
+# Seconds a material's build may take before the check gives up.
 PATIENCE = 60
 # src/film.rs SAMPLES.
 SAMPLES = 64
 
 
 def gl_context():
-    """A current GL context with a bound framebuffer the engine's present task draws into"""
+    """With a bound framebuffer for the engine's present task."""
     application = QApplication(sys.argv)
     surface = QOffscreenSurface()
     surface.setFormat(QSurfaceFormat())
@@ -38,19 +38,18 @@ def gl_context():
 
 
 def stats_hold_a_frame(stats):
-    """Whether the dictionary says Pika drew a frame."""
     return (stats.get("frames", 0) >= 1 and "gpu_draw_ms" in stats
             and stats.get("gpuMemoryUsed", 0) > 0 and stats.get("drawn_triangles", 0) >= 1)
 
 
 def centre(fbo):
-    """The framebuffer's centre pixel as the 8-bit (r, g, b) it holds."""
+    """As 8-bit (r, g, b)."""
     pixel = fbo.toImage().pixelColor(SIZE // 2, SIZE // 2)
     return pixel.red(), pixel.green(), pixel.blue()
 
 
 def framing(stage):
-    """The frustum usdview frames a new stage with."""
+    """As usdview frames a new stage."""
     bounds = UsdGeom.BBoxCache(1, [UsdGeom.Tokens.default_]).ComputeWorldBound(stage.GetPseudoRoot())
     frustum = Gf.Camera().frustum
     frustum.FitToSphere(bounds.ComputeAlignedRange().GetMidpoint(),
@@ -59,7 +58,6 @@ def framing(stage):
 
 
 def scene(path):
-    """The engine rendering the scene with Pika, its stage and the params of its frame"""
     stage = Usd.Stage.Open(path)
     engine = UsdImagingGL.Engine()
     plugin = next(p for p in engine.GetRendererPlugins()
@@ -76,20 +74,18 @@ def scene(path):
 
 
 def frame(engine, stage, params, fbo):
-    """Renders once and gives the centre pixel."""
     engine.Render(stage.GetPseudoRoot(), params)
     return centre(fbo)
 
 
 def pixels(fbo):
-    """Every pixel of the framebuffer, as ARGB words."""
+    """As ARGB words."""
     image = fbo.toImage()
     return [image.pixel(x, y) for y in range(SIZE) for x in range(SIZE)]
 
 
 def capped(path, cap, fbo):
-    """The converged image of the scene at `path` in a session of its own under the texture cap
-    `cap`, 0 for none, as the host's setting."""
+    """In a session of its own under the texture cap `cap`, 0 for none."""
     engine, stage, params = scene(path)
     engine.SetRendererSetting("pika:textureCap", cap)
     converge(engine, stage, params, fbo)
@@ -97,8 +93,7 @@ def capped(path, cap, fbo):
 
 
 def recap(engine, stage, params, fbo, cap):
-    """Sets the texture cap to `cap` in the engine's session and renders until converged, failing
-    on any frame that builds a material."""
+    """Fails on any frame that builds a material."""
     engine.SetRendererSetting("pika:textureCap", cap)
     deadline = time.monotonic() + PATIENCE
     frames = 0
@@ -116,7 +111,6 @@ def recap(engine, stage, params, fbo, cap):
 
 
 def converge(engine, stage, params, fbo):
-    """Renders until converged and gives each frame's centre pixel."""
     pixels = []
     deadline = time.monotonic() + PATIENCE
     while True:
@@ -128,8 +122,7 @@ def converge(engine, stage, params, fbo):
 
 
 def accumulate(engine, stage, params, fbo):
-    """Renders until converged and gives each frame's image and sample index, from the first drawn
-    with nothing changed."""
+    """Each frame's image and sample index, from the first drawn with nothing changed."""
     frames = []
     deadline = time.monotonic() + PATIENCE
     while True:
@@ -142,13 +135,12 @@ def accumulate(engine, stage, params, fbo):
 
 
 def distance(a, b):
-    """The summed 8-bit channel differences between two images."""
     return sum(abs((p >> s & 255) - (q >> s & 255)) for p, q in zip(a, b) for s in (0, 8, 16))
 
 
 def accumulates(path, fbo):
-    """Checks that the scene's soft shadow accumulates while nothing changes, stays once converged
-    and starts again when its caster moves."""
+    """A soft shadow accumulates while nothing changes, stays once converged and restarts when its
+    caster moves."""
     engine, stage, params = scene(path)
     frames = accumulate(engine, stage, params, fbo)
     samples = [s for _, s in frames]

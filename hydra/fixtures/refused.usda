@@ -5,8 +5,8 @@
     upAxis = "Y"
 )
 
-# OpenSubdiv refuses a Loop mesh with a quad, so its cage is drawn: there is
-# no refined surface, and the delegate warns instead of failing.
+# OpenSubdiv refuses a Loop mesh with a quad, so its cage is drawn and the delegate warns instead
+# of failing.
 def Xform "world"
 {
     def Camera "camera" {}

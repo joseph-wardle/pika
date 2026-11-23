@@ -1,10 +1,8 @@
 // Modified from MaterialX 1.39.5's libraries/pbrlib/genglsl/lib/mx_environment_none.glsl
 // (Academy Software Foundation, Apache License 2.0: bake/libraries/NOTICE).
 //
-// mx_environment_irradiance is shaders/frame.slang's, which reads the view's dome light, and
-// mx_environment_radiance is mx_environment_prefilter.glsl's with that file's dome_radiance
-// for its latlong lookup. The include is named from the search path, as its neighbours are
-// not beside this file.
+// mx_environment_irradiance is frame.slang's, and mx_environment_radiance reads its dome_radiance.
+// The include is named from the search path, as its neighbours aren't beside this file.
 #include "libraries/pbrlib/genglsl/lib/mx_microfacet_specular.glsl"
 
 vec3 mx_environment_radiance(vec3 N, vec3 V, vec3 X, vec2 alpha, int distribution, FresnelData fd)

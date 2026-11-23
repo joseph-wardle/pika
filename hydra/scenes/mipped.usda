@@ -5,10 +5,8 @@
     upAxis = "Y"
 )
 
-# A quad emitting the vector3 sample of bake/fixtures/mips.exr, magnified,
-# for hydra/engine.py: with no texture cap it draws the file's 8×8 swatch,
-# under a cap of 4 its 4×4 level, a flat grey of 128 of 255, and under 2
-# its 2×2, a grey of 64, so each cap draws an image of its own.
+# The vector3 sample of bake/fixtures/mips.exr, magnified, for hydra/engine.py. Uncapped it draws
+# the 8×8 swatch, under a cap of 4 a flat grey of 128 of 255, and under 2 a grey of 64.
 def Xform "world"
 {
     def Mesh "quad" (prepend apiSchemas = ["MaterialBindingAPI"])

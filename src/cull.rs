@@ -1,4 +1,4 @@
-//! The cull pass: keeps each mesh instance whose box may meet a view's frustum.
+//! The cull pass. It keeps each mesh instance whose box may touch a view's frustum.
 
 use ash::vk;
 
@@ -7,7 +7,7 @@ use crate::gpu;
 use crate::view::View;
 
 pub struct Cull {
-    // The owner's device table, which outlives this (field order).
+    // The owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     compute: gpu::Compute,
 }
@@ -31,7 +31,7 @@ impl Cull {
         })
     }
 
-    /// Call after `view` began its frame.
+    /// Call after `view` has begun its frame.
     pub fn record(&self, cb: vk::CommandBuffer, geometry: &Addresses, view: &View) {
         if geometry.count == 0 {
             return;
@@ -57,7 +57,7 @@ impl Cull {
                     | vk::AccessFlags2::SHADER_STORAGE_READ
                     | vk::AccessFlags2::HOST_READ,
             );
-        // SAFETY: `cb` is recording outside rendering.
+        // SAFETY: the command buffer is recording outside a render pass.
         unsafe {
             self.device.cmd_pipeline_barrier2(
                 cb,

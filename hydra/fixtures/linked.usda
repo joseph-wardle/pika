@@ -5,18 +5,13 @@
     upAxis = "Y"
 )
 
-# A light's lightLink collection reaches the store as one token per
-# distinct collection, empty for a light that lights everything, and each
-# mesh as the tokens of the collections it is in, its categories: the key
-# links the left triangle, the rim the right one, the fill everything. Its
-# shadowLink collection gets tokens of its own: the fill's shadows come only
-# from the left triangle, and the others' unauthored ones are everything.
-# Collections of the same prims share a token whatever their kind, so the
-# fill's shadowLink is the key's lightLink token.
-# The spot links one of two native instances: the instancer holds a
-# category set per instance, the prototype's mesh none. Frame 2 links the
-# key to both triangles, the rim to everything, and the fill's shadows to
-# the right triangle.
+# A lightLink collection reaches the store as a token per distinct collection, empty for one that
+# lights everything, and each mesh as its collections' tokens, its categories. The key links the
+# left triangle, the rim the right, the fill everything. shadowLink gets tokens too, and the
+# fill's shadows come only from the left triangle. Collections of the same prims share a token,
+# so the fill's shadowLink is the key's lightLink token. The spot links one of two native
+# instances, the instancer holding a category set per instance. Frame 2 links the key to both
+# triangles, the rim to everything, and the fill's shadows to the right triangle.
 def Xform "world"
 {
     def Camera "camera" {}

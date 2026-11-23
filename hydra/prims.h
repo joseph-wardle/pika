@@ -1,5 +1,4 @@
-// The rprims Pika supports. Each copies its dirty fields into the store and
-// keeps nothing but its store id.
+// Each prim copies its dirty fields into the store and keeps only its store id.
 #pragma once
 
 #include "report.h"
@@ -17,7 +16,6 @@ PXR_NAMESPACE_OPEN_SCOPE
 
 class PikaMesh final : public HdMesh {
 public:
-    // Without a renderer (report.h), the mesh is accepted and never synced.
     PikaMesh(SdfPath const &id, Pika &pika);
     ~PikaMesh() override;
 
@@ -25,8 +23,6 @@ public:
     void Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *dirtyBits,
               TfToken const &) override;
     void UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) override;
-    // Hands over the float2 primvar the mesh's materials read when it is not the one handed over
-    // last. A material's Sync calls it too, when its network reads another primvar.
     void SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer);
     bool Binds(SdfPath const &material) const;
 
@@ -46,8 +42,6 @@ private:
 
     Pika &_pika;
     std::vector<SdfPath> _subset_materials;
-    // The texcoord handed over last (an empty name: none), so an animated primvar no material
-    // reads is neither refined again nor handed over. Reset with the topology.
     struct Texcoord {
         std::string name;
         HdInterpolation interpolation = HdInterpolationConstant;
@@ -73,12 +67,9 @@ private:
     uint64_t _id = 0;
 };
 
-// A material copies its whole network into the store whenever Hydra marks
-// it dirty; Pika finds what changed.
+// Copies its whole network whenever Hydra marks it dirty. Pika finds what changed.
 class PikaMaterial final : public HdMaterial {
 public:
-    // Hydra's fallback material has no path and stands for nothing in the
-    // scene: it is accepted and never synced.
     PikaMaterial(SdfPath const &id, Pika &pika);
     ~PikaMaterial() override;
 
@@ -92,8 +83,6 @@ private:
 
 class PikaLight final : public HdLight {
 public:
-    // Hydra's fallback light has no path and stands for nothing in the
-    // scene: it is accepted and never synced.
     PikaLight(TfToken const &type, SdfPath const &id, Pika &pika);
     ~PikaLight() override;
 
@@ -108,7 +97,6 @@ private:
     uint64_t _id = 0;
 };
 
-// Basis curves are fetched and measured, then dropped.
 class PikaCurves final : public HdBasisCurves {
 public:
     PikaCurves(SdfPath const &id, Pika &pika);
@@ -142,7 +130,6 @@ private:
     SdfPath _path;
 };
 
-// An rprim of a type Pika only counts. It asks Hydra for nothing.
 class PikaCountedRprim final : public HdRprim {
 public:
     PikaCountedRprim(TfToken const &type, SdfPath const &id, Pika &pika)

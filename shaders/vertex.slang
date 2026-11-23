@@ -1,4 +1,3 @@
-// Vertex pulling for every pass that draws mesh instances.
 
 #pragma once
 
@@ -11,15 +10,12 @@ struct Vertex
 {
     float4 position;
     float3 world;
-    // World space, not normalized; zero for a degenerate normal.
+    // World space, not normalized. Zero for a degenerate normal.
     float3 normal;
-    // Zero where the mesh has none.
     float2 texcoord;
-    // World space, not normalized.
     float3 tangent;
     float3 bitangent;
     uint flip;
-    // One bit per light-link collection the mesh is in.
     uint link;
 };
 
@@ -28,8 +24,7 @@ float3 load3(float *values, uint i)
     return float3(values[3 * i], values[3 * i + 1], values[3 * i + 2]);
 }
 
-// The Vulkan IDs include the draw's vertex offset and first instance. `slot` is the instance's
-// place among the view's visible ones, which the cull pass filled (cull.slang).
+// The Vulkan IDs include the draw's vertex offset and first instance.
 Vertex pull(uint vertex, uint slot)
 {
     uint2 v = view->vertices[vertex];

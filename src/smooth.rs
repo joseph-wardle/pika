@@ -1,4 +1,4 @@
-//! The smooth normal pass, for meshes whose normals are not authored.
+//! The smooth normal pass, for meshes whose normals aren't authored.
 
 use std::ops::Range;
 

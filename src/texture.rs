@@ -1,12 +1,8 @@
-//! Baked texture files and the GPU images holding each one's levels within the
-//! cap, lowered to fit the device's memory budget.
+//! Baked texture files, and the GPU images that hold their mip levels.
 //!
-//! A level is an index into a texture's mips, 0 the finest, so a greater level is coarser and
-//! lowering a texture raises its first level. Each frame, in `shade`'s order: `begin` drops
-//! what the frame before retired; `need` and `weigh` note the finest level each drawn texture
-//! needs; `refit` sets every texture's target level so that all fit; `swap` moves images toward
-//! their targets, a raise's bytes arriving from the reader threads over several frames while
-//! its old image is still drawn; the materials of the keys swapped are then rebound.
+//! When the textures don't all fit in GPU memory, the ones the camera needs least are lowered.
+//! A raise is read on worker threads and copied in over several frames, and the old image is
+//! drawn until it is done. Each frame, `shade` calls `begin`, `need`, `weigh`, `refit` and `swap`.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
@@ -28,23 +24,22 @@ pub struct Texture {
     pub height: u32,
     pub layers: u32,
     pub format: vk::Format,
-    /// u then v: 0 black, 1 clamp, 2 periodic, 3 mirror; black when unstated.
+    /// Wrap modes for u and v: 0 black (the default), 1 clamp, 2 periodic, 3 mirror.
     pub wrap: [u32; 2],
     pub tiles: Vec<u32>,
-    /// File byte ranges, all layers, finest first.
     pub levels: Vec<Range<usize>>,
     pub contents: Contents,
 }
 
 pub enum Contents {
-    /// Opened for each read, so a build holds no level bytes in memory. Not kept open:
-    /// a scene holds thousands of textures, past hosts' usual limit of 1024 open files.
+    /// Reopened for every read, because a scene can have thousands of textures and most systems
+    /// limit a process to 1024 open files.
     File(PathBuf),
     Memory(Vec<u8>),
 }
 
 impl Texture {
-    /// The first level within `cap` texels a side (0 is no cap); the last always is.
+    /// The finest level within `cap` texels a side (0 for no cap), or else the last level.
     pub fn first(&self, cap: u32) -> usize {
         let over = |&level: &usize| {
             let (w, h) = self.extent(level);
@@ -87,13 +82,10 @@ const HOST: vk::MemoryPropertyFlags = vk::MemoryPropertyFlags::from_raw(
 const TILES: vk::BufferUsageFlags = vk::BufferUsageFlags::STORAGE_BUFFER;
 const STAGING: vk::BufferUsageFlags = vk::BufferUsageFlags::TRANSFER_SRC;
 
-/// The longest header: the fixed words and a set's tile table.
 const HEADER: usize = FIXED + 4 * 100;
-/// "pika" and eight words before the tile table.
 const FIXED: usize = 36;
 
-/// Drawn for a missing file; periodic, so a node reading the file's wrap modes
-/// samples the texel everywhere.
+/// Stands in for a missing file. It repeats, so every wrap mode reads the same colour.
 pub fn solid(texel: [f32; 4]) -> Texture {
     Texture {
         width: 1,
@@ -190,7 +182,6 @@ fn header(head: &[u8], len: usize, contents: Contents) -> Result<Texture, String
     })
 }
 
-/// One layer's bytes; block formats pad the edges to whole 4×4 blocks.
 pub fn level_size(format: vk::Format, width: u32, height: u32) -> Option<usize> {
     let texels = width as usize * height as usize;
     let blocks = width.div_ceil(4) as usize * height.div_ceil(4) as usize;
@@ -211,8 +202,8 @@ fn block_rows(format: vk::Format) -> u32 {
     }
 }
 
-/// Copies of whole block rows of one layer, `budget` bytes of the levels from
-/// `first` on starting at byte `done`; buffer offsets count from `done`.
+/// The copies that upload `budget` bytes of whole block rows, starting `done` bytes into the
+/// levels from `first` on. Buffer offsets count from `done`.
 fn copies(
     texture: &Texture,
     first: usize,
@@ -261,36 +252,31 @@ fn copies(
     (copies, at)
 }
 
-/// Level bytes a frame uploads: reading and copying costs the render thread about
-/// 0.8 ms a MiB (RTX 4070 Ti SUPER). Larger raises span frames.
+/// Level bytes uploaded per frame. Larger raises are spread over several frames.
 pub const UPLOAD: u64 = 32 << 20;
 
-/// Bytes a swap's read asks for, so a frame's `UPLOAD` takes several, read from
-/// different files at once.
+/// Each frame's `UPLOAD` is split into reads this size, so different files are read at once.
 const CHUNK: u64 = 8 << 20;
 
-/// Bytes asked of the readers and not yet uploaded: the most their reads hold in
-/// host memory.
+/// The most bytes the readers may hold in memory before the render thread takes them.
 const AHEAD: u64 = 2 * UPLOAD;
 
-/// The file server answers parallel reads faster than one (hypothesis: four are
-/// enough on NFS).
+/// A file server answers several reads at once faster than one at a time.
 const READERS: usize = 4;
 
-/// Longest side of the coarsest level kept: one 4×4 block, since each coarser
-/// level takes a block too.
+/// The coarsest level kept is one 4×4 block, since every coarser level takes a block too.
 pub const TAIL: u32 = 4;
 
-/// Budget fitting leaves free, for a raise's old image beside its new one and for
-/// the budget to drift without moving targets. Hypothesis: enough on ALab.
+/// Memory left free when fitting, so a raise's new image fits beside its old one and small
+/// changes in the budget move nothing.
 pub const MARGIN: u64 = 256 << 20;
 
-/// Budget a swap leaves free: the driver can refuse an allocation the budget
-/// allows (RTX 4070 Ti SUPER, with 1 MB left). Hypothesis: enough elsewhere.
+/// Memory left free when swapping, because the driver can refuse an allocation even when the
+/// budget says it fits.
 pub const RESERVE: u64 = 64 << 20;
 
 struct Image {
-    // The owner's device outlives this (field order).
+    // The owner drops this before its device, by field order.
     device: ash::Device,
     image: vk::Image,
     memory: vk::DeviceMemory,
@@ -304,21 +290,17 @@ struct Loaded {
     texture: Texture,
     tiles: Buffer,
     image: Image,
-    /// Replaces `image` once whole.
     incoming: Option<Incoming>,
     chain: Chain,
-    /// The first level `fit` gives its image.
     target: usize,
-    /// Per level, the last frame it was the finest a drawn reader needed; 0 never.
+    /// For each level, the last frame it was the finest any drawn reader needed, or 0 if never.
     seen: Vec<u64>,
-    /// The last frame a reader with no estimated need was drawn; 0 never.
     unestimated: u64,
-    /// A lower failed: retried each frame, warned of once.
+    /// A lower failed. It is retried every frame, with a single warning.
     failing: bool,
 }
 
 impl Loaded {
-    /// Whether its image is coarser than the finest level a view needed, within `cap`.
     fn blurred(&self, cap: u32) -> bool {
         let need = self
             .chain
@@ -328,13 +310,11 @@ impl Loaded {
     }
 }
 
-/// Level bytes before `done` are copied.
 struct Incoming {
     image: Image,
     done: u64,
 }
 
-/// Counts of loaded textures, within `need::WINDOW`.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Needs {
     pub unseen: usize,
@@ -346,17 +326,15 @@ pub struct Needs {
 struct Chain {
     heap: usize,
     side: u32,
-    /// Image bytes from each first level, as the driver sizes them.
     sizes: Vec<u64>,
-    /// The finest level allowed: the cap's, or the image's own while a failed
-    /// raise is held.
+    /// The finest level allowed: the cap's, or the current one while a failed raise is held.
     ceiling: usize,
-    /// The coarsest: the first within `TAIL`, or the cap's past it.
+    /// The coarsest level allowed: the first within `TAIL`, or the cap's if that is coarser.
     floor: usize,
-    /// Within `need::WINDOW`; 0 when a reader's need was not estimated, `None`
-    /// when no view drew it.
+    /// The finest level a view needed over the last `need::WINDOW` frames. It is 0 when a reader's
+    /// need couldn't be estimated, and `None` when no view drew it.
     need: Option<usize>,
-    /// The heap's room when a raise failed; holds it until `released`.
+    /// The heap's room when a raise failed. The raise is held until `released`.
     held: Option<u64>,
 }
 
@@ -375,8 +353,7 @@ impl Chain {
             let info = image_info(texture, first);
             let ask = vk::DeviceImageMemoryRequirements::default().create_info(&info);
             let mut requirements = vk::MemoryRequirements2::default();
-            // SAFETY: `device.raw` is a live Vulkan 1.3 device, and `info`
-            // outlives the call.
+            // SAFETY: the device is alive and supports Vulkan 1.3, and `info` outlives the call.
             unsafe {
                 device
                     .raw
@@ -397,8 +374,8 @@ impl Chain {
         self.held = None;
     }
 
-    /// A failed lower keeps its target, as other lowers free memory; a failed
-    /// raise is held at `first`, else it would fail every frame.
+    /// A failed lower keeps its target, since other lowers will free memory. A failed raise is held
+    /// at `first`, or it would fail again every frame.
     fn fail(&mut self, first: usize, target: usize, room: u64) -> usize {
         if target > first {
             return target;
@@ -407,8 +384,8 @@ impl Chain {
         first
     }
 
-    /// Only room grown past `held` by more than `MARGIN` releases it, so budget
-    /// drift retries nothing.
+    /// Only room that grew more than `MARGIN` past `held` releases the hold, so small changes in
+    /// the budget retry nothing.
     fn released(&self, room: &[u64], changed: bool) -> bool {
         (self.held).is_some_and(|held| changed || room[self.heap] > held.saturating_add(MARGIN))
     }
@@ -418,9 +395,9 @@ impl Chain {
     }
 }
 
-/// Lowering priority, greatest first: undrawn chains, then levels finer than the
-/// need, then the chain least far below its need (so blur spreads evenly), then
-/// the farthest; ties go to the longest side, then the most bytes.
+/// The order chains are lowered in: unseen chains, then levels finer than the need, then the
+/// chain closest to its need, so blur spreads evenly. Ties go to the coarsest need, the longest
+/// side, then the most bytes.
 fn order(chain: &Chain, level: usize) -> impl Ord {
     let (seen, below, need) = match chain.need {
         None => (0, 0, 0),
@@ -431,8 +408,8 @@ fn order(chain: &Chain, level: usize) -> impl Ord {
     (tier, chain.extent(level), chain.sizes[level])
 }
 
-/// A chain's place in `order` hangs on its own level alone, so more capacity
-/// stops earlier in the same sequence and never lowers a chain.
+/// A chain's place in `order` depends only on its own level, so more capacity just stops
+/// earlier in the same sequence and never lowers a chain.
 fn fit(chains: &[&Chain], capacity: &[u64]) -> Vec<usize> {
     let mut targets: Vec<usize> = chains.iter().map(|c| c.ceiling).collect();
     let mut totals = totals(chains, &targets, capacity.len());
@@ -456,8 +433,8 @@ fn fit(chains: &[&Chain], capacity: &[u64]) -> Vec<usize> {
     targets
 }
 
-/// Refits under `room` less `MARGIN` when `afresh` or when raising `current` would
-/// not fit; else only raises, so room wobbling under the margin lowers nothing.
+/// Refits under `room` minus `MARGIN` when `afresh` is set or when raising `current` would not
+/// fit. Otherwise it only raises, so room that wobbles within the margin lowers nothing.
 fn settle(chains: &[&Chain], current: &[usize], room: &[u64], afresh: bool) -> (Vec<usize>, bool) {
     let capacity: Vec<u64> = room.iter().map(|r| r.saturating_sub(MARGIN)).collect();
     let fitted = fit(chains, &capacity);
@@ -473,8 +450,8 @@ fn settle(chains: &[&Chain], current: &[usize], room: &[u64], afresh: bool) -> (
     (kept, false)
 }
 
-/// Lowers first, as they free memory; then begun raises, so they finish before
-/// others take memory; then the chain `fit` would lower last.
+/// The swap order. Lowers go first, since they free memory. Raises already begun go next, so
+/// they finish before others take the memory. Then comes the chain `fit` would lower last.
 fn queue(chains: &[&Chain], firsts: &[usize], targets: &[usize], begun: &[bool]) -> Vec<usize> {
     let mut queue: Vec<usize> = (0..chains.len())
         .filter(|&i| begun[i] || targets[i] != firsts[i])
@@ -498,8 +475,8 @@ fn totals(chains: &[&Chain], targets: &[usize], heaps: usize) -> Vec<u64> {
     totals
 }
 
-/// `tiles`' range is the table's own length, by which the shader tells a plain
-/// image from a set (a buffer is at least 16 bytes).
+/// `tiles` covers only the tile table, not its whole buffer, which is at least 16 bytes. The
+/// shader reads that length to tell a plain image from a UDIM set.
 #[derive(Clone, Copy)]
 pub struct Binding {
     pub view: vk::ImageView,
@@ -540,8 +517,8 @@ impl Image {
             heap: 0,
             first,
         };
-        // SAFETY (all calls below): `d` is live, infos outlive their calls, handles
-        // come from `d`; `drop` destroys what was made before an error.
+        // SAFETY (all calls below): the device is alive, each info outlives its call, and every handle
+        // comes from this device. `drop` destroys whatever was made before an error.
         i.image = unsafe { d.create_image(&info, None) }.map_err(|e| {
             let (width, height) = texture.extent(first);
             format!(
@@ -599,16 +576,15 @@ impl Image {
     fn barrier(&self, cb: vk::CommandBuffer, barrier: vk::ImageMemoryBarrier2) {
         let barriers = [barrier];
         let info = vk::DependencyInfo::default().image_memory_barriers(&barriers);
-        // SAFETY: `cb` is recording outside rendering on `device`, and the
-        // barrier names this image's own levels.
+        // SAFETY: recording outside a render pass, and the barrier names only this image's levels.
         unsafe { self.device.cmd_pipeline_barrier2(cb, &info) };
     }
 
-    /// `staging` must live until the GPU has run `cb`.
+    /// `staging` must stay alive until the GPU has run `cb`.
     fn copy(&self, cb: vk::CommandBuffer, staging: &Buffer, copies: &[vk::BufferImageCopy]) {
         let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-        // SAFETY: `cb` records outside rendering, the image has TRANSFER_DST usage,
-        // and `staging` holds the levels at the offsets copied from.
+        // SAFETY: the command buffer is recording outside a render pass, the image allows transfers
+        // into it, and `staging` holds the levels at the offsets copied from.
         unsafe {
             (self.device).cmd_copy_buffer_to_image(cb, staging.raw, self.image, layout, copies)
         };
@@ -649,8 +625,8 @@ impl Image {
         old.barrier(cb, out);
         self.to_copy(cb, texture);
         let layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-        // SAFETY: `cb` records outside rendering, both images have the transfer
-        // usages, each region exists in both, and the barriers set the layouts.
+        // SAFETY: the command buffer is recording outside a render pass, both images allow transfers,
+        // each region exists in both, and the barriers set the layouts.
         unsafe {
             (self.device).cmd_copy_image(cb, old.image, source, self.image, layout, &regions)
         };
@@ -679,8 +655,8 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        // SAFETY: every handle was created on `device` or is null, and the
-        // owner waited for idle before this drops.
+        // SAFETY: every handle was created on this device or is null, and the owner waited for the
+        // device to go idle first.
         unsafe {
             self.device.destroy_image_view(self.view, None);
             self.device.destroy_image(self.image, None);
@@ -689,8 +665,8 @@ impl Drop for Image {
     }
 }
 
-/// One `UPLOAD`-byte buffer kept across frames, since a buffer per texture cost
-/// several times its read to create; a load past it gets its own.
+/// One `UPLOAD`-sized buffer kept from frame to frame, because creating a buffer per texture
+/// cost several times the read itself. A load that doesn't fit gets its own.
 struct Staging {
     buffer: Buffer,
     used: u64,
@@ -711,7 +687,7 @@ impl Staging {
     }
 
     fn reserve(&mut self, device: &gpu::Device, size: u64) -> Result<(&mut Buffer, u64), String> {
-        // A copy's buffer offset is a multiple of the block size, at most 16 bytes.
+        // A copy's buffer offset must be a multiple of the block size, which is at most 16 bytes.
         let at = self.used.next_multiple_of(16);
         if at + size <= self.buffer.size {
             self.used = at + size;
@@ -722,7 +698,6 @@ impl Staging {
     }
 }
 
-/// Stages the level bytes `part`, as `copies` cuts them, from `fill`; the time it took.
 fn upload(
     device: &gpu::Device,
     cb: vk::CommandBuffer,
@@ -734,7 +709,7 @@ fn upload(
     let size = part.end - part.start;
     let (mut copies, end) = copies(texture, image.first, part.start, size);
     debug_assert_eq!(end, part.end, "a part not cut by `copies`");
-    // Stage the levels alone: the header would misalign the block-size offsets.
+    // Stage only the levels. Including the header would misalign the block offsets.
     let (buffer, at) = staging.reserve(device, size)?;
     let start = Instant::now();
     fill(&mut buffer.bytes()[at as usize..(at + size) as usize])?;
@@ -752,7 +727,6 @@ fn upload(
     Ok(fill)
 }
 
-/// A part of a swap's levels, `part` of them from file offset `from`.
 struct Read {
     key: String,
     first: usize,
@@ -768,19 +742,16 @@ impl Read {
 
 type Arrived = (Read, Result<Vec<u8>, String>);
 
-/// A part by texture, first level and start.
 type Part = (String, usize, u64);
 
-/// Reads swaps' levels on worker threads, so a frame never waits on a file;
-/// the render thread copies what arrived into staging.
+/// Reads levels for swaps on worker threads, so a frame never waits on a file. The render
+/// thread copies what has arrived into staging.
 struct Reads {
     jobs: Sender<(Read, PathBuf)>,
     done: Receiver<Arrived>,
-    /// The parts asked for and not yet taken or dropped.
     asked: BTreeSet<Part>,
-    /// A stale read must not take a current one's place.
+    /// Reads that have arrived, by part, so a stale read can't take a current one's place.
     arrived: BTreeMap<Part, Arrived>,
-    /// Bytes asked for and not yet taken or dropped.
     ahead: u64,
 }
 
@@ -791,7 +762,6 @@ impl Reads {
         let (finished, done) = mpsc::channel();
         for _ in 0..READERS {
             let (queue, finished) = (queue.clone(), finished.clone());
-            // Exits once `jobs` drops with its owner.
             std::thread::spawn(move || {
                 loop {
                     let job = queue.lock().unwrap_or_else(PoisonError::into_inner).recv();
@@ -817,8 +787,8 @@ impl Reads {
         }
     }
 
-    /// Asks for the part of the levels from `first` that starts at byte `done`, unless
-    /// it was asked for or `AHEAD` bytes are out; whether it is asked for now.
+    /// Asks for the part of the levels from `first` that starts at byte `done`, unless it was
+    /// already asked for or `AHEAD` bytes are outstanding. Returns whether it asked.
     fn ask(&mut self, key: &str, texture: &Texture, (first, done): (usize, u64)) -> bool {
         let part = (key.to_owned(), first, done);
         if self.asked.contains(&part) {
@@ -860,7 +830,6 @@ impl Reads {
         }
     }
 
-    /// Lands the finished reads and drops those no swap waits for.
     fn gather(&mut self, wanted: impl Fn(&Read) -> bool) {
         while let Ok((read, bytes)) = self.done.try_recv() {
             self.land(read, bytes);
@@ -877,8 +846,6 @@ impl Reads {
         self.ahead -= dropped;
     }
 
-    /// The part asked for at `(first, done)`, once it arrived, if it holds at most `room`
-    /// bytes.
     fn take(&mut self, key: &str, (first, done): (usize, u64), room: u64) -> Option<Arrived> {
         let part = (key.to_owned(), first, done);
         if self.arrived.get(&part)?.0.size() > room {
@@ -906,32 +873,27 @@ fn fail(key: &str, loaded: &mut Loaded, room: u64, e: &str) {
     loaded.failing = loaded.target != first;
 }
 
-/// What a frame's swaps did.
 #[derive(Default)]
 pub struct Swapped {
-    /// The textures drawn from a new image, to rebind.
+    /// Textures now drawn from a new image, which must be rebound.
     pub keys: BTreeSet<String>,
-    /// Bytes copied into raises.
     pub bytes: u64,
-    /// The render thread's time copying them into staging.
     pub read: Duration,
 }
 
-/// What a swap not yet begun does this frame.
 #[derive(PartialEq, Debug)]
 enum Start {
     Make,
-    /// Until the images this frame retired are freed.
     Wait,
-    /// Until a refit leaves `MARGIN`.
+    /// Wait until a refit leaves `MARGIN` free.
     Crowded,
     Refuse,
 }
 
-/// A swap whose new image `fits` beside the old is made. A lower frees memory once its old
-/// image goes, so it is made anyway unless the frame already `retired` an image, whose memory
-/// it then waits for. A raise waits for that too, then for a `fresh` fit; after one, no more
-/// room can be made.
+/// Decides how a swap begins. If the new image fits beside the old one, it is made. A lower
+/// frees memory once its old image goes, so it is made anyway, unless the frame already
+/// `retired` an image and must wait for that memory. A raise waits for that too, and then for a
+/// `fresh` fit. After a fresh fit no more room can be made, so the raise is refused.
 fn start(fits: bool, lowers: bool, retired: bool, fresh: bool) -> Start {
     if fits || (lowers && !retired) {
         Start::Make
@@ -944,9 +906,8 @@ fn start(fits: bool, lowers: bool, retired: bool, fresh: bool) -> Start {
     }
 }
 
-/// Copies into a raise's incoming image the next part the readers have read, and asks them
-/// for the part after. Gives the bytes copied and the time filling staging; `None` when the
-/// part has not arrived or staging has no room for it this frame.
+/// Copies the next finished part into a raise's new image and asks for the one after. `None`
+/// when the part hasn't arrived or staging is full this frame.
 fn advance(
     device: &gpu::Device,
     cb: vk::CommandBuffer,
@@ -976,34 +937,29 @@ fn advance(
     Ok(Some((asked.size(), time)))
 }
 
-/// Staging is kept until the next frame begins, when the GPU has read it.
+/// Staging is kept until the next frame begins, by which time the GPU has read it.
 pub struct Textures {
     device: ash::Device,
     loaded: BTreeMap<String, Loaded>,
     samplers: BTreeMap<[u32; 2], vk::Sampler>,
     staging: Staging,
     reads: Reads,
-    /// Kept until the next frame begins, when every material binding them is rebound.
+    /// Kept until the next frame begins, when every material using them has been rebound.
     retired: Vec<Image>,
-    /// Texels a side; 0 is no cap.
+    /// Texels a side, where 0 means no cap.
     cap: u32,
     heaps: Vec<gpu::Heap>,
-    /// Each heap's room for textures when the targets were last set.
     room: Vec<u64>,
-    // Four flags carry the fit from frame to frame. `refit` runs only when `dirty`, `crowded`
-    // or `moved` is set or the heaps changed, and clears the three; `fresh` says whether it
-    // then fitted afresh, and `begin` clears it. In `swap`, a raise that does not fit sets
-    // `crowded` for the next frame's refit, unless this frame's was `fresh`: then no more
-    // room can be made, and the raise fails.
-    /// The textures or limits changed: fit afresh and release held raises.
+    // `refit` runs when `dirty`, `crowded` or `moved` is set or the heaps changed, and clears those
+    // three. A raise that doesn't fit sets `crowded`, and fails if the refit was already `fresh`.
+    /// The textures or limits changed. Fit from scratch and release held raises.
     dirty: bool,
-    /// A raise did not fit beside its old image: fit afresh, leaving `MARGIN`.
+    /// A raise didn't fit beside its old image. Fit from scratch, leaving `MARGIN` free.
     crowded: bool,
-    /// This frame's targets were fitted afresh, leaving `MARGIN` for its raises.
+    /// This frame's targets were fitted from scratch, leaving `MARGIN` free for its raises.
     fresh: bool,
     short: u64,
     frame: u64,
-    /// A need changed since the targets were last set.
     moved: bool,
 }
 
@@ -1048,7 +1004,6 @@ impl Textures {
         true
     }
 
-    /// Loads at its floor unless loaded; the bytes uploaded and the read time.
     pub fn load(
         &mut self,
         device: &gpu::Device,
@@ -1066,7 +1021,7 @@ impl Textures {
         let chain = Chain::new(device, &texture, self.cap).map_err(|e| format!("{key}: {e}"))?;
         let first = chain.floor;
         let image = Image::new(device, &texture, first).map_err(|e| format!("{key}: {e}"))?;
-        // A load is a few blocks, read here: its image is drawn this frame.
+        // A load is only a few blocks, so it is read right here. Its image is drawn this frame.
         let (size, from) = (texture.bytes(first), texture.levels[first].start);
         let read = |into: &mut [u8]| texture.read_at(from, into).map_err(unread);
         let both = (&texture, &image);
@@ -1128,10 +1083,8 @@ impl Textures {
         (self.dirty, self.crowded) = (false, false);
     }
 
-    /// Moves each image toward its target: begins the swaps that fit, and copies in the parts
-    /// of the raises begun that the readers have read. The old image is drawn until the new one
-    /// is whole, so a failed swap keeps it. The keys swapped must be rebound before the next
-    /// frame begins.
+    /// Begins the swaps that fit and copies in finished parts of begun raises. The old image is
+    /// drawn until the new one is done. Rebind the swapped keys before the next frame.
     pub fn swap(
         &mut self,
         device: &gpu::Device,
@@ -1139,7 +1092,6 @@ impl Textures {
         heaps: &[gpu::Heap],
     ) -> Swapped {
         let mut swapped = Swapped::default();
-        // Per heap, the bytes of the images this frame made.
         let mut added = vec![0; heaps.len()];
         let loaded = &self.loaded;
         self.reads.gather(|read| {
@@ -1159,7 +1111,7 @@ impl Textures {
             let loaded = self.loaded.get_mut(&key).expect("queued from the loaded");
             let (first, target) = (loaded.image.first, loaded.target);
             let room = self.room.get(loaded.chain.heap).copied().unwrap_or(0);
-            // No commands recorded this frame read its image yet.
+            // Nothing recorded this frame reads the new image yet, so it can be dropped.
             if (loaded.incoming.as_ref()).is_some_and(|i| i.image.first != target) {
                 loaded.incoming = None;
             }
@@ -1235,7 +1187,7 @@ impl Textures {
             .count()
     }
 
-    /// `None` when the reader's need is not estimated.
+    /// `uv_per_pixel` is `None` when the reader's need can't be estimated.
     pub fn need(&mut self, key: &str, uv_per_pixel: Option<f32>) {
         let Some(loaded) = self.loaded.get_mut(key) else {
             return;
@@ -1281,7 +1233,6 @@ impl Textures {
             .count()
     }
 
-    /// 0 when none is blurred.
     pub fn blurred_side(&self) -> u32 {
         (self.loaded.values())
             .filter(|l| l.blurred(self.cap))
@@ -1290,7 +1241,7 @@ impl Textures {
             .unwrap_or(0)
     }
 
-    /// The bytes the targets take past the heaps' room, at their floors.
+    /// The bytes by which the targets overflow the heaps' room, even at their floors.
     pub fn short(&self) -> u64 {
         self.short
     }
@@ -1342,7 +1293,7 @@ impl Textures {
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
             .border_color(vk::BorderColor::FLOAT_TRANSPARENT_BLACK)
             .max_lod(vk::LOD_CLAMP_NONE);
-        // SAFETY: `device` is live and `info` outlives the call.
+        // SAFETY: the device is alive and `info` outlives the call.
         let sampler = unsafe { self.device.create_sampler(&info, None) }
             .map_err(|e| format!("vkCreateSampler failed: {e}"))?;
         self.samplers.insert(modes, sampler);
@@ -1372,9 +1323,8 @@ impl Textures {
 
 impl Drop for Textures {
     fn drop(&mut self) {
-        // The images and buffers drop after this, before the device.
-        // SAFETY: the samplers were created on `device`, and the owner
-        // waited for idle before this drops.
+        // SAFETY: the samplers come from this device, which the owner waited on to go idle. The images
+        // and buffers drop after this, before the device.
         unsafe {
             for &sampler in self.samplers.values() {
                 self.device.destroy_sampler(sampler, None);
@@ -1461,7 +1411,7 @@ pub mod tests {
                 .count()
         };
         assert_eq!(open(&path), 0, "the texture keeps its file open");
-        // Negative control: the count sees a file held open.
+        // Negative control: a file held open shows up in the count.
         let held = File::open(&path).unwrap();
         assert_eq!(open(&path), 1);
         drop(held);
@@ -1482,7 +1432,7 @@ pub mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
-    /// The readers' parts carry the file's levels, each asked for once; a part no swap waits
+    /// The readers' parts carry the file's levels, and each is asked for once. A part no swap waits
     /// for is dropped, and one larger than the room left stays.
     #[test]
     fn readers_read_parts_of_the_levels() {
@@ -1579,7 +1529,7 @@ pub mod tests {
 
     #[test]
     fn reads_a_set_of_tiles() {
-        // Two 1×1 layers, periodic in u, clamped in v, tiles 1001 and 1012.
+        // Two 1×1 layers, periodic in u and clamped in v, for tiles 1001 and 1012.
         let mut file = b"pika".to_vec();
         for word in [1u32, 1, 2, 1, 100, 2, 1, 100] {
             file.extend_from_slice(&word.to_le_bytes());
@@ -1616,12 +1566,11 @@ pub mod tests {
         assert_eq!(texel(1, 2), [1.5 / 4.0, 2.5 / 4.0]);
         assert_eq!((t.first(3), t.first(2), t.first(1)), (2, 2, 3));
 
-        // Controls: no cap, or one the source fits, keeps all.
+        // Controls: no cap, or a cap the source already fits, keeps every level.
         for cap in [0, 8, 4096] {
             assert_eq!(t.first(cap), 0, "cap {cap}");
         }
 
-        // 5×3: levels 5×3, 2×1 and 1×1.
         let mut file = b"pika".to_vec();
         for word in [5u32, 3, 1, 3, 100, 0, 0, 1, 0] {
             file.extend_from_slice(&word.to_le_bytes());
@@ -1636,7 +1585,6 @@ pub mod tests {
         assert_eq!(t.first(1), 2);
     }
 
-    /// A square texture of one byte a texel, with no cap.
     fn chain(heap: usize, side: u32) -> Chain {
         let levels = 32 - side.leading_zeros() as usize;
         let sizes = (0..levels)
@@ -1672,7 +1620,7 @@ pub mod tests {
         assert_eq!(fit(&chains, &[1365 + 340]), [2, 0]);
         assert_eq!((big.floor, small.floor), (4, 2));
         assert_eq!(fit(&chains, &[0]), [4, 2], "no further than the floors");
-        // Equal sides: the most bytes first, then the lowest index.
+        // With equal sides, the most bytes go first, then the lowest index.
         let mut pair = chain(0, 16);
         pair.sizes.iter_mut().for_each(|s| *s *= 2);
         assert_eq!(fit(&[&small, &pair], &[341 + 681]), [0, 1]);
@@ -1684,7 +1632,6 @@ pub mod tests {
             let taken = totals(&chains, &targets, 1)[0];
             assert_eq!(fit(&chains, &[taken]), targets, "under {capacity}");
         }
-        // More capacity never lowers a chain.
         let mut last = fit(&chains, &[0]);
         for capacity in 0..6000 {
             let targets = fit(&chains, &[capacity]);
@@ -1758,7 +1705,7 @@ pub mod tests {
         }
         assert_eq!(moves, 1, "one raise, to every ceiling");
         assert_eq!(targets, [0; 4]);
-        // Control: room falling past the targets fits afresh, lower.
+        // Control: room falling below the targets fits afresh, at lower levels.
         let (lower, fresh) = settle(&chains, &targets, &[30_000], false);
         assert!(fresh);
         assert!(lower.iter().zip(&targets).any(|(l, t)| l > t));
@@ -1791,7 +1738,7 @@ pub mod tests {
         assert_eq!(fit(&[&other, &small], &[0, u64::MAX]), [0, 2]);
     }
 
-    /// Level bytes differ from their neighbours, to see where copies put them.
+    /// Every level's bytes differ from its neighbours', to show where the copies put them.
     fn numbered(format: vk::Format, (width, height, layers): (u32, u32, u32)) -> Texture {
         let levels = 32 - width.max(height).leading_zeros();
         let mut file = b"pika".to_vec();
@@ -1878,7 +1825,7 @@ pub mod tests {
         let t = numbered(vk::Format::BC7_SRGB_BLOCK, (16, 8, 2));
         let (whole, end) = copies(&t, 0, 0, u64::MAX);
         assert_eq!((whole.len(), end), (5 * 2, t.bytes(0)));
-        // Controls: a budget under one block row uploads nothing; a missing copy shows.
+        // Controls: a budget under one block row uploads nothing, and a missing copy shows.
         let (none, end) = copies(&t, 0, 0, 63);
         assert_eq!((none.len(), end), (0, 0));
         let (file, len) = (levels(&t, 0), t.bytes(0) as usize);
@@ -1890,7 +1837,7 @@ pub mod tests {
     #[test]
     fn a_swap_without_room_waits_before_it_is_refused() {
         assert_eq!(start(true, false, true, false), Start::Make);
-        // A lower is made without room, since its old image's is freed.
+        // A lower is made without room, since its old image's memory is freed.
         assert_eq!(start(false, true, false, false), Start::Make);
         assert_eq!(start(false, true, true, false), Start::Wait);
         assert_eq!(start(false, false, true, true), Start::Wait);
@@ -1933,7 +1880,7 @@ pub mod tests {
         assert!(held.released(&[room + MARGIN + 1], false));
         assert!(held.released(&[room], true));
         assert!(!other.released(&[u64::MAX], true));
-        // Control: released, it competes for the room again.
+        // Control: once released, it competes for the room again.
         held.limit(&numbered(vk::Format::R32_SFLOAT, (64, 64, 1)), 0);
         assert_eq!((held.ceiling, held.held), (0, None));
         assert_eq!(fit(&[&held, &other], &[capacity]), [1, 1]);

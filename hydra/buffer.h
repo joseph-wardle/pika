@@ -11,7 +11,7 @@
 
 PXR_NAMESPACE_OPEN_SCOPE
 
-// Host memory; Pika copies each frame in.
+// Host memory. Pika copies each frame in.
 class PikaRenderBuffer final : public HdRenderBuffer {
 public:
     explicit PikaRenderBuffer(SdfPath const &id) : HdRenderBuffer(id) {}

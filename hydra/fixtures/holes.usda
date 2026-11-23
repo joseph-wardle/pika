@@ -5,8 +5,7 @@
     upAxis = "Y"
 )
 
-# The scheme is unauthored, so Catmull-Clark. Hydra hands over the normals
-# of a subdivided mesh too.
+# The scheme is unauthored, so Catmull-Clark. Hydra hands over a subdivided mesh's normals too.
 def Xform "world"
 {
     def Camera "camera" {}

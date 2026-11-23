@@ -1,5 +1,5 @@
-//! One record per Hydra sync and per rendered frame, as `key value` pairs. A key ending in `_ms`
-//! is milliseconds with three decimals; every other value is a whole count.
+//! One record per Hydra sync and per rendered frame, written as `key value` pairs. A key ending
+//! in `_ms` is in milliseconds with three decimals, and every other value is a whole count.
 
 use std::fs::File;
 use std::io::Write;
@@ -24,33 +24,32 @@ pub struct Stats {
 /// From the delegate's `Update` to its `CommitResources`, including Hydra's own pulls.
 pub struct Sync {
     pub time: Duration,
-    /// None for the first sync.
+    /// `None` for the first sync.
     pub period: Option<Duration>,
     pub pulled: Pulled,
     pub census: Census,
 }
 
-/// What is known of a frame once it is submitted.
 pub struct Recorded {
-    /// None for the first frame.
+    /// `None` for the first frame.
     pub period: Option<Duration>,
-    /// CPU work before the submit: updating the geometry and recording.
+    /// CPU work before the submit, which is updating the geometry and recording.
     pub record: Duration,
     pub update: Update,
     pub shading: shade::Update,
     pub laps: Vec<(&'static str, Duration)>,
-    /// Its index among the frames drawn while nothing changed, 0 while anything did.
+    /// Its index among the frames drawn while nothing changed, or 0 while anything did.
     pub sample: u32,
     pub lights: usize,
     /// Meshes whose points moved.
     pub moved: usize,
     /// Meshes whose transform moved.
     pub transforms: usize,
-    /// Placed a call later than it was drawn.
+    /// Placed one call later than it was drawn.
     pub late: bool,
 }
 
-/// `record`'s time in named parts: CPU time from each lap to the next.
+/// `record`'s time in named parts, with the CPU time from each lap to the next.
 pub struct Laps {
     last: Instant,
     pub laps: Vec<(&'static str, Duration)>,
@@ -64,7 +63,6 @@ impl Laps {
         }
     }
 
-    /// Ends the part since the lap before, or the start.
     pub fn lap(&mut self, label: &'static str) {
         let now = Instant::now();
         self.laps.push((label, now - self.last));
@@ -72,7 +70,6 @@ impl Laps {
     }
 }
 
-/// A frame placed in the host's buffers.
 pub struct Frame {
     pub width: u32,
     pub height: u32,
@@ -97,7 +94,7 @@ pub struct Memory {
     pub vram_budget: u64,
 }
 
-/// 24 fps: the gate's frame period.
+/// The frame period at 24 fps, which the gate measures against.
 pub const BUDGET_MS: f64 = 41.67;
 
 fn ms(t: Duration) -> f64 {
@@ -268,8 +265,8 @@ impl Sync {
 }
 
 impl Frame {
-    /// `layout` and `draws` are 1 when they were rewritten, and `late` when
-    /// the frame was placed a call after it was drawn.
+    /// `layout` and `draws` are 1 when they were rewritten, and `late` is 1 when the frame was
+    /// placed a call after it was drawn.
     pub fn pairs(&self) -> Vec<(String, f64)> {
         let m = &self.memory;
         let r = &self.recorded;
@@ -346,7 +343,7 @@ fn line(kind: &str, index: usize, pairs: &[(String, f64)]) -> String {
     text + "\n"
 }
 
-/// By nearest rank, of a non-empty set.
+/// Percentiles by nearest rank, of a set that isn't empty.
 fn percentiles(mut values: Vec<f64>) -> (f64, f64, f64) {
     values.sort_by(f64::total_cmp);
     let rank = |p: f64| values[((p * values.len() as f64) as usize).min(values.len() - 1)];
@@ -470,8 +467,7 @@ mod tests {
              pending_textures 2 lowered_textures 3 unseen_textures 4 unestimated_textures 5 \
              blurred_textures 6\n";
         assert_eq!(line("frame", 7, &frame(Some(29.0)).pairs()), expected);
-        // A first frame has no period, so it is not the reference's line
-        // with the period zeroed.
+        // A first frame has no period, so its line isn't the reference line with the period zeroed.
         let first = line("frame", 7, &frame(None).pairs());
         assert!(!first.contains("period_ms"), "{first}");
         assert_ne!(
@@ -509,7 +505,7 @@ mod tests {
     fn percentiles_are_nearest_rank() {
         let values: Vec<f64> = (1..=100).map(f64::from).collect();
         assert_eq!(percentiles(values.clone()), (51.0, 96.0, 100.0));
-        // Not interpolated: the p95 of 1..=100 would be 95.05.
+        // Not interpolated, since the interpolated p95 of 1..=100 would be 95.05.
         assert_ne!(percentiles(values).1, 95.05);
         assert_eq!(percentiles(vec![3.0]), (3.0, 3.0, 3.0));
     }

@@ -5,8 +5,8 @@
     upAxis = "Y"
 )
 
-# Two native instances of one prototype. Hydra hands over the prototype mesh
-# once, with an instancer whose matrices place each instance.
+# Two native instances of one prototype. Hydra hands over the mesh once, with an instancer whose
+# matrices place each instance.
 def Xform "world"
 {
     def Camera "camera" {}

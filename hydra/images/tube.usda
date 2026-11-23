@@ -24,8 +24,7 @@ def Mesh "wall"
     point3f[] points = [(-4.3, -2.5, -8), (4.3, -2.5, -8), (4.3, 2.5, -8), (-4.3, 2.5, -8)]
 }
 
-# Radiance 6 at frame 1, of its side's area 2.26, and 6 at frame 2, 3.9
-# long.
+# Radiance 6 at frame 1, of its side's area 2.26, and 6 at frame 2, 3.9 long.
 def CylinderLight "tube"
 {
     float inputs:length = 3

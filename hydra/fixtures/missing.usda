@@ -5,11 +5,9 @@
     upAxis = "Y"
 )
 
-# A texture whose file does not resolve arrives with an empty path, as one
-# authored empty does: the node's fallback is drawn in its place, as Storm
-# draws it, with one warning naming the node and input, and the surface
-# compiles. The edit names a file that resolves, which is baked, and the
-# surface, the same document, is held.
+# A file that doesn't resolve arrives with an empty path, as one authored empty does. The node's
+# fallback is drawn, as Storm draws it, with one warning, and the surface compiles. The edit
+# names a file that resolves, which is baked, and the surface, the same document, is held.
 #
 # compiles: 1 then 0
 # bakes: 0 then 1

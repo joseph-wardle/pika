@@ -29,41 +29,35 @@ FEWER = 4
 
 
 def error(a, b, mask=None):
-    """The mean 8-bit channel difference between two images, over the pixels `mask` holds."""
     mask = mask or [True] * len(a)
     total = sum(abs((p >> s & 255) - (q >> s & 255)) for p, q, m in zip(a, b, mask) if m for s in (0, 8, 16))
     return total / (3 * sum(mask))
 
 
 def edges(image):
-    """Per pixel, whether any of its 3×3 neighbours differs from it."""
     def at(x, y):
         return image[min(max(y, 0), SIZE - 1) * SIZE + min(max(x, 0), SIZE - 1)]
     return [any(at(x + i, y + j) != at(x, y) for i in (-1, 0, 1) for j in (-1, 0, 1)) for y in range(SIZE) for x in range(SIZE)]
 
 
 def shift(frustum, right):
-    """The view-space x that moves the scene's centre `right` pixels across the frustum's image."""
     depth = -frustum.ComputeViewMatrix().Transform(frustum.ComputeLookAtPoint())[2]
     # A pixel is 2 / SIZE in normalized device x, which is P[0][0] x / -z.
     return right * 2 / SIZE * depth / frustum.ComputeProjectionMatrix()[0][0]
 
 
 def camera(stage, right):
-    """The framing camera's view and projection, moved `right` pixels at the scene's centre."""
     frustum = framing(stage)
     moved = Gf.Matrix4d().SetTranslate(Gf.Vec3d(-shift(frustum, right), 0, 0))
     return frustum.ComputeViewMatrix() * moved, frustum.ComputeProjectionMatrix()
 
 
 def offset(stage, right):
-    """The world offset that moves the scene's centre `right` pixels across the framing camera."""
     frustum = framing(stage)
     return frustum.ComputeViewMatrix().GetInverse().TransformDir(Gf.Vec3d(shift(frustum, right), 0, 0))
 
 
 def place(stage, offset):
-    """Moves the bars and the floor in the stage's session layer, as `halve` edits the sun."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         for path in ("/world/bars", "/world/floor"):
             mesh = UsdGeom.Xformable(stage.GetPrimAtPath(path))
@@ -72,8 +66,7 @@ def place(stage, offset):
 
 
 def bend(stage, offset):
-    """Moves the bars and the floor by their points, their transforms still, and has the bars
-    refined."""
+    """By their points, their transforms still, and the bars refined."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         UsdGeom.Mesh(stage.GetPrimAtPath("/world/bars")).GetSubdivisionSchemeAttr().Set("bilinear")
         for path in ("/world/bars", "/world/floor"):
@@ -83,7 +76,6 @@ def bend(stage, offset):
 
 
 def unshadow(stage):
-    """Turns the sun's shadow off in the stage's session layer."""
     sun = stage.GetPrimAtPath("/world/sun")
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         UsdLux.ShadowAPI.Apply(sun).CreateShadowEnableAttr(False)
@@ -98,7 +90,6 @@ def converged(engine, stage, params, fbo, state):
 
 
 def alone(path, fbo, state, edit=None):
-    """A frame drawn with no history."""
     engine, stage, params = scene(path)
     if edit:
         edit(stage)
@@ -131,7 +122,7 @@ def pan(path, fbo):
 
 
 def slide(path, fbo, move, sliding):
-    """`move` moves the bars and the floor (`place` or `bend`)."""
+    """`move` is `place` or `bend`."""
     engine, stage, params = scene(path)
     reference, reference_stage, _ = scene(path)
     unshadow(stage)
@@ -166,7 +157,6 @@ def slide(path, fbo, move, sliding):
 
 
 def tick(stage, t):
-    """Moves a quad hidden under the floor in the stage's session layer."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         quad = UsdGeom.Mesh.Define(stage, "/world/tick")
         if not quad.GetOrderedXformOps():
@@ -206,7 +196,6 @@ def rotate(path, fbo):
 
 
 def halve(stage):
-    """Halves the sun in the stage's session layer."""
     sun = UsdLux.DistantLight(stage.GetPrimAtPath("/world/sun"))
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         sun.GetIntensityAttr().Set(sun.GetIntensityAttr().Get() / 2)

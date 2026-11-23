@@ -5,8 +5,7 @@
     upAxis = "Y"
 )
 
-# A light's time-sampled inputs and transform are read again at each
-# frame's time.
+# A light's time-sampled inputs and transform are read again each frame.
 def Xform "world"
 {
     def Camera "camera" {}

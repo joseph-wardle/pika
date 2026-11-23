@@ -1,4 +1,4 @@
-//! The tangent pass: each vertex's tangent and handedness, for normal maps.
+//! The tangent pass. It works out each vertex's tangent and handedness, for normal maps.
 
 use std::ops::Range;
 
@@ -41,7 +41,7 @@ impl Tangent {
         Ok(Self { compute })
     }
 
-    /// The points, normals and texcoords it reads must be written already.
+    /// The points, normals and texcoords it reads must already be written.
     pub fn record(&self, cb: vk::CommandBuffer, addresses: Addresses, ranges: &[Range<u32>]) {
         (self.compute).record(cb, ranges, |first, count, stride| Push {
             addresses,

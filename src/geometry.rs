@@ -1,6 +1,5 @@
-//! The GPU copy of the store's meshes, laid out afresh only when a mesh is
-//! remodelled; a playing frame writes only what moved. Their instances and the records that
-//! draw them are `draw`'s, which `Geometry` keeps beside the layout and uploads with it.
+//! The GPU copy of the store's meshes. The layout is rebuilt only when a mesh's shape changes,
+//! so playback uploads only what moved.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -23,16 +22,15 @@ const SMOOTH: u32 = u32::MAX;
 /// A vertex's texcoord index when its mesh has none.
 const NONE: u32 = u32::MAX;
 
-/// Where one mesh's data lies in the layout's buffers.
 pub struct Range {
     pub first_point: u64,
-    /// Refined points when refined.
+    /// Counts the refined points when the mesh is refined.
     pub point_count: u32,
     /// `None` when its points are drawn as they are.
     pub first_cage: Option<u64>,
     pub first_normal: u64,
     pub normal_count: usize,
-    /// Refined values when refined.
+    /// Points at the refined values when the mesh is refined.
     pub first_texcoord: u64,
     pub texcoord_count: usize,
     /// `None` when its values are drawn as they are.
@@ -40,12 +38,11 @@ pub struct Range {
     pub first_vertex: i32,
     pub vertex_count: u32,
     pub index_count: u32,
-    /// By material, in order, none empty.
+    /// One part per material, in order. None of them is empty.
     pub parts: Vec<Part>,
-    /// The fraction of its cage box's size a refined point can lie outside it;
-    /// 0 when not refined.
+    /// How far a refined point can lie outside its cage's box, as a fraction of the box's size.
     pub spread: f32,
-    /// Texcoord units per unit of its own space; recomputed when its texcoord moves.
+    /// Texcoord units per unit of the mesh's own space.
     pub density: Option<f32>,
 }
 
@@ -56,10 +53,9 @@ impl Range {
     }
 }
 
-/// One material's triangles of a mesh: its faces in no GeomSubset, or one subset's.
+/// One material's triangles of a mesh: the faces in no GeomSubset, or one subset's faces.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Part {
-    /// `None` for the faces in no subset.
     pub subset: Option<usize>,
     pub first_index: u32,
     pub index_count: u32,
@@ -69,30 +65,26 @@ struct Layout {
     ranges: BTreeMap<u64, Range>,
     point_count: u32,
     vertex_count: u32,
-    /// They come first in `points`, so refined point p's stencil is the pth.
+    /// Refined points come first in `points`, so refined point p uses the pth stencil.
     refined_count: u32,
     points: Buffer,
-    /// `points` as the frame before drew them, which motion is measured from.
+    /// `points` as the frame before drew them. Motion is measured from these.
     previous_points: Buffer,
-    /// The meshes whose points the last update moved, so their `previous_points` differ from
-    /// their `points`.
     last_moved: BTreeSet<u64>,
     cage: Buffer,
     stencils: Stencils,
     normals: Buffer,
-    /// Zero where its mesh's normals are authored.
+    /// Zero where a mesh's normals are authored.
     smooth: Buffer,
     adjacency: Adjacency,
-    /// They come first in `texcoord`, so refined value t's stencil is the tth.
+    /// Refined values come first in `texcoord`, so refined value t uses the tth stencil.
     refined_texcoord_count: u32,
     texcoord: Buffer,
     cage_texcoord: Buffer,
     texcoord_stencils: Stencils,
-    /// Point and normal index (or `SMOOTH`) per unique point, normal and texcoord.
+    /// A point and normal index (or `SMOOTH`) for each unique point, normal and texcoord.
     vertices: Buffer,
-    /// Texcoord index (or `NONE`) per vertex.
     vertex_texcoord: Buffer,
-    /// Tangent and handedness packed in 4 bytes (`shaders/view.slang`).
     tangents: Buffer,
     vertex_adjacency: Adjacency,
     /// Counted from the mesh's first vertex.
@@ -100,9 +92,8 @@ struct Layout {
 }
 
 impl Layout {
-    /// Keeps the frame before's points of the meshes whose points move now or moved in the last
-    /// update: a mesh that stops has still moved since the frame before, which
-    /// `previous_points` holds until the frame after.
+    /// Keeps the frame before's points for meshes moving now or in the last update. A mesh that
+    /// just stopped has still moved since the frame before.
     fn remember_moved(&mut self, device: &gpu::Device, cb: vk::CommandBuffer, moved: &Moved) {
         let ids = self.last_moved.union(&moved.points);
         let ranges: Vec<_> = (ids.filter_map(|id| self.ranges.get(id)))
@@ -114,8 +105,8 @@ impl Layout {
             .collect();
     }
 
-    /// Copies `ranges` of the points into `previous_points`: the frame before's, before this
-    /// frame's uploads and subdivision write over them, or a rebuilt layout's own.
+    /// Copies `ranges` of the points into `previous_points`, before this frame's uploads and
+    /// subdivision overwrite them.
     fn remember(
         &self,
         device: &gpu::Device,
@@ -123,7 +114,7 @@ impl Layout {
         ranges: &[std::ops::Range<u32>],
     ) {
         let l = self;
-        // Vulkan has no empty copies.
+        // Vulkan doesn't allow empty copies.
         let regions: Vec<_> = (ranges.iter().filter(|r| !r.is_empty()))
             .map(|r| vk::BufferCopy {
                 src_offset: r.start as u64 * 12,
@@ -154,8 +145,8 @@ impl Layout {
                     | vk::AccessFlags2::SHADER_STORAGE_WRITE
                     | vk::AccessFlags2::SHADER_STORAGE_READ,
             );
-        // SAFETY: `cb` records outside rendering; both buffers are `device`'s and hold every
-        // point's 12 bytes.
+        // SAFETY: the command buffer is recording outside a render pass, and both buffers belong to
+        // this device and hold 12 bytes for every point.
         unsafe {
             (device.raw).cmd_pipeline_barrier2(
                 cb,
@@ -171,7 +162,7 @@ impl Layout {
 }
 
 struct Stencils {
-    /// One per refined value, then the end of the last stencil.
+    /// One offset per refined value, then the end of the last stencil.
     offsets: Buffer,
     indices: Buffer,
     weights: Buffer,
@@ -199,25 +190,23 @@ impl Stencils {
 }
 
 struct Adjacency {
-    /// One per point (or vertex), then the end of the last one's corners.
+    /// One offset per point (or vertex), then the end of the last one's corners.
     offsets: Buffer,
-    /// Per corner, grouped by point: the previous and next point of its face;
-    /// grouped by vertex: its position in the triangle indices.
+    /// Each corner, grouped by point, holds the previous and next point of its face. Grouped by
+    /// vertex, it holds its position in the triangle indices.
     corners: Buffer,
 }
 
 pub struct Geometry {
     layout: Option<Layout>,
     draws: Option<Draws>,
-    /// Kept while frames keep uploading, dropped by the first that does not.
+    /// Kept while frames keep uploading, and dropped by the first frame that doesn't.
     staging: Vec<Buffer>,
     subdiv: Subdiv,
     smooth: Smooth,
     tangent: Tangent,
 }
 
-/// Where the passes find the geometry and its draws on the GPU: addresses for the shaders,
-/// the buffers that are bound or copied, and the counts.
 pub struct Addresses {
     pub points: vk::DeviceAddress,
     pub previous_points: vk::DeviceAddress,
@@ -232,16 +221,15 @@ pub struct Addresses {
     pub owners: vk::DeviceAddress,
     pub boxes: vk::DeviceAddress,
     pub indices: vk::Buffer,
-    /// Without instances; each view copies them, and shadows read them at `record_words`.
+    /// The draw records without their instances. Each view copies them, and shadows read them at
+    /// `record_words`.
     pub records: vk::Buffer,
     pub record_words: vk::DeviceAddress,
     pub count: u32,
     pub instance_count: u32,
 }
 
-/// What an update did.
 pub struct Update {
-    /// Bytes uploaded.
     pub bytes: u64,
     /// The layout was rebuilt, which renumbers the points.
     pub layout: bool,
@@ -249,7 +237,6 @@ pub struct Update {
     pub draws: bool,
 }
 
-/// Bytes a frame copies into a buffer, through staging.
 pub struct Upload<'a> {
     pub bytes: &'a [u8],
     pub buffer: vk::Buffer,
@@ -257,7 +244,6 @@ pub struct Upload<'a> {
 }
 
 impl<'a> Upload<'a> {
-    /// A whole table, from the buffer's start.
     pub fn table(bytes: &'a [u8], buffer: &Buffer) -> Self {
         Self {
             bytes,
@@ -284,8 +270,8 @@ impl Geometry {
         })
     }
 
-    /// Empty `tags` draws every tag. Marks every step each frame, run or not.
-    /// No GPU work may be pending: buffers are replaced and staging rewritten.
+    /// An empty `tags` draws every tag. Every step is timed each frame, whether it runs or not.
+    /// No GPU work may be pending, because buffers are replaced and staging is rewritten.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -305,7 +291,7 @@ impl Geometry {
                 range.density = need::density(&store.meshes()[id]);
             }
         }
-        // A rebuilt layout's points are not written yet; they are remembered below.
+        // A rebuilt layout's points aren't written yet. They are remembered below.
         if !rebuilt {
             layout.remember_moved(device, commands.buffer(), moved);
         }
@@ -364,8 +350,8 @@ impl Geometry {
             false => moved_ranges(&layout.ranges, moved),
         };
         self.refine(device, commands, layout, &ranges)?;
-        // A rebuilt layout renumbers the points, so none can be matched with the frame before's:
-        // each is drawn as if it had not moved, as EEVEE draws a mesh whose vertex count changed.
+        // A rebuilt layout renumbers the points, so none can be matched with the frame before. Each
+        // is drawn as if it hadn't moved, as EEVEE draws a mesh whose vertex count changed.
         if rebuilt {
             layout.remember(device, commands.buffer(), &ranges.points);
         }
@@ -377,7 +363,7 @@ impl Geometry {
     }
 
     fn rebuild(&mut self, device: &gpu::Device, store: &Store) -> Result<Tables, String> {
-        // Free the old buffers before allocating their replacements.
+        // Free the old buffers before allocating the new ones.
         self.layout = None;
         let (layout, tables) = build(device, store)?;
         self.layout = Some(layout);
@@ -438,7 +424,6 @@ impl Geometry {
         commands.mark("tangent")
     }
 
-    /// `None` before the first update.
     pub fn addresses(&self) -> Option<Addresses> {
         let (layout, draws) = (self.layout.as_ref()?, self.draws.as_ref()?);
         Some(Addresses {
@@ -466,7 +451,8 @@ impl Geometry {
         self.draws.as_ref().map_or(&[], |d| &d.tables.groups)
     }
 
-    /// An instance outside the view adds nothing; a material with none inside has no entry.
+    /// An instance outside the view adds nothing, and a material with no instance inside it has
+    /// no entry.
     pub fn footprints(
         &self,
         view_projection: &[[f32; 4]; 4],
@@ -511,8 +497,8 @@ impl Geometry {
         footprints
     }
 
-    /// The drawn instances whose transform or points moved, by their index, ascending; `None`
-    /// when `update` rewrote the draws, which renumbers them.
+    /// The indices of the drawn instances whose transform or points moved, in ascending order.
+    /// `None` when `update` rewrote the draws, since that renumbers them.
     pub fn moved_instances(&self, moved: &Moved, update: &Update) -> Option<Vec<u32>> {
         if update.draws {
             return None;
@@ -520,7 +506,6 @@ impl Geometry {
         Some(self.draws.as_ref().map_or(Vec::new(), |d| d.moved(moved)))
     }
 
-    /// Each drawn instance with its mesh's box, in the mesh's own space.
     pub fn instances(&self) -> impl Iterator<Item = (&Instance, &[f32; 6])> {
         self.draws.iter().flat_map(|d| {
             let t = &d.tables;
@@ -635,8 +620,8 @@ fn texcoord_upload<'a>(mesh: &'a Mesh, range: &Range, layout: &Layout) -> Option
     })
 }
 
-/// The least `maxMemoryAllocationSize` Vulkan requires; a first upload can pass
-/// the 4 GiB NVIDIA reports.
+/// The smallest `maxMemoryAllocationSize` Vulkan allows. A first upload can be larger than the
+/// 4 GiB NVIDIA reports.
 const STAGING: u64 = 1 << 30;
 
 fn upload(
@@ -648,9 +633,9 @@ fn upload(
     let lengths: Vec<u64> = copies.iter().map(|c| c.bytes.len() as u64).collect();
     let total: u64 = lengths.iter().sum();
     if !reuses(staging.iter().map(|s| s.size).sum(), total) {
-        // Every buffer but the last is STAGING bytes, as `pieces` lays them.
+        // Every buffer but the last is `STAGING` bytes, as `pieces` lays them out.
         staging.clear();
-        // Write-combined memory: written once in order, never read.
+        // Write-combined memory, which is written once in order and never read.
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
         let mut left = total;
         while left > 0 {
@@ -678,7 +663,8 @@ fn upload(
             dst_offset: c.offset + p.start,
             size: p.size,
         };
-        // SAFETY: `cb` records outside rendering; both buffers are `d`'s and hold the region.
+        // SAFETY: the command buffer is recording outside a render pass, and both buffers belong to
+        // this device and hold the region.
         unsafe { d.cmd_copy_buffer(cb, s.raw, c.buffer, &[region]) };
     }
     let barrier = vk::MemoryBarrier2::default()
@@ -695,7 +681,7 @@ fn upload(
                 | vk::AccessFlags2::INDEX_READ
                 | vk::AccessFlags2::TRANSFER_READ,
         );
-    // SAFETY: `cb` is recording outside any rendering.
+    // SAFETY: the command buffer is recording outside a render pass.
     unsafe {
         d.cmd_pipeline_barrier2(
             cb,
@@ -705,8 +691,8 @@ fn upload(
     Ok(total)
 }
 
-/// Never keeps more than twice a frame's bytes: playback must not keep a first
-/// upload's gigabytes, but reusing between its own frames saves allocating.
+/// Never keeps more than twice a frame's bytes. Playback must not hold on to a first upload's
+/// gigabytes, but reusing staging between frames of the same upload saves allocating.
 fn reuses(staged: u64, total: u64) -> bool {
     total <= staged && staged <= 2 * total
 }
@@ -719,7 +705,6 @@ struct Piece {
     size: u64,
 }
 
-/// Splits a copy where a staging buffer ends.
 fn pieces(lengths: &[u64], chunk: u64) -> Vec<Piece> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -745,27 +730,26 @@ struct Tables {
     vertices: Vec<[u32; 2]>,
     vertex_texcoord: Vec<u32>,
     indices: Vec<u32>,
-    /// One per point, then the end of the last one's corners.
     corner_offsets: Vec<u32>,
     corners: Vec<[u32; 2]>,
-    /// One per vertex, then the end of the last one's corners.
     vertex_offsets: Vec<u32>,
-    /// Each corner's position in `indices`.
     vertex_corners: Vec<u32>,
     stencils: StencilTables,
     texcoord_stencils: StencilTables,
 }
 
-/// Entries count from the tables' start, cage values from the cage buffer's.
+/// Entries count from the start of the tables, and cage values from the start of the cage
+/// buffer.
 #[derive(Default)]
 struct StencilTables {
-    /// One per refined value, then the end of the last stencil.
+    /// One offset per refined value, then the end of the last stencil.
     offsets: Vec<u32>,
     indices: Vec<u32>,
     weights: Vec<f32>,
 }
 
-/// Refined meshes first. A mesh whose data does not fit together is left out, with a warning.
+/// Refined meshes come first. A mesh whose data doesn't fit together is left out, with a
+/// warning.
 fn build(device: &gpu::Device, store: &Store) -> Result<(Layout, Tables), String> {
     let mut ranges = BTreeMap::new();
     let mut tables = Tables::default();
@@ -961,7 +945,7 @@ fn barrier(device: &gpu::Device, cb: vk::CommandBuffer, stage: vk::PipelineStage
         .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
         .dst_stage_mask(stage)
         .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-    // SAFETY: `cb` is recording outside any rendering.
+    // SAFETY: the command buffer is recording outside a render pass.
     unsafe {
         device.raw.cmd_pipeline_barrier2(
             cb,
@@ -970,8 +954,8 @@ fn barrier(device: &gpu::Device, cb: vk::CommandBuffer, stage: vk::PipelineStage
     };
 }
 
-/// Authored normals only when not subdivided, as USD specifies; Hydra hands
-/// them over on subdivided meshes too.
+/// Authored normals are used only on meshes that aren't subdivided, as USD specifies. Hydra
+/// hands them over on subdivided meshes too.
 fn authored(mesh: &Mesh) -> Option<&Normals> {
     match (&mesh.topology, &mesh.normals) {
         (Some(t), Some(Some(n))) if t.scheme == Scheme::None => Some(n),
@@ -999,8 +983,8 @@ struct Faces<'a> {
     points: usize,
 }
 
-/// A vertex is a unique point, normal and texcoord. Faces fan from their first
-/// corner; holes are left out.
+/// A vertex is a unique point, normal and texcoord. Faces fan out from their first corner, and
+/// holes are left out.
 fn triangulate(
     mesh: &Mesh,
     first: Firsts,
@@ -1098,8 +1082,8 @@ fn triangulate(
         None => point_corners(&faces, topology.left_handed, first.point, tables),
     }
 
-    // Welded by value (bitwise, as the delegate welds), so the tangent pass sums both
-    // sides of an edge; a seam keeps them apart.
+    // Welded by value, bitwise as the delegate welds, so the tangent pass sums both sides of an
+    // edge. A seam keeps the sides apart.
     let welded_texcoord: Vec<u32> = match texcoord {
         Some(t) if t.refined.is_none() && t.interpolation == Interpolation::FaceVarying => {
             let mut first_of: HashMap<[u32; 2], u32> = HashMap::new();
@@ -1178,9 +1162,9 @@ fn triangulate(
     Ok((faces.points, parts))
 }
 
-/// A face in two subsets goes in the first. OpenSubdiv's uniform refinement lists a
-/// cage face's children together in cage order: one per corner under catmullClark
-/// and bilinear, four under loop.
+/// A face in two subsets goes in the first. OpenSubdiv's uniform refinement lists a cage face's
+/// children together and in cage order. There is one child per corner under catmullClark and
+/// bilinear, and four under loop.
 fn ordered_faces(
     topology: &Topology,
     faces: &Faces,
@@ -1305,8 +1289,8 @@ fn stencils(
             "stencil index {bad} is not one of {cage_count} values"
         ));
     }
-    // The cull pass's boxes rely on every stencil being an affine
-    // combination (see `spread`), as subdivision's are.
+    // The cull pass's boxes rely on every stencil being an affine combination (see `spread`), as
+    // subdivision's are.
     if let Some(p) = (offsets.windows(2)).position(|w| {
         let sum: f32 = s.weights[w[0] as usize..w[1] as usize].iter().sum();
         (sum - 1.0).abs() > 1e-3
@@ -1321,8 +1305,8 @@ fn stencils(
     Ok(())
 }
 
-/// Weights sum to 1, so only negative ones (Catmull-Clark at valence 2) push a
-/// refined point outside the cage box, by at most their sum times its size.
+/// Weights sum to 1, so only negative weights (Catmull-Clark at valence 2) can push a refined
+/// point outside the cage's box, by at most their sum times the box's size.
 fn spread(refined: &Refined) -> f32 {
     (refined.stencils.offsets.windows(2))
         .map(|w| {
@@ -1336,7 +1320,6 @@ fn spread(refined: &Refined) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// Low corner, then high; holds every point drawn.
 pub fn mesh_box(mesh: &Mesh, spread: f32) -> [f32; 6] {
     let points = mesh.points.as_deref().unwrap_or_default();
     if points.is_empty() {
@@ -1360,8 +1343,8 @@ pub fn mesh_box(mesh: &Mesh, spread: f32) -> [f32; 6] {
     ]
 }
 
-/// As Hydra's Hd_VertexAdjacency: swapped on left-handed meshes, hole faces kept
-/// (a hole is not drawn but shapes the surface around it).
+/// Works as Hydra's Hd_VertexAdjacency does. Corners are swapped on left-handed meshes, and
+/// hole faces are kept, because a hole isn't drawn but still shapes the surface around it.
 fn point_corners(faces: &Faces, left_handed: bool, first_point: u32, tables: &mut Tables) {
     let indices = faces.corners;
     let mut uses = vec![0u32; faces.points];
@@ -1455,7 +1438,7 @@ mod tests {
         Ok(t)
     }
 
-    /// Whether every copy's bytes come back with each piece moved `shift` bytes back.
+    /// Whether every copy's bytes come back when each piece is moved `shift` bytes back.
     fn round_trips(lengths: &[u64], chunk: u64, shift: u64) -> bool {
         let copies: Vec<Vec<u8>> = (lengths.iter().enumerate())
             .map(|(c, &n)| (0..n).map(|i| (c as u8) << 5 | i as u8).collect())
@@ -1492,7 +1475,7 @@ mod tests {
     #[test]
     fn staging_is_kept_only_while_it_fits_closely() {
         assert!(reuses(10, 10) && reuses(20, 10) && reuses(0, 0));
-        // Negative controls: too small, kept too large, and nothing to copy.
+        // Negative controls: staging too small, kept too large, and nothing to copy.
         assert!(!reuses(9, 10));
         assert!(!reuses(583_000_000, 5_400_000));
         assert!(!reuses(5, 0));
@@ -1606,7 +1589,8 @@ mod tests {
         assert_eq!(t.texcoord_stencils.offsets, [0, 1, 2, 4]);
         assert_eq!(t.texcoord_stencils.indices, [50, 51, 50, 51, 51]);
         assert_eq!(t.texcoord_stencils.weights, [1.0, 1.0, 0.5, 0.5, 1.0]);
-        // Controls: unrefined on a refined mesh, refined on a cage, extra corner, missing value.
+        // Controls: unrefined values on a refined mesh, refined values on a cage, an extra corner, and
+        // a missing value.
         fn texcoord(m: &mut Mesh) -> &mut Texcoord {
             m.texcoord.as_mut().unwrap().as_mut().unwrap()
         }
@@ -1633,7 +1617,7 @@ mod tests {
         .unwrap();
         assert_eq!(t.vertices[1..3], [[10, SMOOTH], [11, SMOOTH]]);
         assert_eq!(t.corners.len(), 7);
-        // Ignored on subdivided meshes even when the count is wrong.
+        // Ignored on subdivided meshes, even when the count is wrong.
         assert!(tables(&mesh(Scheme::Loop, normals(Interpolation::Vertex, 4))).is_ok());
     }
 
@@ -1820,7 +1804,7 @@ mod tests {
                 (Some(0), 6)
             ]
         );
-        // Controls: a face the cage lacks, and refined faces the rule does not account for.
+        // Controls: a face the cage lacks, and refined faces the rule doesn't account for.
         r.topology.as_mut().unwrap().subsets = vec![subset(vec![2])];
         assert!(faces(&r).unwrap_err().contains("subset face 2"));
         let t = r.topology.as_mut().unwrap();

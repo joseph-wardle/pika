@@ -1,57 +1,36 @@
-"""Writes the bake check's source images, once; they are tracked.
+"""Writes the bake check's source images once. They are tracked.
 
     python3 bake/fixtures/textures.py
 
-ramp.exr    8×8, two float channels, a scanline EXR: texel (x, y) holds its
-            own centre, ((x + 0.5) / 8, (y + 0.5) / 8), so a sample inside
-            the image returns the coordinate it was taken at.
-swatch.png  8×8 RGB at 8 bits, four flat 4×4 blocks: red, green, blue and
-            mid grey. Flat blocks encode exactly, so a BC7 bake must give the
-            bytes back.
-mips.exr    8×8 RGB half, tiled with stored mip levels, as maketx writes
-            them: level 0 is the swatch, the coarser levels are flat greys of
-            128, 64 and 32 of 255, which no filter of level 0 produces, so a
-            bake that reuses the stored levels is told from one that rebuilt
-            them, and which are exact at 8 bits, so a render shows which
-            levels the GPU read (hydra/images/mips.usda).
-normal.exr  4×4, three float channels, every texel the same tangent-space
-            normal, (0.2, 0.6, 0.898) encoded as (153, 204, 242) / 255, so
-            Pika's 8-bit bake of it is exact and a sample anywhere, at any
-            level, returns it (hydra/images/normalmap.usda).
-normal.png  The same at 8 bits, (153, 204, 242), as a painting tool exports
-            a normal map: a vector3 image declaring no colour space is read
-            as it is, not as sRGB (hydra/images/normalmap.usda).
-greys.jpg   128×8 RGB JPEG at quality 100, sixteen flat 8×8 blocks of grey
-            in a row, 0, 17, 34 … 255. A flat grey block is one DC
-            coefficient with centred chroma, so the JPEG decodes exactly,
-            and the generator refuses to write one that does not.
-acescg.exr  32×4, three float channels, eight flat 4×4 blocks of COLORS in
-            a row, linear and in ACEScg primaries, the inverse of the matrix
-            hydra/image.py converts an acescg image by, so a bake declared
-            acescg gives COLORS back.
+ramp.exr    8×8, two float channels, scanline. Texel (x, y) holds its own centre,
+            ((x + 0.5) / 8, (y + 0.5) / 8), so a sample returns where it was taken.
+swatch.png  8×8 RGB at 8 bits, four flat 4×4 blocks of red, green, blue and mid grey. Flat
+            blocks encode exactly, so a BC7 bake gives the bytes back.
+mips.exr    8×8 RGB half, tiled with stored levels as maketx writes them. Level 0 is the
+            swatch, the rest flat greys of 128, 64 and 32 of 255, which no filter of level 0
+            gives, so reused levels are told from rebuilt ones and a render shows the level read.
+normal.exr  4×4, three float channels, each texel (0.2, 0.6, 0.898), encoded as
+            (153, 204, 242) / 255 so an 8-bit bake is exact at any level.
+normal.png  The same at 8 bits, as a painting tool exports it. A vector3 image declaring no
+            colour space is read as it is, not as sRGB.
+greys.jpg   128×8 JPEG at quality 100, sixteen flat 8×8 greys in a row, 0, 17, 34 … 255. A
+            flat block is one DC coefficient with centred chroma, so it decodes exactly, and the
+            generator refuses one that doesn't.
+acescg.exr  32×4, three float channels, eight flat 4×4 blocks of COLORS in ACEScg primaries,
+            so a bake declared acescg gives COLORS back.
 udim.<UDIM>.exr
-            A two-tile UDIM set with a gap in each direction: tile 1001 is
-            the ramp, tile 1012 the ramp at half scale, texel (x, y) holding
-            ((x + 0.5) / 16, (y + 0.5) / 16), so a sample tells the tiles
-            apart and the tiles between and around them are missing
-            (hydra/images/udim.usda).
-wrapped.exr 8×8, three float channels, four flat 4×4 blocks of the greys
-            WRAPPED, multiples of 1/255 so that a linear 8-bit bake is exact,
-            stating the wrap modes "periodic,clamp" in its wrapmodes
-            attribute, as maketx writes them, which a UsdUVTexture's
-            useMetadata reads (hydra/images/wrapped.usda).
+            Tiles 1001, the ramp, and 1012, the ramp at half scale, with a gap each way, so a
+            sample tells the tiles apart and the ones around them are missing.
+wrapped.exr 8×8, three float channels, four flat 4×4 blocks of WRAPPED, multiples of 1/255 so a
+            linear 8-bit bake is exact. Its wrapmodes attribute states "periodic,clamp", as maketx
+            writes it, for a UsdUVTexture's useMetadata.
 mixed.<UDIM>.exr
-            A set whose tiles differ in size, as ALab's stoat has: tile 1001
-            is the ramp, tile 1002 a 4×4 ramp, texel (x, y) holding
-            ((x + 0.5) / 4, (y + 0.5) / 4), which a bake enlarges to the
-            set's 8×8 bilinearly, so its texels hold the ramp at their own
-            centres, the outer half texel clamped.
-sky.exr     64×32, three float channels, a latlong sky smooth in direction:
-            the texel toward d holds 0.5 + 0.4 d, so no two directions match
-            and a turned or flipped sky shows (hydra/images/skylit.usda).
-spot.exr    64×32, three float channels, a latlong sky of grey 0.3 with one
-            texel of SPOT, 59° up and 20° round from +z toward +x: a sun for a
-            dome light to lift (hydra/images/sunlit.usda).
+            Tiles of different sizes, as ALab's stoat has: 1001 the ramp, 1002 a 4×4 ramp, which
+            a bake enlarges bilinearly to 8×8, the outer half texel clamped.
+sky.exr     64×32 float latlong, the texel toward d holding 0.5 + 0.4 d, so a turned or flipped
+            sky shows.
+spot.exr    64×32 float latlong of grey 0.3 with one texel of SPOT, 59° up and 20° round from +z
+            toward +x, a sun for a dome light to lift.
 """
 
 import os
@@ -75,7 +54,6 @@ REC709_TO_ACESCG = np.linalg.inv([[1.705051, -0.621792, -0.083259],
 
 
 def blocks(cell, colors, columns, dtype):
-    """Flat cell×cell blocks, one per colour, in reading order over `columns`."""
     rows = len(colors) // columns
     pixels = np.zeros((rows * cell, columns * cell, 3), dtype)
     for i, color in enumerate(colors):
@@ -85,7 +63,6 @@ def blocks(cell, colors, columns, dtype):
 
 
 def linear(srgb):
-    """Linear light from sRGB codes."""
     v = np.asarray(srgb) / 255
     return np.where(v <= 0.04045, v / 12.92, ((v + 0.055) / 1.055) ** 2.4)
 

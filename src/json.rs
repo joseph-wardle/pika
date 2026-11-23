@@ -1,5 +1,5 @@
-//! The JSON `slangc -reflection-json` writes: objects, lists, strings, numbers and the three
-//! keywords, with no escapes beyond `\"` and `\\`.
+//! Reads the JSON that `slangc -reflection-json` writes: objects, lists, strings, numbers and
+//! the three keywords, with no escapes other than `\"` and `\\`.
 
 #[derive(Debug, PartialEq)]
 pub enum Json {
@@ -12,7 +12,7 @@ pub enum Json {
 }
 
 impl Json {
-    /// An object's member, or none for a missing key or a non-object.
+    /// An object's member, or `None` for a missing key or something that isn't an object.
     pub fn get(&self, key: &str) -> Option<&Json> {
         match self {
             Self::Object(members) => members.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -34,7 +34,7 @@ impl Json {
         }
     }
 
-    /// A list's items; empty for anything else.
+    /// A list's items, or nothing for anything that isn't a list.
     pub fn list(&self) -> &[Json] {
         match self {
             Self::List(items) => items,

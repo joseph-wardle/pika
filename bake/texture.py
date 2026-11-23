@@ -1,11 +1,10 @@
-"""The bake check's texture oracle: decodes the files `bake texture` wrote
-from the fixtures in bake/fixtures/ (textures.py says what they hold) and
-compares them with what the sources say they must decode to.
+"""The bake check's texture oracle: decodes what `bake texture` wrote from bake/fixtures/ and
+compares it with what the sources must decode to.
 
     python3 bake/texture.py <out dir>
 
-Block-compressed levels are decoded by OpenImageIO through a DDS wrapper
-written beside each file, so the check never trusts Pika's own decoding.
+OpenImageIO decodes block-compressed levels through a DDS wrapper written beside each file, so
+the check never trusts Pika's own decoding.
 """
 
 import os
@@ -31,8 +30,7 @@ def fail(what):
 
 
 def header(path):
-    """The header's five numbers, the wrap modes (u, v), the tile table and
-    the levels' bytes."""
+    """The five header numbers, wrap modes (u, v), tile table and level bytes."""
     with open(path, "rb") as f:
         bytes = f.read()
     magic, width, height, layers, levels, fmt, *rest = struct.unpack("<4s8I", bytes[:36])
@@ -44,8 +42,8 @@ def header(path):
 
 
 def decode(path):
-    """Each level as an array of shape (height, width, channels), or for a
-    float texture of several layers (layers, height, width, channels)."""
+    """(height, width, channels) per level, or (layers, height, width, channels) for a float texture
+    of several layers."""
     width, height, layers, levels, fmt, _, _, data = header(path)
     if fmt in FLOAT:
         out, offset, w, h = [], 0, width, height
@@ -107,14 +105,14 @@ def check(out):
             fail(f"{name}: the header says {got}, not {want}")
         return decode(path)
 
-    # Floats pass through; the levels below the source are box filtered.
+    # Floats pass through, and levels below the source are box filtered.
     levels = baked("ramp", (8, 8, 1, 4, 103))
     for i, level in enumerate(levels):
         size = 8 >> i
         want = [[((x + 0.5) / size, (y + 0.5) / size) for x in range(size)] for y in range(size)]
         expect(f"ramp level {i}", level, want, 0)
 
-    # Flat blocks come back within a step of BC7; filtered levels average in linear light.
+    # Flat blocks come back within a step of BC7, and filtered levels average in linear light.
     levels = baked("swatch", (8, 8, 1, 4, 146))
     expect("swatch level 0", levels[0][..., :3], swatch, 2)
     expect("swatch level 0 alpha", levels[0][..., 3], np.full((8, 8), 255), 2)
@@ -128,13 +126,13 @@ def check(out):
     if np.abs(levels[0][..., :3].astype(int) - swatch).max() < 16:
         fail("swatch_raw: the declared colour space made no difference")
 
-    # An 8-bit JPEG declared auto is sRGB; ACEScg colours come back as sRGB codes.
+    # An 8-bit JPEG declared auto is sRGB, and ACEScg colours come back as sRGB codes.
     levels = baked("greys", (128, 8, 1, 8, 146))
     expect("greys level 0", levels[0][..., :3], textures.blocks(8, [(g, g, g) for g in textures.GREYS], 16, np.uint8), 0)
     levels = baked("acescg", (32, 4, 1, 6, 146))
     expect("acescg level 0", levels[0][..., :3], textures.blocks(4, textures.COLORS, 8, np.uint8), 1)
 
-    # Tiles are layers in tile order; the table sends missing tiles past the end.
+    # Tiles are layers in tile order, and the table sends missing tiles past the end.
     table = [2 ** 32 - 1] * 100
     table[0], table[11] = 0, 1
     levels = baked("udim", (8, 8, 2, 4, 103), table=tuple(table))
@@ -152,14 +150,14 @@ def check(out):
     # Where the set's level is the smaller tile's size, the tile's own.
     expect("mixed level 1 tile 1002", levels[1][1], textures.ramp_pixels(1.0, 4), 0)
 
-    # The stated wrap modes are kept, u then v; a file stating none bakes black.
+    # The stated wrap modes are kept, u then v. A file stating none bakes black.
     levels = baked("wrapped", (8, 8, 1, 4, 145), wrap=(2, 1))
     expect("wrapped level 0", levels[0][..., :3], textures.blocks(4, [(g, g, g) for g in textures.WRAPPED], 2, np.uint8), 0)
 
     levels = baked("single", (8, 8, 1, 4, 139))
     expect("single level 0", levels[0][..., 0], swatch[..., 0], 1)
 
-    # Stored levels are kept as stored; a filter of level 0 would differ.
+    # Stored levels are kept as stored, where a filter of level 0 would differ.
     levels = baked("mips", (8, 8, 1, 4, 145))
     expect("mips level 0", levels[0][..., :3], swatch, 2)
     for i, grey in enumerate((128, 64, 32), 1):

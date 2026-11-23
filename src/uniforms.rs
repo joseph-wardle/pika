@@ -1,4 +1,4 @@
-//! A material's uniform block: its byte layout and textures' bindings, and each material's
+//! A material's uniform block: its byte layout, its textures' bindings, and each material's
 //! values packed into it.
 
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ pub struct Manifest {
     pub textures: Vec<String>,
 }
 
-/// `initial` is as MaterialX writes values ("0, 0, 1").
+/// `initial` is written as MaterialX writes values, such as "0, 0, 1".
 #[derive(Debug, PartialEq)]
 pub struct Uniform {
     pub name: String,
@@ -54,12 +54,12 @@ pub fn manifest(text: &str) -> Result<Manifest, String> {
     Ok(m)
 }
 
-/// In descriptor set 0, as slangc laid them out.
+/// Bindings in descriptor set 0, as slangc laid them out.
 #[derive(Debug, Default, PartialEq)]
 pub struct Layout {
     pub size: usize,
     pub block: u32,
-    /// Nested ones as `backsurfaceshader.color`.
+    /// Nested uniforms are named like `backsurfaceshader.color`.
     pub offsets: BTreeMap<String, usize>,
     pub textures: Vec<Bindings>,
 }
@@ -172,8 +172,8 @@ fn walk(
     Ok(())
 }
 
-/// Each uniform from the store's value of its input, by `document`'s node order, else from
-/// the generator's initial value.
+/// Packs each uniform from the store's value of its input, found through `document`'s node
+/// order, or else from the generator's initial value.
 pub fn pack(
     manifest: &Manifest,
     layout: &Layout,
@@ -182,26 +182,27 @@ pub fn pack(
     bytes: &mut [u8],
 ) -> Result<(), String> {
     for uniform in &manifest.uniforms {
-        // Structs and strings have no value to pack; their bytes stay zero.
+        // Structs and strings have no value to pack, so their bytes stay zero.
         let Some(shape) = Shape::of(&uniform.kind) else {
             continue;
         };
         let offset = *(layout.offsets.get(&uniform.name))
             .ok_or_else(|| format!("the reflection has no uniform {}", uniform.name))?;
-        // The generator's node for a default geomprop is in no document: its value is the initial.
+        // The generator's node for a default geomprop is in no document, so its value is the initial
+        // one.
         let words = if uniform.name.starts_with("geomprop_") {
             shape.initial(&uniform.initial)?
         } else {
             let (mut path, mut node, mut input) = document.reader(network, &uniform.name)?;
-            // The generator folds a constant node onto the input it feeds, so the variable names
-            // that input (`n1_color` for a constant into node 1's `color`).
+            // The generator folds a constant node into the input it feeds, so the variable is named after
+            // that input (`n1_color` for a constant feeding node 1's `color`).
             while let Some(c) = node.connections.get(input)
                 && network.nodes[&c.node].node_type.starts_with("ND_constant_")
             {
                 (path, node, input) = (&c.node, &network.nodes[&c.node], "value");
             }
             match node.params.get(input) {
-                // A text value was resolved by the generator into the initial, or is an address
+                // A text value was either resolved by the generator into the initial value, or is an address
                 // mode, which only the sampler reads.
                 Some(Value::Text(_)) | None => shape.initial(&uniform.initial)?,
                 Some(value) => shape
@@ -346,7 +347,7 @@ pub mod tests {
         pack(&manifest, &l, &document, &network, &mut bytes).unwrap();
         assert_eq!(f32_at(&bytes, l.offsets["n0_roughness"]), 0.25);
         assert_eq!(bytes[l.offsets["n0_useSpecularWorkflow"]], 1);
-        // Not authored: the generator's initial values.
+        // Not authored, so these are the generator's initial values.
         assert_eq!(f32_at(&bytes, l.offsets["n0_ior"]), 1.5);
         let fallback = l.offsets["n1_fallback"];
         assert_eq!(
@@ -355,10 +356,10 @@ pub mod tests {
                 .collect::<Vec<_>>(),
             [0.0, 0.0, 0.0, 1.0]
         );
-        // An address mode is the sampler's alone: its uniform keeps the initial value.
+        // An address mode belongs to the sampler alone, so its uniform keeps the initial value.
         assert_eq!(bytes[l.offsets["n1_wrapS"]], 2);
 
-        // A default geomprop's node keeps its initial value; any other uniform is a node's input.
+        // A default geomprop's node keeps its initial value. Any other uniform is a node's input.
         let mut extra = fixture_manifest();
         let mut extended = layout(REFLECTION).unwrap();
         extended

@@ -1,5 +1,5 @@
-//! A material's network and its MaterialX document, which holds only what decides the
-//! generated code: values, assets and address modes reach the shader as uniforms and samplers.
+//! A material's network and its MaterialX document. The document holds only what decides the
+//! generated code. Values, assets and address modes reach the shader as uniforms and samplers.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -27,14 +27,14 @@ pub struct Connection {
     pub output: String,
 }
 
-/// Numbers keep the `VtValue`'s width but not colour vs vector; the nodedef says which.
+/// Numbers keep the `VtValue`'s width but not whether it was a colour or a vector. The nodedef
+/// says which.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Value {
     Float(Vec<f32>),
     Int(i32),
     Bool(bool),
     Text(String),
-    /// An asset's resolved path.
     Asset(String),
 }
 
@@ -66,15 +66,16 @@ pub struct Source {
     pub file: String,
     pub space: String,
     pub encoding: &'static str,
-    /// The fallback drawn for an empty file; empty when the file resolves, so only an
-    /// edit to a drawn fallback makes a new source.
+    /// The fallback drawn for an empty file. It is empty when the file resolves, so only an edit to
+    /// a fallback that is actually drawn makes a new source.
     pub default: Vec<f32>,
-    /// Reads coordinates other than a primvar's as authored, so its detail is not estimated.
+    /// Reads coordinates other than a primvar's as authored, so its detail isn't estimated.
     pub transformed: bool,
 }
 
-/// Colour is BC7 sRGB (plain BC7 when raw), float BC4, vector3/4 BC7; vector2 stays float so
-/// coordinate maps stay exact. Space: `colorSpace`, else `sourceColorSpace`, else auto or raw.
+/// Colour is baked to BC7 sRGB (plain BC7 when raw), float to BC4, and vector3 or vector4 to
+/// BC7. vector2 stays float so coordinate maps stay exact. The colour space comes from
+/// `colorSpace`, else `sourceColorSpace`, else auto or raw.
 pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result<Source, String> {
     let file = match node.params.get(input) {
         Some(Value::Asset(file)) => file.clone(),
@@ -94,7 +95,8 @@ pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result
     let space = match declared {
         Some(Value::Text(space)) if space == "sRGB" => "srgb_texture".to_owned(),
         Some(Value::Text(space)) => space.clone(),
-        // USD's auto (sRGB at 8 bits) is for colour; other 8-bit maps read as is, as in Karma.
+        // USD's auto (sRGB at 8 bits) is meant for colour. Other 8-bit maps are read as they are, as in
+        // Karma.
         _ if kind == "color3" || kind == "color4" => "auto".to_owned(),
         _ => "raw".to_owned(),
     };
@@ -130,7 +132,8 @@ pub fn source(network: &Network, path: &str, node: &Node, input: &str) -> Result
     })
 }
 
-/// Its `st` or `texcoord` comes from anything but a primvar reader; unconnected is UV0.
+/// Whether its `st` or `texcoord` comes from anything but a primvar reader. Unconnected means
+/// UV0.
 fn transformed(network: &Network, node: &Node) -> bool {
     let input = match node.node_type.as_str() {
         "UsdUVTexture" => "st",
@@ -154,9 +157,9 @@ pub struct Document {
     pub text: String,
     /// FNV-1a of the text, which keys the cache.
     pub hash: u64,
-    /// The store's node paths in document order: node `n2` is `nodes[2]`.
+    /// The store's node paths in document order, so node `n2` is `nodes[2]`.
     pub nodes: Vec<String>,
-    /// The float2 primvar the surface reads: the first its readers name, else `st` (UV0).
+    /// The float2 primvar the surface reads: the first one its readers name, or else `st` (UV0).
     pub texcoord: String,
 }
 
@@ -174,7 +177,7 @@ impl Document {
     }
 }
 
-/// `n1_file` is node 1's `file`.
+/// Splits an input name, so `n1_file` is node 1's `file`.
 fn node_input(name: &str) -> Result<(usize, &str), String> {
     (name.strip_prefix('n'))
         .and_then(|rest| rest.split_once('_'))
@@ -182,12 +185,12 @@ fn node_input(name: &str) -> Result<(usize, &str), String> {
         .ok_or_else(|| format!("{name} is not a node's input"))
 }
 
-/// Compiled as integer uniforms the generated code never reads, so they are values: left
-/// out of the document and read into the sampler.
+/// The generated code compiles these as integer uniforms it never reads, so they are treated as
+/// values. They are left out of the document and read into the sampler instead.
 pub const ADDRESS_MODES: [&str; 4] = ["wrapS", "wrapT", "uaddressmode", "vaddressmode"];
 
-/// In the image nodedefs' enumeration. UsdUVTexture's `useMetadata`, USD's default, asks
-/// for the file's own; an image node authoring none is periodic.
+/// Address modes as numbered in the image nodedefs' enumeration. UsdUVTexture's `useMetadata`,
+/// USD's default, asks for the file's own modes. An image node that authors none is periodic.
 pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
     let usd = node.node_type == "UsdUVTexture";
     let mode = |names: [&str; 2], axis: usize| -> Result<u32, String> {
@@ -210,7 +213,8 @@ pub fn address_modes(node: &Node, file: [u32; 2]) -> Result<[u32; 2], String> {
     ])
 }
 
-/// USD's names included (black is constant, repeat periodic); `None` for `useMetadata`.
+/// Also takes USD's names, where black means constant and repeat means periodic. `None` for
+/// `useMetadata`.
 fn address_mode(token: &str) -> Result<Option<u32>, String> {
     Ok(Some(match token {
         "black" | "constant" => 0,
@@ -274,7 +278,7 @@ const NONE: &Rename = &Rename {
     dropped: &[],
 };
 
-/// Lambert at 18 % grey, through the same path as any other material.
+/// Lambert at 18% grey, built through the same path as any other material.
 pub fn clay() -> Network {
     let mut surface = Node {
         node_type: "ND_surface".into(),
@@ -301,7 +305,7 @@ pub fn clay() -> Network {
     }
 }
 
-/// Unlit magenta emission, an error under any lighting.
+/// Unlit magenta emission, which reads as an error under any lighting.
 pub fn pink() -> Network {
     let mut surface = Node {
         node_type: "ND_surface".into(),
@@ -328,8 +332,7 @@ pub fn pink() -> Network {
     }
 }
 
-/// `None` without a surface. A mesh carries one texcoord, the one its material reads
-/// (ALab's meshes carry both `st` and `perfuv`).
+/// `None` without a surface. A mesh carries one texcoord, the one its material reads.
 pub fn document(network: &Network) -> Result<Option<Document>, String> {
     let Some(surface) = &network.surface else {
         return Ok(None);
@@ -338,7 +341,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     visit(network, surface, &mut order)?;
     let index: BTreeMap<&str, usize> = order.iter().enumerate().map(|(i, p)| (*p, i)).collect();
 
-    // The generator's MaterialX version; it upgrades older documents on reading.
+    // The generator's MaterialX version. It upgrades older documents when reading them.
     let mut text = String::from("<?xml version=\"1.0\"?>\n<materialx version=\"1.39\">\n");
     let mut primvars = BTreeSet::new();
     for (i, path) in order.iter().enumerate() {
@@ -349,14 +352,15 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
         {
             primvars.insert(name.clone());
         }
-        // No MaterialX library here: the generator resolves `nodedef` without category or type.
+        // No MaterialX library is loaded here, and the generator resolves `nodedef` without a category
+        // or type.
         writeln!(text, "  <node name=\"n{i}\" nodedef=\"{nodedef}\">").unwrap();
         let mut inputs = BTreeMap::new();
         for (name, value) in &node.params {
             let Value::Text(value) = value else {
                 continue;
             };
-            // Hydra's `typeName:` and `colorSpace:` entries describe values left out here.
+            // Hydra's `typeName:` and `colorSpace:` entries describe values that are left out here.
             if name.contains(':')
                 || rename.dropped.contains(&name.as_str())
                 || ADDRESS_MODES.contains(&name.as_str())
@@ -370,7 +374,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
             let upstream = &network.nodes[&connection.node];
             let (_, upstream_rename) = resolve(&connection.node, upstream)?;
             let mut attributes = format!("nodename=\"n{}\"", index[connection.node.as_str()]);
-            // Only a multi-output node names its outputs; a single one is `out`.
+            // Only a node with several outputs names them. A node with one output calls it `out`.
             let output = renamed(upstream_rename.outputs, &connection.output);
             if output != "out" {
                 write!(attributes, " output=\"{output}\"").unwrap();
@@ -387,7 +391,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
          name=\"surfaceshader\" type=\"surfaceshader\" nodename=\"n0\" />\n  \
          </surfacematerial>\n</materialx>\n",
     );
-    // A surface reading two is the generate tool's to refuse, naming both.
+    // The generate tool refuses a surface that reads two, and names both.
     let texcoord = primvars
         .into_iter()
         .next()
@@ -400,7 +404,7 @@ pub fn document(network: &Network) -> Result<Option<Document>, String> {
     }))
 }
 
-/// Each node before what feeds it, inputs by name.
+/// Orders each node before what it feeds, visiting inputs by name.
 fn visit<'a>(network: &'a Network, path: &'a str, order: &mut Vec<&'a str>) -> Result<(), String> {
     if order.contains(&path) {
         return Ok(());
@@ -527,7 +531,7 @@ pub mod tests {
         document(network).map(|d| d.map(|d| d.texcoord))
     }
 
-    // Houdini 22's MaterialX 1.39.5 generates this; bake/check.sh proves it.
+    // Houdini 22's MaterialX 1.39.5 generates this, and bake/check.sh proves it.
     const FIXTURE: &str = include_str!("../bake/fixtures/network.mtlx");
 
     #[test]
@@ -595,7 +599,7 @@ pub mod tests {
             .insert("varname".into(), Value::Text("perfuv".into()));
         network.nodes.insert("uv".into(), reader);
         assert_eq!(texcoord(&network).unwrap(), Some("perfuv".to_owned()));
-        // The control: a reader nothing reads through does not count.
+        // The control: a reader that nothing reads through doesn't count.
         (network.nodes.get_mut("tex").unwrap().connections).remove("bias");
         assert_eq!(texcoord(&network).unwrap(), Some("st".to_owned()));
     }
@@ -618,7 +622,7 @@ pub mod tests {
         (tex.params).insert("uaddressmode".into(), Value::Text("constant".into()));
         (tex.params).insert("vaddressmode".into(), Value::Text("mirror".into()));
         assert!(!text(&image).contains("addressmode"));
-        // The control: a text input that is not an address mode is compiled in.
+        // The control: a text input that isn't an address mode is compiled in.
         let mut reader = fixture();
         let st = reader.nodes.get_mut("st").unwrap();
         st.params
@@ -688,7 +692,7 @@ pub mod tests {
             doc.text
         );
         assert_eq!(doc.nodes, ["/clay/surface", "/clay/bsdf"]);
-        // The grey is a value, packed as a uniform, not structure.
+        // The grey is a value packed as a uniform, not structure.
         let mut white = clay();
         let bsdf = white.nodes.get_mut("/clay/bsdf").unwrap();
         bsdf.params

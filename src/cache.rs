@@ -1,4 +1,5 @@
-//! The cache directory. Entries are keyed on all that determines them, so none goes stale.
+//! The cache directory. Entries are keyed on everything that determines them, so none can go
+//! stale.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,12 +15,14 @@ pub fn root() -> Result<PathBuf, String> {
     Ok(Path::new(&home).join(".cache/pika"))
 }
 
-/// The render thread reads texture levels from the cache as they upload, which NFS stalls.
+/// The render thread reads texture levels from the cache while they upload, and NFS would
+/// stall it.
 pub fn on_nfs(mounts: &str, path: &Path) -> bool {
     let Ok(path) = std::fs::canonicalize(path) else {
         return false;
     };
-    // The deepest mount, the last of equals: an automounter lists its trigger first.
+    // Take the deepest mount, and the last of equal ones, because an automounter lists its trigger
+    // first.
     let mut kind = "";
     let mut depth = 0;
     for line in mounts.lines() {
@@ -34,7 +37,7 @@ pub fn on_nfs(mounts: &str, path: &Path) -> bool {
     kind.starts_with("nfs")
 }
 
-/// Keys the cache, so it must not change with the Rust version as `DefaultHasher` may.
+/// Keys the cache, so it must not change with the Rust version, as `DefaultHasher` may.
 pub fn fnv1a(parts: &[&[u8]]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     for &byte in parts.iter().copied().flatten() {
@@ -44,7 +47,7 @@ pub fn fnv1a(parts: &[&[u8]]) -> u64 {
     hash
 }
 
-/// A temporary name's suffix unique across processes and threads.
+/// A suffix for temporary names that is unique across processes and threads.
 pub fn unique() -> String {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     format!(
@@ -65,7 +68,7 @@ pub fn discard(path: &Path, why: &str) -> Result<(), String> {
         std::fs::remove_file(path)
     };
     match removed {
-        // Another process discarded it meanwhile.
+        // Another process discarded it in the meantime.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         other => other.map_err(|e| format!("cannot remove {}: {e}", path.display())),
     }

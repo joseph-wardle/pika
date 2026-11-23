@@ -1,13 +1,8 @@
-//! The film: what each frame's samples become, as EEVEE's film does.
+//! The film turns each frame's samples into the image shown, as EEVEE's film does.
 //!
-//! While nothing changes, each frame draws the next still sample, its pixels' positions jittered
-//! (`jitter`) and its soft shadows' pattern turned, and shows the filtered mean of the still
-//! samples so far until `SAMPLES`, blended with the image the view stopped at so that stopping
-//! does not jump to one sample's noise. While anything changes, each frame's filtered samples are
-//! blended into the image before, reprojected by the prepass's motion and clipped to the colors
-//! around each pixel, which is what keeps moving edges from ghosting. Either way each pixel
-//! gathers its 3×3 neighbours' samples, each weighted by the filter at its distance from the
-//! pixel's centre.
+//! A still view adds one jittered sample a frame, up to `SAMPLES`, and shows their filtered
+//! mean. While anything changes, each frame is blended into the reprojected image before,
+//! clipped to the colours around each pixel so moving edges don't ghost.
 
 use ash::vk;
 
@@ -16,62 +11,57 @@ use crate::raster;
 use crate::target::Target;
 use crate::transform::Camera;
 
-/// Samples a still view converges at, as EEVEE renders take: shading is linear in each
+/// The samples a still view converges at, as in EEVEE renders. Shading is linear in each
 /// light's visibility, so the mean of 64 frames is each penumbra's mean of 64 rays.
 pub const SAMPLES: u32 = 64;
 
-/// The pixel filter's radius in pixels, EEVEE's default Filter Size. Past it a sample weighs
-/// nothing, so with jitter within half a pixel only a pixel's 3×3 neighbours reach it.
+/// The pixel filter's radius in pixels, EEVEE's default Filter Size. A sample past it weighs
+/// nothing, so with jitter inside half a pixel only a pixel's 3×3 neighbours reach it.
 pub const FILTER_RADIUS: f64 = 1.5;
 
-/// The jitter's samples while anything changes, cycled as EEVEE cycles them: history's blend
+/// The jitter positions cycled while anything changes, as EEVEE cycles them. The history blend
 /// keeps about twenty frames, so each pixel's filter sees all eight positions.
 const PLAYING_SAMPLES: u32 = 8;
 
-/// The shadow pattern's samples while anything changes, cycled as EEVEE cycles its ray-traced
-/// ones: more than history's blend keeps, so each pixel's history averages a penumbra's rays.
+/// Shadow patterns cycled while anything changes. There are more than the history blend keeps,
+/// so each pixel's history averages a penumbra's rays.
 const PLAYING_PATTERNS: u32 = 32;
 
-/// How many still samples the image the view stopped at first counts as. Stopping ALab's
-/// trailer camera chose it: at 1 the first still frame jumps nearly twice as far from the image
-/// stopped at for little less error, and at 16 the still keeps that image's error half again
-/// as long.
+/// How many still samples the image the view stopped at counts as at first.
 const PRIOR: f64 = 4.0;
 
 pub struct Film {
     accumulate: gpu::Compute,
     resolve: gpu::Compute,
-    /// Allocated by the first frame, again when the target's size or format changes.
+    /// Allocated by the first frame, and again when the target's size or format changes.
     buffers: Option<Buffers>,
     still: bool,
-    /// Still samples the sum holds; the next still frame's sample.
+    /// The still samples the sum holds, which is also the next still frame's sample.
     drawn: u32,
-    /// The weights of all the still samples the sum holds, which every pixel shares.
+    /// The total weight of the still samples in the sum, which every pixel shares.
     total: f32,
     /// Frames drawn while anything changed, which cycle the jitter.
     played: u32,
-    /// The camera, unjittered, of the frame `images[shown]` holds; none without one.
+    /// The unjittered camera of the frame in `images[shown]`, or `None` if there was no camera.
     previous_view_projection: Option<[[f32; 4]; 4]>,
-    /// The image last shown, the history the next frame drawn while anything changes reads.
+    /// The image last shown. It is the history the next moving frame reads.
     shown: usize,
-    /// The image the last frame drawn while anything changed left, which still frames blend in.
+    /// The image the last moving frame left behind, which still frames blend in.
     stopped: usize,
 }
 
 struct Buffers {
-    /// Per pixel, four floats: the weighted colors of each still sample.
+    /// Four floats per pixel: the weighted colour of every still sample, summed.
     sum: Buffer,
-    /// The color, depth AOV and motion attachments' pixels, copied out for the passes.
     frame: Buffer,
     depth: Buffer,
     motion: Buffer,
-    /// Shown images, as the color attachment's pixels: one is copied back in each frame, and
-    /// the next reads it. A still frame keeps `stopped`'s and writes the other.
+    /// The shown images, stored as the colour attachment's pixels. Each frame one is copied back
+    /// in and the next frame reads it. A still frame keeps `stopped`'s image and writes the other.
     images: [Buffer; 2],
 }
 
 impl Buffers {
-    /// What both passes share of their constants; each sets the rest.
     fn push(&self, target: &Target, read: usize, write: usize, weights: [f32; 9]) -> Push {
         Push {
             sum: self.sum.address,
@@ -93,7 +83,7 @@ impl Buffers {
     }
 }
 
-/// `shaders/film.slang`'s, for both of its passes.
+/// Must match `Push` in `shaders/film.slang`, which both of its passes use.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -114,9 +104,8 @@ struct Push {
     words: u32,
 }
 
-/// Where sample `n` falls in its pixel, in pixels from its centre along the attachment's x and
-/// y: Halton's bases 2 and 3, shifted half a pixel so that sample 0, from which a still view's
-/// depth and normal come, is the centre. Each base stratifies its axis whatever the shift.
+/// Where sample `n` falls in its pixel, from Halton bases 2 and 3. They are shifted so sample 0
+/// lands on the centre, since a still view's depth and normal come from it.
 pub fn jitter(n: u32) -> [f64; 2] {
     [2, 3].map(|base| (radical_inverse(base, n) + 0.5).fract() - 0.5)
 }
@@ -131,8 +120,8 @@ fn radical_inverse(base: u32, mut n: u32) -> f64 {
     value
 }
 
-/// The weight of a sample `d` pixels from a pixel's centre, for a filter of `radius` pixels:
-/// EEVEE's Gaussian fitted to Blackman-Harris, its standard deviation 0.284 of the radius.
+/// The weight of a sample `d` pixels from a pixel's centre. It is EEVEE's Gaussian fitted to
+/// Blackman-Harris, with a standard deviation of 0.284 times the radius.
 pub fn weight(radius: f64, d: [f64; 2]) -> f64 {
     let r = (d[0] * d[0] + d[1] * d[1]) / (radius * radius);
     if r >= 1.0 {
@@ -143,7 +132,7 @@ pub fn weight(radius: f64, d: [f64; 2]) -> f64 {
 }
 
 /// The weights a pixel gives its 3×3 neighbours' samples at `jitter`, row by row from the
-/// neighbour at (-1, -1), as `shaders/film.slang` reads them.
+/// neighbour at (-1, -1), in the order `shaders/film.slang` reads them.
 pub fn weights(jitter: [f64; 2]) -> [f32; 9] {
     std::array::from_fn(|i| {
         let offset = [(i % 3) as f64 - 1.0, (i / 3) as f64 - 1.0];
@@ -154,8 +143,8 @@ pub fn weights(jitter: [f64; 2]) -> [f32; 9] {
     })
 }
 
-/// The weight the image the view stopped at keeps against the mean of `n` still samples: it
-/// fades to none by the last, so a converged still is the same whatever came before it.
+/// The weight the image the view stopped at keeps against the mean of `n` still samples. It
+/// fades to nothing by the last sample, so a converged still is the same whatever came before.
 fn prior(n: u32) -> f64 {
     PRIOR * (1.0 - f64::from(n) / f64::from(SAMPLES)).max(0.0) / f64::from(n)
 }
@@ -177,8 +166,8 @@ impl Film {
         })
     }
 
-    /// Starts a frame, `still` if nothing changed since the last one drawn, and returns its still
-    /// sample, 0 while anything changes.
+    /// Starts a frame, which is `still` if nothing changed since the last one drawn. Returns its
+    /// still sample, or 0 while anything changes.
     pub fn begin(&mut self, still: bool) -> u32 {
         self.still = still;
         if !still {
@@ -191,12 +180,11 @@ impl Film {
         self.drawn >= SAMPLES
     }
 
-    /// The frame's jitter, as `begin` left it.
     pub fn jitter(&self) -> [f64; 2] {
         jitter(self.sample())
     }
 
-    /// The frame's index into the shadow pattern's sequence (`shaders/frame.slang`).
+    /// The frame's index into the shadow pattern sequence (see `shaders/frame.slang`).
     pub fn pattern(&self) -> u32 {
         match self.still {
             true => self.drawn,
@@ -204,7 +192,6 @@ impl Film {
         }
     }
 
-    /// The frame's index into the jitter's sequence.
     fn sample(&self) -> u32 {
         match self.still {
             true => self.drawn,
@@ -212,13 +199,13 @@ impl Film {
         }
     }
 
-    /// The camera, unjittered, of the image the frame's history reads; none without one.
+    /// The unjittered camera of the image the frame's history reads, or `None` if there was none.
     pub fn previous_view_projection(&self) -> Option<[[f32; 4]; 4]> {
         self.previous_view_projection
     }
 
-    /// Records outside rendering, after the frame's shading, drawn by `camera` (unjittered)
-    /// jittered by `jitter()`: leaves in the color attachment the image the frame shows.
+    /// Records the film after the frame's shading, outside a render pass. Afterwards the colour
+    /// attachment holds the image the frame shows.
     pub fn record(
         &mut self,
         device: &gpu::Device,
@@ -240,7 +227,6 @@ impl Film {
         Ok(())
     }
 
-    /// Makes the buffers at the target's size and format, unless they are already.
     fn allocate(&mut self, device: &gpu::Device, target: &Target) -> Result<(), String> {
         let pixels = u64::from(target.width * target.height);
         let bytes = pixels * target.color_bytes;
@@ -249,8 +235,7 @@ impl Film {
         {
             return Ok(());
         }
-        // Free the old buffers before allocating their replacements. Their history is gone
-        // with them.
+        // Free the old buffers before allocating the new ones. Their history goes with them.
         self.buffers = None;
         self.previous_view_projection = None;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -269,8 +254,8 @@ impl Film {
         Ok(())
     }
 
-    /// Adds the frame to the sum of still samples and writes their mean, blended with the image
-    /// the view stopped at by a weight that fades. Returns the image written.
+    /// Adds the frame to the sum of still samples and writes their mean, blended with the image the
+    /// view stopped at by a fading weight. Returns the image written.
     fn record_still(&mut self, cb: vk::CommandBuffer, target: &Target) -> usize {
         let buffers = self.buffers.as_ref().expect("allocated by record");
         let sample = self.drawn;
@@ -299,8 +284,8 @@ impl Film {
         write
     }
 
-    /// Blends the frame into the image shown last, moved to where each pixel was. Returns the
-    /// image written, which is also the one a still view then stops at.
+    /// Blends the frame into the image shown last, moved to where each pixel was. Returns the image
+    /// written, which is also the one a still view stops at.
     fn record_playing(&mut self, cb: vk::CommandBuffer, target: &Target) -> usize {
         let buffers = self.buffers.as_ref().expect("allocated by record");
         target.copy_out(cb, 1, buffers.depth.raw);
@@ -310,7 +295,7 @@ impl Film {
         let (read, write) = (self.shown, 1 - self.shown);
         let push = Push {
             total: weights.iter().sum(),
-            // The resolve reads it as whether there is a history at all.
+            // The resolve reads this as whether there is any history.
             prior: if self.previous_view_projection.is_some() {
                 1.0
             } else {
@@ -353,9 +338,9 @@ impl Film {
 mod tests {
     use super::*;
 
-    /// The prior fades with each still sample to none at the last, so a converged still is the
-    /// same whatever image the view stopped at; the control, a prior that does not fade, still
-    /// counts at the last.
+    /// The prior fades with each still sample and is gone by the last, so a converged still is the
+    /// same whatever image the view stopped at. The control, a prior that doesn't fade, still counts
+    /// at the last sample.
     #[test]
     fn the_prior_is_gone_by_the_last_sample() {
         let fades = |prior: &dyn Fn(u32) -> f64| {
@@ -374,8 +359,8 @@ mod tests {
         }
     }
 
-    /// The samples cover the pixel evenly: each of a 4×4 grid of its cells holds 4 ± 1. The
-    /// control, one base for both axes, lays them along the diagonal.
+    /// The samples cover the pixel evenly, with 4 ± 1 in each cell of a 4×4 grid. The control, one
+    /// base for both axes, lines them up along the diagonal.
     #[test]
     fn samples_cover_the_pixel_evenly() {
         let even = |points: &[[f64; 2]]| {
@@ -394,7 +379,7 @@ mod tests {
         assert!(!even(&diagonal));
     }
 
-    /// Weight a 5×5 gather finds past the 3×3 one, at `jitter`.
+    /// The weight a 5×5 gather finds beyond the 3×3 one, at `jitter`.
     fn past_3x3(radius: f64, jitter: [f64; 2]) -> f64 {
         let mut past = 0.0;
         for y in -2i32..=2 {
@@ -409,7 +394,7 @@ mod tests {
     }
 
     /// The 3×3 gather holds the whole filter for every sample, so its weights are all of each
-    /// frame's; the control, a filter of 2 pixels, reaches past it.
+    /// frame's weight. The control, a filter of 2 pixels, reaches past it.
     #[test]
     fn the_filter_fits_the_3x3_gather() {
         for n in 0..SAMPLES {
@@ -418,8 +403,8 @@ mod tests {
         assert!((0..SAMPLES).any(|n| past_3x3(2.0, jitter(n)) > 0.0));
     }
 
-    /// At no jitter, the gather's weights are the filter's at each neighbour's distance, the
-    /// centre's 1, symmetric, and their sum the Gaussian's closed form there.
+    /// With no jitter, the gather's weights are the filter's at each neighbour's distance. The
+    /// centre's is 1, they are symmetric, and they sum to the Gaussian's closed form there.
     #[test]
     fn centred_weights_are_the_filters() {
         let w = weights([0.0, 0.0]);
@@ -430,8 +415,8 @@ mod tests {
         assert_eq!(w[4], 1.0);
         assert_eq!([w[0], w[2], w[6]], [w[8]; 3]);
         assert_eq!([w[1], w[3], w[5]], [w[7]; 3]);
-        // Samples half a pixel right: the left neighbour's lands half a pixel from the centre,
-        // the right one's on the radius, which it does not reach.
+        // Samples half a pixel to the right. The left neighbour's sample lands half a pixel from the
+        // centre, and the right one's lands on the radius, which it doesn't reach.
         let shifted = weights([0.5, 0.0]);
         assert_eq!(shifted[4], shifted[3]);
         assert_eq!(shifted[5], 0.0);

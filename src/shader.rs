@@ -1,4 +1,4 @@
-//! Slang shaders compiled by the `slangc` on `PATH`; material surfaces are cached.
+//! Slang shaders, compiled by the `slangc` on `PATH`. Material surfaces are cached.
 
 use std::io::{Cursor, ErrorKind};
 use std::path::Path;
@@ -42,7 +42,7 @@ pub fn compile(name: &str) -> Result<Shader, String> {
 pub struct Compiled {
     pub shader: Shader,
     pub reflection: String,
-    /// slangc ran rather than the cache answering.
+    /// slangc ran, rather than the cache answering.
     pub fresh: bool,
 }
 
@@ -99,7 +99,7 @@ fn compiled(spv: &Path, json: &Path) -> Result<(Vec<u32>, String), String> {
 
 fn compile_surface(dir: &Path, key: &str, spv: &Path, json: &Path) -> Result<(), String> {
     let path = dir.join("surface.slang");
-    // Renamed into place, the SPIR-V last, so others see a whole pair or none.
+    // Renamed into place with the SPIR-V last, so others see a whole pair or nothing.
     let unique = cache::unique();
     let tmp = |name: &str| dir.join(format!("{key}.{unique}.{name}"));
     let (out, reflected) = (tmp("spv"), tmp("json"));
@@ -133,12 +133,12 @@ fn fixed(name: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("cannot read {SHADERS}/{name}: {e}"))
 }
 
-// The generator declares textures in its uniform block, which slangc warns
-// of. bake/check.sh passes the same flags.
+// The generator declares textures in its uniform block, which slangc warns about.
+// bake/check.sh passes the same flags.
 const SURFACE_FLAGS: [&str; 2] = ["-warnings-disable", "31106,31107"];
 
-/// `read_spv` checks only the magic, which an entry cut short passes, to crash the
-/// driver: the instructions must end on the last word, with OpFunctionEnd.
+/// `read_spv` checks only the magic number, which a truncated entry passes before crashing the
+/// driver. So this also checks that the instructions end on the last word with OpFunctionEnd.
 fn words(bytes: &[u8], path: &str) -> Result<Vec<u32>, String> {
     let words = ash::util::read_spv(&mut Cursor::new(bytes))
         .map_err(|e| format!("{path} is not SPIR-V: {e}"))?;
@@ -192,7 +192,7 @@ mod tests {
 
     #[test]
     fn spirv_must_be_whole() {
-        // The header, OpCapability Shader, OpFunctionEnd.
+        // The header, then OpCapability Shader, then OpFunctionEnd.
         let module = [
             0x0723_0203,
             0x0001_0000,
@@ -204,7 +204,7 @@ mod tests {
             0x0001_0038,
         ];
         assert_eq!(words(&bytes(&module), "m").unwrap(), module);
-        // Cut mid-instruction, before the last one, and after the header.
+        // Cut mid-instruction, before the last instruction, and right after the header.
         for cut in [6, 7, 5] {
             let error = words(&bytes(&module[..cut]), "m").unwrap_err();
             assert!(error.contains("cut short"), "{cut}: {error}");

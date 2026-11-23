@@ -1,19 +1,14 @@
-"""The ALab oracle: derives Hydra's representation of a sample of a stage's
-meshes from USD, and checks Pika's store against it. Trust it only while
-hydra/check.sh's fixtures pass: they prove the rules this script encodes.
+"""The ALab oracle: derives Hydra's view of a sample of a stage's meshes from USD and checks
+Pika's store against it. Trust it only while hydra/check.sh's fixtures pass.
 
     hython hydra/oracle.py <stage.usda> <frame> <out dir>
 
-Run it from a shell set up as hydra/check.sh sets one up (houdini_setup_bash,
-PXR_PLUGINPATH_NAME and the validation layer). The sample is non-instanced,
-visible, renderable meshes, spread evenly by path, half of them static and
-half animated. A layer over the stage deactivates everything else, so husk
-syncs only the sample. Native and point instance prototypes are left to the
-fixtures, because Hydra renames them.
+Run it in hydra/check.sh's environment. The sample is visible, renderable, non-instanced meshes,
+half static and half animated, and a layer deactivates the rest. Instance prototypes are left to
+the fixtures, as Hydra renames them.
 
-Two controls must fail: each mesh's store against the next mesh's
-expectation, and each animated mesh's store against its expectation at the
-next frame.
+Controls: each mesh's store against the next mesh's expectation, and each animated mesh's against
+the next frame's.
 """
 
 import os
@@ -28,8 +23,7 @@ SAMPLE = 16
 
 
 def candidates(stage, time):
-    """Meshes Hydra syncs as themselves: not instanced, visible, drawn by
-    husk's default purposes, and not replaced by a model's draw mode."""
+    """Not instanced, visible, of husk's default purposes, and not replaced by a draw mode."""
     for prim in stage.Traverse():
         if not prim.IsA(UsdGeom.Mesh):
             continue
@@ -49,7 +43,6 @@ def candidates(stage, time):
 
 
 def spread(prims, n):
-    """n prims evenly spaced through a list sorted by path."""
     prims = sorted(prims, key=lambda p: p.GetPath())
     if len(prims) <= n:
         return prims
@@ -57,7 +50,6 @@ def spread(prims, n):
 
 
 def expected(prim, time):
-    """The mesh as Pika's store dump shows it, after Hydra hands it over."""
     mesh = UsdGeom.Mesh(prim)
     purpose = UsdGeom.Imageable(prim).ComputePurpose()
     matrix = mesh.ComputeLocalToWorldTransform(time)
@@ -94,7 +86,6 @@ def expected(prim, time):
 
 
 def moves(prim, time):
-    """Whether the mesh's points or world transform differ at the next frame."""
     mesh = UsdGeom.Mesh(prim)
     after = Usd.TimeCode(time.GetValue() + 1)
     if mesh.ComputeLocalToWorldTransform(time) != mesh.ComputeLocalToWorldTransform(after):
@@ -104,8 +95,7 @@ def moves(prim, time):
 
 
 def over(stage):
-    """An anonymous layer with the stage's root layer under it, keeping the
-    root's timing and units."""
+    """Keeps the root's timing and units."""
     root = stage.GetRootLayer()
     layer = Sdf.Layer.CreateAnonymous(".usda")
     layer.subLayerPaths.append(root.realPath)
@@ -118,8 +108,6 @@ def over(stage):
 
 
 def write_sample_layer(stage, keep, path):
-    """A layer over the stage deactivating every prim that is neither kept
-    nor an ancestor of a kept prim."""
     layer = over(stage)
     ancestors = {a for p in keep for a in p.GetPrefixes()}
     for parent in sorted(ancestors | {Sdf.Path.absoluteRootPath}):
@@ -132,7 +120,6 @@ def write_sample_layer(stage, keep, path):
 
 
 def parse_dump(path):
-    """The meshes of the dump's last sync, by path, as `expected` builds them."""
     text = open(path).read()
     last = text.rsplit("\nsync ", 1)[-1] if "\nsync " in text else text
     meshes, mesh, field = {}, None, None
@@ -171,7 +158,6 @@ def parse_dump(path):
 
 
 def differences(actual, want):
-    """The fields where Pika's store and the expectation disagree."""
     def same(a, b):
         if isinstance(b, np.ndarray):
             return isinstance(a, np.ndarray) and np.array_equal(a, b)

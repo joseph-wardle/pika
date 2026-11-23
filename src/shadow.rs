@@ -1,12 +1,9 @@
-//! Virtual shadow maps (`shaders/shadow.slang`): for a distant light, a clipmap of up to
-//! `LEVELS` square levels around the camera, each `TILES`² tiles; for a sphere, rect, disk or
-//! cylinder light, a cube of faces around its centre to its reach, each face `LOCAL_LEVELS`
-//! LODs of `TILES`² tiles and coarser. Only the tiles the camera's pixels read hold a page of
-//! the one pool. A page holds the casters that are not moving, and is drawn only when it is
-//! new, its light's map changed, or a caster starts or stops moving over it; a frame that
-//! rewrites the draws draws every page. Each frame, a page a moving caster meets is copied into
-//! the pool's second half and the moving casters drawn into that live copy, which shading reads
-//! instead. "Moving" is only "moved since the last frame", so any scene sorts itself.
+//! Virtual shadow maps, drawn by `shaders/shadow.slang`.
+//!
+//! A distant light gets a clipmap around the camera and a local light a cube of faces. Only the
+//! tiles the camera's pixels read get a page from the shared pool. Pages hold only casters that
+//! aren't moving. Pages a moving caster touches get a live copy each frame with the movers drawn
+//! in, and shading reads that instead.
 
 use std::mem::offset_of;
 
@@ -21,50 +18,33 @@ use crate::target::Target;
 use crate::transform::{Camera, Instance, invert};
 use crate::view::View;
 
-/// `shaders/view.slang`'s constants, which `tests::the_shaders_mirror_the_constants` checks,
-/// as it does each constant below that names its `shaders/shadow.slang` mirror.
+/// Shared with the shaders. A test checks they match.
 const LEVELS: u32 = 16;
 const TILES: u32 = 32;
 const PAGE: u32 = 256;
-/// A local light's LODs: `TILES` across down to one.
 const LOCAL_LEVELS: u32 = 6;
-/// Faces' bounds per shadow and level (`shaders/shadow.slang` `FACES`).
 const FACES: u32 = 6;
-/// A level's or face's texels across, which each draw's viewport spans.
 const SPAN: u32 = TILES * PAGE;
-/// A pool page's bytes, as `pika:shadowPool` counts them.
 const PAGE_BYTES: u64 = PAGE as u64 * PAGE as u64 * 4;
-/// `shaders/shadow.slang`'s `Owner`.
+/// Must match `Owner` in `shaders/shadow.slang`.
 const OWNER_BYTES: u64 = 12;
-/// Draws a frame lists into pages, and as many into live copies, one per caster instance and
-/// level face it meets with pages to draw: 38 MB of lists (`shaders/shadow.slang`
-/// `CAPACITY`).
+/// Draws a frame can list into pages, and as many again into live copies.
 const CAPACITY: u32 = 1 << 19;
-/// Tile walks the moving pass lists a frame, 4 MB (`shaders/shadow.slang` `WALKS`); past
-/// them, it walks the tiles itself. A bound on the CPU would have to assume every moving
-/// instance meets every face of every shadow, which ALab's 330 movers and 49 shadows put at
-/// four times this, so every frame would be drawn anew.
+/// Past this many tile walks, the moving pass walks the tiles itself.
 const WALKS: u32 = 1 << 18;
-/// Moved entries a frame lists, as one `vkCmdUpdateBuffer` writes them; past it, every page
-/// is drawn anew.
+/// One `vkCmdUpdateBuffer` writes at most 64 KiB. Past that, every page is drawn again.
 const MOVED: u32 = 65536 / 4;
-/// The record's spans, in order: listing pages and casters, drawing pages, copying them into
-/// live copies, drawing the moving casters into those.
 const SPANS: [&str; 4] = ["shadow_list", "shadow_pages", "shadow_copy", "shadow_live"];
-/// `shaders/shadow.slang`'s moved entry flags.
 const STARTED: u32 = 0x8000_0000;
 const STOPPED: u32 = 0x4000_0000;
-/// A distant light's depth spans its casters' and this much of their span past each end, so
-/// casters moving a little keep its pages.
+/// Padding on a distant light's depth range, so casters that move a little keep their pages.
 const DEPTH_PAD: f64 = 0.25;
-/// A shadow's tiles' words, and its levels' and faces' bounds, 8 words each.
 const TILE_BYTES: u64 = (LEVELS * TILES * TILES) as u64 * 4;
 const BOUND_BYTES: u64 = (LEVELS * FACES) as u64 * 32;
-/// An instance's last box and frame.
 const LAST_BYTES: u64 = 32;
 const STATE_BYTES: u64 = size_of::<State>() as u64;
 
-/// `shaders/view.slang`'s `Shadow`.
+/// Must match `Shadow` in `shaders/view.slang`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Shadow {
@@ -83,8 +63,7 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    /// Whether a page drawn for `self` shows the same for `other`: the camera moves only which
-    /// tiles are held.
+    /// Whether a page drawn for `self` serves `other`. The camera only changes which tiles are held.
     fn draws_as(&self, other: &Self) -> bool {
         self.light_space == other.light_space
             && self.finest == other.finest
@@ -96,7 +75,7 @@ impl Shadow {
     }
 }
 
-/// `shaders/shadow.slang`'s `Constants`.
+/// Must match `Constants` in `shaders/shadow.slang`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Constants {
@@ -131,7 +110,7 @@ struct Constants {
     frame: u32,
 }
 
-/// `shaders/shadow.slang`'s `State`, field for field: what a frame counts, from 0.
+/// Must match `State` in `shaders/shadow.slang`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct State {
@@ -164,49 +143,33 @@ struct Push {
     pad: u32,
 }
 
-/// What the last frame's shadows held.
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Counts {
-    /// Pages the camera's pixels marked, before any level dropped.
+    /// Pages the camera's pixels asked for, before any level was dropped.
     pub wanted: u32,
     pub held: u32,
-    /// Pages cleared and drawn: new, their light's map changed, or a caster started or stopped
-    /// moving over them.
     pub drawn: u32,
-    /// Pages a moving caster met, copied and drawn into.
     pub live: u32,
-    /// One per caster instance and level face it meets with pages or live copies to draw.
     pub draws: u32,
     pub triangles: u32,
 }
 
 struct Pool {
     pages: u32,
-    /// The pages, then as many live copies.
     texels: Buffer,
-    /// Per page: the shadow holding it, or free, and its tile's place.
     owners: Buffer,
-    /// The free pages, the pages drawn, and each live copy's page, listed each frame.
     free: Buffer,
     drawn: Buffer,
     copies: Buffer,
 }
 
-/// What `fit` sizes for the frame's shadows, the camera's pixels and the instances.
 struct Maps {
-    /// Per shadow, its `Shadow`, which the camera's view reads.
     table: Buffer,
-    /// Per shadow, its tiles' pages, kept from frame to frame, and their pages this frame,
-    /// which shading reads, and flags.
     pages: Buffer,
     tiles: Buffer,
     flags: Buffer,
-    /// Per shadow, level and face, the bounds of the pages drawn this frame and of the live
-    /// copies.
     bounds: Buffer,
-    /// The camera's depth, copied out.
     depth: Buffer,
-    /// Per instance, its box when it last moved.
     last: Buffer,
 }
 
@@ -237,8 +200,7 @@ impl Maps {
     }
 }
 
-/// A shadow as last recorded, by its light's id; a distant light's with its axes and the depth
-/// its z spans.
+/// A shadow as last recorded, keyed by its light's id.
 #[derive(Clone, Copy)]
 struct Held {
     id: u64,
@@ -248,7 +210,7 @@ struct Held {
 }
 
 pub struct Shadows {
-    // A copy of the owner's device table, which outlives this (field order).
+    // A copy of the owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -271,19 +233,16 @@ pub struct Shadows {
     maps: Option<Maps>,
     moved: Buffer,
     walks: Buffer,
-    /// The instances moving in the last recorded frame, which its pages do not hold.
+    /// The instances that were moving in the last recorded frame, which its pages leave out.
     movers: Vec<u32>,
     indirect: Buffer,
     draws: Buffer,
-    /// The frame's `State`, and its host copy.
     state: Buffer,
     counts: Buffer,
-    /// This frame's shadows as `fit` made them, and as the last recorded frame drew them.
     fitted: Vec<Held>,
     held: Vec<Held>,
-    /// The distant shadows' coarsest level, fitted and drawn.
     coarsest: [Option<i32>; 2],
-    /// Every tile lets its page go before the next record: the pool or maps are new.
+    /// The pool or the maps are new, so every tile must let go of its page before the next record.
     clean: bool,
     frame: u32,
     unproject: [[f32; 4]; 4],
@@ -366,11 +325,11 @@ impl Shadows {
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .size(size_of::<Push>() as u32)];
         let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `d` is live and `layout_info` outlives the call.
+        // SAFETY: the device is alive and `layout_info` outlives the call.
         s.layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
-        // SAFETY: `d` is live and `module_info` outlives the call.
+        // SAFETY: the device is alive and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
         let depth = vk::PipelineDepthStencilStateCreateInfo::default();
@@ -383,15 +342,14 @@ impl Shadows {
             vk::Format::UNDEFINED,
             depth,
         );
-        // SAFETY: pipeline creation is complete, so the module is no longer used.
+        // SAFETY: the pipeline is built, so nothing uses the shader module any more.
         unsafe { d.destroy_shader_module(module, None) };
         s.pipeline = built?;
         Ok(s)
     }
 
-    /// Holds a pool of `megabytes` (`pika:shadowPool`) in quarter-megabyte pages, and room for
-    /// as many live copies, so every held page can have one. Call before
-    /// textures fit the memory budget, so they fit beside it.
+    /// Allocates a pool of `megabytes` plus as many live copies. Call it before the textures are
+    /// fitted to the memory budget.
     pub fn reserve(&mut self, device: &gpu::Device, megabytes: u32) -> Result<(), String> {
         let pages = megabytes.saturating_mul(4);
         if self.pool.as_ref().is_some_and(|p| p.pages == pages) {
@@ -400,14 +358,14 @@ impl Shadows {
         if pages == 0 {
             return Err("pika:shadowPool is 0 MB; shadows need at least one 0.25 MB page".into());
         }
-        // The shaders index the pool and its live copies' texels in 32 bits.
+        // The shaders index the pool and its live copies with 32-bit texel offsets.
         if u64::from(pages) * 2 * u64::from(PAGE * PAGE) > 1 << 32 {
             return Err(format!(
                 "pika:shadowPool is {megabytes} MB, but Pika addresses at most {} MB",
                 (1u64 << 32) / (2 * u64::from(PAGE * PAGE)) / 4
             ));
         }
-        // Free the old pool before allocating its replacement.
+        // Free the old pool before allocating the new one.
         self.pool = None;
         self.clean = true;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
@@ -415,7 +373,6 @@ impl Shadows {
         let list = |device| Buffer::device_local(device, pages as u64 * 4, storage);
         self.pool = Some(Pool {
             pages,
-            // Twice pika:shadowPool: the second half holds the live copies.
             texels: Buffer::device_local(device, 2 * pages as u64 * PAGE_BYTES, storage)?,
             owners: Buffer::device_local(device, pages as u64 * OWNER_BYTES, filled)?,
             free: list(device)?,
@@ -425,9 +382,7 @@ impl Shadows {
         Ok(())
     }
 
-    /// Fits each distant caster's clipmap to the camera and the scene and each local one's
-    /// cube to its light, and points its light at it; the lights are then ready for the
-    /// camera's view, whose shadows are at `table`.
+    /// Fits each distant light's clipmap to the camera and each local light's cube to the light.
     #[allow(clippy::too_many_arguments)]
     pub fn fit(
         &mut self,
@@ -443,7 +398,6 @@ impl Shadows {
         let pool = (self.pool.as_ref()).ok_or("shadows fit before their pool was reserved")?;
         let unproject = invert(&camera.view_projection.map(|r| r.map(f64::from)))
             .ok_or("the camera's view-projection matrix is singular")?;
-        // The clipmaps centre on the eye, or on an orthographic camera's middle.
         let centre = match camera.eye {
             [x, y, z, 1.0] => [x, y, z].map(f64::from),
             _ => {
@@ -451,8 +405,8 @@ impl Shadows {
                 [h[0] / h[3], h[1] / h[3], h[2] / h[3]]
             }
         };
-        // Hydra's projection is row-vector OpenGL: clip w is the view depth of a perspective
-        // camera and 1 for an orthographic one, and [5] scales view y to clip y.
+        // Hydra's projection matrix is OpenGL's, for row vectors. Clip w is the view depth for a
+        // perspective camera and 1 for an orthographic one, and element [5] scales view y to clip y.
         let pixel = 2.0 / (extent[1] as f64 * projection[5].abs());
         let near = match projection[15] {
             0.0 => projection[14] / (projection[10] - 1.0),
@@ -470,7 +424,7 @@ impl Shadows {
             let Some((axes, depth, reach)) = light_space(toward, centre, instances, c.link) else {
                 continue;
             };
-            // A level's tiles reach 15 of its 32 from its centre, which snaps to a tile.
+            // A level's tiles reach 15 of its 32 tiles from its centre, which snaps to a tile.
             let level = (reach * TILES as f64 / 15.0)
                 .max(f64::MIN_POSITIVE)
                 .log2()
@@ -479,7 +433,7 @@ impl Shadows {
             let depth = depth_span(held(c.id).map(|h| (h.axes, h.depth)), axes, depth);
             fitted.push((c, axes, depth));
         }
-        // Every distant shadow has the same levels, which keeps a level's pages at one size.
+        // Every distant shadow gets the same levels, which keeps a level's pages the same size.
         let [coarsest, finest] = clip_levels(self.coarsest[1], need, near, pixel);
         self.coarsest[0] = (!fitted.is_empty()).then_some(coarsest);
         let levels = coarsest.saturating_sub(finest) as u32 + 1;
@@ -487,13 +441,12 @@ impl Shadows {
         let pixels = u64::from(extent[0]) * u64::from(extent[1]);
         let instances = u64::from(addresses.instance_count).max(1);
         if !(self.maps.as_ref()).is_some_and(|m| m.holds(count, pixels, instances)) {
-            // Free the old maps before allocating their replacement.
+            // Free the old maps before allocating the new ones.
             self.maps = None;
             self.maps = Some(Maps::new(device, count, pixels, instances)?);
             self.clean = true;
         }
         let tiles = self.maps.as_ref().map_or(0, |m| m.tiles.address);
-        // A local light's, which a distant one's levels then replace.
         let shadow = |j: usize, rows: [[f64; 4]; 3], c: &Caster| Shadow {
             light_space: rows.map(|r| r.map(|v| v as f32)),
             origin: [[0; 2]; LEVELS as usize],
@@ -562,16 +515,13 @@ impl Shadows {
         Ok(())
     }
 
-    /// The camera's view reads each light's `Shadow` here.
     pub fn table(&self) -> vk::DeviceAddress {
         self.maps.as_ref().map_or(0, |m| m.table.address)
     }
 
-    /// Records outside rendering, after `fit` and after the prepass drew `target`'s depth for
-    /// `camera`, before the passes that read the shadows; no GPU work may be pending. `moved`
-    /// lists, ascending, the instances whose transform or points moved since the last frame,
-    /// `None` when the draws were rewritten, and every page is drawn anew. Times each of
-    /// `SPANS`, as `skip` does when there is nothing to draw.
+    /// Records the shadow passes, after `fit` and the depth prepass. No GPU work may be pending.
+    /// `moved` lists the instances that moved since the last frame, ascending, or is `None` when the
+    /// draws were rewritten, which redraws every page.
     pub fn record(
         &mut self,
         commands: &mut Commands,
@@ -589,20 +539,20 @@ impl Shadows {
         }
         self.recorded = true;
         let cb = commands.buffer();
-        // 0 marks an instance not moving since a fresh frame.
+        // 0 marks an instance that hasn't moved since a fresh frame.
         self.frame = self.frame.wrapping_add(1).max(1);
-        // Tiles are by shadow, so pages keep only while the same lights cast in the same order.
+        // Tiles are stored per shadow, so pages are kept only while the same lights cast in the same
+        // order.
         let ids = |h: &[Held]| h.iter().map(|h| h.id).collect::<Vec<_>>();
         let clean = self.clean || ids(&self.fitted) != ids(&self.held);
         let faces = (self.fitted.iter())
             .map(|h| h.shadow.levels * h.shadow.faces.max(1))
             .sum();
-        // Instances are added only by rewriting the draws, which comes with `moved` `None`.
+        // Instances are only added by rewriting the draws, which always comes with `moved` as `None`.
         let listed = moved
             .filter(|_| !clean)
             .map(|m| (m, moved_entries(m, &self.movers)))
             .filter(|(_, e)| e.len() <= MOVED as usize);
-        // A fresh frame draws every caster into every page.
         let fresh = listed.is_none();
         let (moving, moved) = listed.unwrap_or((&[], Vec::new()));
         self.movers = moving.to_vec();
@@ -651,9 +601,8 @@ impl Shadows {
         let (table, moved_bytes) = (gpu::bytes(&shadows), gpu::bytes(moved));
         let tile_bytes = shadows.len() as u64 * TILE_BYTES;
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering; `fit` and this sized each buffer for
-        // these shadows and instances, and `moved` holds at most `MOVED` of them. The barrier
-        // after the depth's copy below orders these writes before the compute passes.
+        // SAFETY: recording outside a render pass. `fit` and this function sized every buffer for these
+        // shadows and instances, and `moved` holds at most `MOVED`.
         unsafe {
             d.cmd_update_buffer(cb, self.constants.raw, 0, constants);
             d.cmd_update_buffer(cb, maps.table.raw, 0, table);
@@ -701,7 +650,6 @@ impl Shadows {
         let pool_pages = 0..pool.pages;
         let texels = 0..pool.pages * PAGE * PAGE;
         let casting = 0..geometry.instance_count * LEVELS * shadows.len() as u32;
-        // A group per tile walk listed.
         let walks = 0..walk_bound(moved, faces).min(WALKS.into()) as u32 * 64;
         let entries_moved = 0..moved.len() as u32 * LEVELS * shadows.len() as u32;
         let remembered = 0..if fresh {
@@ -719,7 +667,7 @@ impl Shadows {
         self.release
             .record(cb, std::slice::from_ref(&entries), push);
         barrier(d, cb, computed);
-        // A single item is one group, which rank needs whole.
+        // A single item is one group, and `rank` needs whole groups.
         self.rank.record(cb, &[thread], push);
         barrier(d, cb, computed);
         self.gather.record(cb, &[pool_pages], push);
@@ -731,12 +679,12 @@ impl Shadows {
         barrier(d, cb, computed);
         self.walk.record(cb, &[walks], push);
         barrier(d, cb, computed);
-        // After `moving`, which reads the boxes it replaces, and before the casts, which read
-        // the frame it stamps; it reads the moved entries' first `moving.len()`, the instances
-        // moving now (`moved_entries`).
+        // After `moving`, which reads the boxes this replaces, and before the casts, which read the frame
+        // it stamps.
         self.remember.record(cb, &[remembered], push);
         barrier(d, cb, computed);
-        // These three write apart, the casts by atomic counts: no barrier between them.
+        // These three write to separate memory, and the casts count with atomics, so they need no
+        // barrier between them.
         self.clear.record(cb, std::slice::from_ref(&texels), push);
         self.cast.record(cb, &[casting], push);
         self.cast_moving.record(cb, &[entries_moved], push);
@@ -761,7 +709,7 @@ impl Shadows {
             dst_offset: 0,
             size: STATE_BYTES,
         };
-        // SAFETY: `cb` is recording outside rendering and both buffers hold the state.
+        // SAFETY: recording outside a render pass, and both buffers hold a `State`.
         unsafe { d.cmd_copy_buffer(cb, self.state.raw, self.counts.raw, &[region]) };
         let to_host = vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
@@ -770,7 +718,6 @@ impl Shadows {
             .dst_access_mask(vk::AccessFlags2::HOST_READ);
         barrier(d, cb, to_host);
         commands.mark(SPANS[0])?;
-        // The pages, then their live copies from them and the moving casters.
         self.draw(cb, geometry, 0, offset_of!(State, page_draws));
         commands.mark(SPANS[1])?;
         let pages_drawn = vk::MemoryBarrier2::default()
@@ -800,14 +747,13 @@ impl Shadows {
         Ok(())
     }
 
-    /// Times `record`'s spans at zero, so every frame has the same ones.
+    /// Records `record`'s spans with nothing in them, so every frame reports the same spans.
     pub fn skip(commands: &mut Commands) -> Result<(), String> {
         SPANS.iter().try_for_each(|m| commands.mark(m))
     }
 
-    /// Draws the casters listed from draw `first`, as many as the state's word at byte
-    /// `counted`, with no attachments, each into a level or face: the fragments find their
-    /// pages and write the pool themselves.
+    /// Draws the listed casters from draw `first` on, as many as the state word at `counted` says.
+    /// There are no attachments. The fragment shader writes the pool itself.
     fn draw(&self, cb: vk::CommandBuffer, geometry: &Addresses, first: u32, counted: usize) {
         let area = vk::Rect2D {
             offset: vk::Offset2D::default(),
@@ -837,10 +783,8 @@ impl Shadows {
         let push = gpu::bytes(std::slice::from_ref(&push));
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, and the pipeline was built for
-        // rendering with no attachments, which `new` checked the device draws `SPAN` across.
-        // `Constants` addresses live buffers, and each list holds `CAPACITY` draws counted by its
-        // state word.
+        // SAFETY: recording outside a render pass, and `new` checked the device can draw `SPAN` texels
+        // across with no attachments. Each list holds `CAPACITY` draws.
         unsafe {
             d.cmd_begin_rendering(cb, &rendering);
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
@@ -862,13 +806,12 @@ impl Shadows {
         }
     }
 
-    /// The last frame's counts, warning once when its pages or draws ran out. Its GPU work
-    /// must be done.
+    /// The last frame's counts, once its GPU work is done. Warns once if pages or draws ran out.
     pub fn counts(&mut self) -> Counts {
         if !self.recorded {
             return Counts::default();
         }
-        // SAFETY: `counts` holds a `State`, plain `u32`s, which any bytes are.
+        // SAFETY: `counts` holds a `State`, which is plain `u32`s, so any bytes are valid.
         let s = unsafe {
             self.counts
                 .bytes()
@@ -894,7 +837,7 @@ impl Shadows {
             let consequence = if after > pages {
                 "some go unshadowed".to_owned()
             } else {
-                // The coarsest level cannot drop.
+                // The coarsest level is never dropped.
                 let n = levels.saturating_sub(1).saturating_sub(dropped);
                 format!("the farthest {n} of their {levels} levels drop a LOD")
             };
@@ -950,8 +893,8 @@ impl Shadows {
 
 impl Drop for Shadows {
     fn drop(&mut self) {
-        // SAFETY: both handles were created on `device` or are null, and the owner's target
-        // waited for idle before this drops (field order).
+        // SAFETY: both handles were created on this device or are null, and the owner's target waited
+        // for the device to go idle before this drops, by field order.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -960,13 +903,12 @@ impl Drop for Shadows {
 }
 
 fn barrier(d: &ash::Device, cb: vk::CommandBuffer, b: vk::MemoryBarrier2) {
-    // SAFETY: `cb` is recording outside rendering.
+    // SAFETY: the command buffer is recording outside a render pass.
     unsafe { d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&[b])) };
 }
 
-/// The moved entries for the instances `now` moving and `before` moving the last frame, both
-/// ascending: each moving now, `STARTED` if it was not before, then each moving before and not
-/// now, `STOPPED`.
+/// Lists instances moving `now`, marked `STARTED` if they weren't moving `before`, then those
+/// that stopped, marked `STOPPED`. Both inputs are ascending.
 fn moved_entries(now: &[u32], before: &[u32]) -> Vec<u32> {
     let started = now.iter().map(|&i| match before.binary_search(&i) {
         Ok(_) => i,
@@ -978,9 +920,8 @@ fn moved_entries(now: &[u32], before: &[u32]) -> Vec<u32> {
     started.chain(stopped).collect()
 }
 
-/// The depth a distant light's z spans for casters spanning `depth` along `axes`: the `held`
-/// span while it has the same axes and still holds them, so their pages keep, or else theirs
-/// padded by `DEPTH_PAD`.
+/// The depth range a distant light's z covers. It is kept while the axes stay and the casters
+/// fit in `held`, so their pages are kept too.
 fn depth_span(
     held: Option<([[f64; 3]; 3], [f64; 2])>,
     axes: [[f64; 3]; 3],
@@ -995,10 +936,8 @@ fn depth_span(
     }
 }
 
-/// The distant clipmaps' coarsest and finest levels, as log2 of their width: the coarsest
-/// the `held` one while it holds every mesh (`need`) and is at most one coarser, so pages
-/// keep as the camera moves; the finest the one whose texels span a pixel at `near`, at
-/// most `LEVELS` in all.
+/// The distant clipmaps' coarsest and finest levels, as log2 of their width. The coarsest holds
+/// back by one level so pages survive camera moves. The finest spans one pixel at `near`.
 fn clip_levels(held: Option<i32>, need: i32, near: f64, pixel: f64) -> [i32; 2] {
     let coarsest = match held {
         Some(c) if c >= need && c <= need.saturating_add(1) => c,
@@ -1009,9 +948,7 @@ fn clip_levels(held: Option<i32>, need: i32, near: f64, pixel: f64) -> [i32; 2] 
     [coarsest, finest]
 }
 
-/// The tile walks the moving pass may list for `moved` entries, which bounds the walk pass's
-/// groups: per entry and each of the shadows' `faces` (levels times faces), one for the tiles
-/// its box covers, and one more for those it covered when it starts.
+/// The most tile walks `moved` can list: one per shadow face for each entry, and two for a start.
 fn walk_bound(moved: &[u32], faces: u32) -> u64 {
     let walks: u64 = (moved.iter())
         .map(|e| 1 + u64::from(e & STARTED != 0))
@@ -1019,9 +956,8 @@ fn walk_bound(moved: &[u32], faces: u32) -> u64 {
     walks * u64::from(faces)
 }
 
-/// A distant light's axes: x and y across it, z away from it. With them, the depth along z of
-/// the casters carrying `shadow`, and how far across the light from `centre` any mesh reaches,
-/// which the coarsest level must hold; `None` when nothing casts.
+/// A distant light's axes, with z pointing away from it, the casters' depth along z, and how far
+/// any mesh reaches from `centre`. `None` when nothing casts.
 fn light_space<'a>(
     toward: [f64; 3],
     centre: [f64; 3],
@@ -1059,8 +995,8 @@ fn light_space<'a>(
     Some((axes, depth, reach))
 }
 
-/// World-to-light rows for a local light: its frame about its centre, z out of a rect or
-/// disk light's lit side, whose cube then needs no -z face.
+/// World-to-light rows for a local light: its frame about its centre. For a rect or disk light,
+/// z points out of the lit side, so its cube needs no -z face.
 fn local_space(l: &Light) -> [[f64; 4]; 3] {
     let c = l.position.map(f64::from);
     let axes = if l.shape == light::RECT || l.shape == light::DISK {
@@ -1099,8 +1035,8 @@ fn normalize(a: [f64; 3]) -> [f64; 3] {
 mod tests {
     use super::*;
 
-    /// Pages hold the casters not moving, so an instance's start and stop must each be listed
-    /// once, and one moving both frames neither.
+    /// Pages hold only the casters that aren't moving, so an instance's start and stop must each be
+    /// listed once, and one moving in both frames must be listed as neither.
     #[test]
     fn moved_entries_mark_starts_and_stops() {
         let before = [2, 5, 9];
@@ -1109,15 +1045,14 @@ mod tests {
             moved_entries(&now, &before),
             [1 | STARTED, 5, 7 | STARTED, 2 | STOPPED, 9 | STOPPED]
         );
-        // Moving on: nothing starts or stops.
         assert_eq!(moved_entries(&now, &now), now);
-        // A fresh frame's pages hold every caster, so all that move after it start.
+        // A fresh frame's pages hold every caster, so everything that moves after it starts.
         assert_eq!(moved_entries(&[3], &[]), [3 | STARTED]);
-        // Negative control: lists swapped, the starts become stops.
+        // Negative control: with the lists swapped, the starts become stops.
         assert_ne!(moved_entries(&before, &now), moved_entries(&now, &before));
     }
 
-    /// `value` in a shader's `static const uint name = value;`: a number or `a << b`.
+    /// Reads a shader's `static const uint name = value;`, where value is a number or `a << b`.
     fn slang_const(source: &str, name: &str) -> Option<u32> {
         let number = |v: &str| {
             let v = v.trim();
@@ -1139,8 +1074,8 @@ mod tests {
         })
     }
 
-    /// The shaders hold their own copies of these, and one out of step reads and writes the
-    /// wrong memory without an error.
+    /// The shaders keep their own copies of these. One out of step reads and writes the wrong
+    /// memory without any error.
     #[test]
     fn the_shaders_mirror_the_constants() {
         let view = include_str!("../shaders/view.slang");
@@ -1158,36 +1093,34 @@ mod tests {
         for (source, name, value) in mirrored {
             assert_eq!(slang_const(source, name), Some(value), "{name}");
         }
-        // Negative controls: a constant out of step, and one the shaders do not hold.
+        // Negative controls: a constant out of step, and one the shaders don't define.
         let stepped = "static const uint TILES = 1 << 4;";
         assert_ne!(slang_const(stepped, "TILES"), Some(TILES));
         assert_eq!(slang_const(view, "MOVED"), None);
     }
 
-    /// The walk pass's groups are sized by this bound, so it must count a start's two walks.
+    /// The walk pass's groups are sized by this bound, so it must count both walks of a start.
     #[test]
     fn walk_bound_counts_a_starts_two_walks() {
-        // A sun of 16 levels and a sphere light of 6 LODs, 6 faces each.
         let faces = 16 + 6 * 6;
         assert_eq!(walk_bound(&[], faces), 0);
         assert_eq!(walk_bound(&[4, 7 | STARTED, 9 | STOPPED], faces), 4 * 52);
-        // Negative control: a stop walks once, as a moving one does.
+        // Negative control: a stop walks once, as a moving instance does.
         assert_ne!(
             walk_bound(&[9 | STOPPED], faces),
             walk_bound(&[9 | STARTED], faces)
         );
     }
 
-    /// A distant light's pages keep only while its depth span does, so a span must stay while
-    /// the casters fit in it and change when they leave it.
+    /// A distant light's depth range must stay while the casters fit and change when they leave.
     #[test]
     fn a_held_depth_span_keeps_while_it_holds_the_casters() {
         let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
         let fresh = depth_span(None, axes, [2.0, 6.0]);
         assert_eq!(fresh, [1.0, 7.0]);
-        // Casters moving a little inside the padding keep it.
+        // Casters moving a little within the padding keep it.
         assert_eq!(depth_span(Some((axes, fresh)), axes, [1.5, 6.5]), fresh);
-        // Negative controls: past its end, or with the light turned, a new span.
+        // Negative controls: moving past its end, or turning the light, gives a new range.
         assert_eq!(
             depth_span(Some((axes, fresh)), axes, [2.0, 8.0]),
             [0.5, 9.5]
@@ -1199,29 +1132,29 @@ mod tests {
         );
     }
 
-    /// The coarsest level holds back one level so a camera moving across a level's edge does
-    /// not redraw every page, and the levels run down to a pixel at the near plane.
+    /// The coarsest level holds back by one, so a camera crossing a level's edge doesn't redraw
+    /// every page, and the levels run down to one pixel at the near plane.
     #[test]
     fn clip_levels_hold_the_coarsest_and_reach_a_pixel() {
-        // A texel of the finest level spans a pixel at the near plane: 2^-7 / SPAN.
+        // A texel of the finest level spans one pixel at the near plane, 2^-7 / SPAN.
         let pixel = (-7.0f64).exp2() / f64::from(SPAN);
         assert_eq!(clip_levels(None, 3, 1.0, pixel), [3, -7]);
         assert_eq!(clip_levels(Some(4), 3, 1.0, pixel), [4, -7]);
-        // Negative controls: two coarser, or too fine for every mesh, is not held.
+        // Negative controls: two levels coarser, or too fine to hold every mesh, is not kept.
         assert_eq!(clip_levels(Some(5), 3, 1.0, pixel), [3, -7]);
         assert_eq!(clip_levels(Some(2), 3, 1.0, pixel), [3, -7]);
-        // At most LEVELS levels, and never finer than the coarsest.
+        // At most `LEVELS` levels, and never finer than the coarsest.
         let [c, f] = clip_levels(None, 3, 1e-9, pixel);
         assert_eq!(c - f + 1, LEVELS as i32);
         assert_eq!(clip_levels(None, 3, 1e9, pixel), [3, 3]);
     }
 
-    /// A rect light's cube needs no -z face only if z points out of its lit side.
+    /// A rect light's cube can skip its -z face only if z points out of the lit side.
     #[test]
     fn a_rect_lights_frame_faces_its_lit_side() {
         let mut l = Light::sphere([1.0, 2.0, 3.0], 0.0, [1.0; 3]);
         l.shape = light::RECT;
-        // Lit on the u × v side: -y.
+        // Lit on the u × v side, which is -y here.
         l.u = [1.0, 0.0, 0.0];
         l.v = [0.0, 0.0, 0.5];
         let rows = local_space(&l);
@@ -1231,7 +1164,6 @@ mod tests {
         assert!(below[2] > 0.9, "{below:?}");
         // Negative control: the unlit side is behind the frame.
         assert!(to([1.0, 3.0, 3.0])[2] < 0.0);
-        // The frame is orthonormal.
         for (i, a) in rows.iter().enumerate() {
             for (j, b) in rows.iter().enumerate() {
                 let d: f64 = (0..3).map(|k| a[k] * b[k]).sum();

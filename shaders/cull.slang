@@ -18,8 +18,8 @@ float4 clip(float4 *m, float3 p)
     return project(push.view, world);
 }
 
-// False only when all 8 corners are outside one clip plane; this stays right for
-// boxes crossing the eye plane (w < 0), unlike testing the centre.
+// False only when all 8 corners are outside one clip plane, which stays right for boxes crossing
+// the eye plane (w < 0), unlike testing the centre.
 bool seen(float4 *m, float3 lo, float3 hi)
 {
     uint inside = 0;

@@ -1,8 +1,7 @@
 // Modified from MaterialX 1.39.5's libraries/stdlib/genslang/lib/mx_texture.slang
 // (Academy Software Foundation, Apache License 2.0: bake/libraries/NOTICE).
 //
-// Samples a 2D array (one layer per UDIM tile) under the library's own names, so its
-// image nodes need no change.
+// Samples a 2D array, a layer per UDIM tile, under the library's names.
 struct SamplerTexture2D
 {
     Texture2DArray tex;
@@ -60,7 +59,6 @@ float4 textureLod(SamplerTexture2D tex, float2 uv, float lod)
     return tex.missing(at) ? float4(0.0) : texel;
 }
 
-// The mip level comes from the uv's gradients, continuous across tiles.
 float4 texture(SamplerTexture2D tex, float2 uv)
 {
     return textureGrad(tex, uv, ddx(uv), ddy(uv));

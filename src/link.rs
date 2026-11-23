@@ -1,7 +1,6 @@
-//! Light and shadow linking: each distinct lightLink collection gets one bit of a
-//! mask, and the light loop skips a light whose bit the mesh lacks; shadowLink
-//! collections get bits of a second mask, and a light's shadows skip the meshes
-//! lacking its bit.
+//! Light and shadow linking. Each distinct lightLink collection gets one bit of a mask, and the
+//! light loop skips a light whose bit the mesh lacks. shadowLink collections get bits of a
+//! second mask, and a light's shadows skip the meshes that lack its bit.
 
 use std::collections::BTreeMap;
 use std::ops::BitOr;
@@ -11,14 +10,15 @@ use crate::store::{Light, Mesh, Store};
 
 const BITS: usize = 32;
 
-/// A light's bits, one or none per mask, or a mesh's: the collections it is in.
+/// A light's bits, with one bit or none per mask, or a mesh's bits for the collections it is
+/// in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Mask {
     pub light: u32,
     pub shadow: u32,
 }
 
-/// An instance is in its prototype's collections and in those of each instance holding it.
+/// An instance is in its prototype's collections and in those of each instance that holds it.
 impl BitOr for Mask {
     type Output = Self;
 
@@ -46,7 +46,7 @@ impl Links {
         }
     }
 
-    /// Each bit 0 when the light reaches every mesh.
+    /// Each bit is 0 when the light reaches every mesh.
     pub fn light(&self, light: &Light) -> Mask {
         let bit = |bits: &BTreeMap<String, u32>, token: &str| bits.get(token).copied().unwrap_or(0);
         let link = light.link.as_ref();
@@ -60,7 +60,7 @@ impl Links {
         self.categories(mesh.categories.as_deref().unwrap_or_default())
     }
 
-    /// The collections of Hydra's category tokens, a mesh's or an instance's.
+    /// The collections named by Hydra's category tokens, for a mesh or an instance.
     pub fn categories(&self, categories: &[String]) -> Mask {
         let mask = |bits: &BTreeMap<String, u32>| {
             (categories.iter())
@@ -74,8 +74,8 @@ impl Links {
     }
 }
 
-/// Bits in token order, so they do not hang on the order lights were added in.
-/// Past `BITS` collections, a light reaches every mesh.
+/// Assigns bits in token order, so they don't depend on the order lights were added in. Past
+/// `BITS` collections, a light reaches every mesh.
 fn bits<'a>(
     tokens: impl Iterator<Item = &'a str>,
     kind: &str,
@@ -97,8 +97,8 @@ fn bits<'a>(
         .collect()
 }
 
-/// Whether a light (or its shadow) with link bits `light` reaches a mesh with bits `mesh`, as
-/// `shaders/view.slang` and `shaders/shadow.slang` decide it too.
+/// Whether a light (or its shadow) with link bits `light` reaches a mesh with bits `mesh`. The
+/// shaders `view.slang` and `shadow.slang` decide it the same way.
 pub fn reaches(light: u32, mesh: u32) -> bool {
     light & mesh == light
 }
@@ -165,7 +165,7 @@ mod tests {
             lit(&store, &lights, &meshes),
             [[false, true], [false, true]]
         );
-        // A mesh not yet synced is in no collection.
+        // A mesh that isn't synced yet is in no collection.
         let mut store = store;
         let unsynced = store.insert_mesh("/unsynced".into());
         assert_eq!(
@@ -193,8 +193,8 @@ mod tests {
         assert!(lit[BITS]);
     }
 
-    /// A light's shadow link picks its casters apart from what it lights: the sun lights
-    /// both meshes, but only the one in its shadowLink collection casts.
+    /// A light's shadow link picks its casters separately from what it lights. The sun lights both
+    /// meshes, but only the one in its shadowLink collection casts.
     #[test]
     fn shadow_links_pick_casters_apart_from_light_links() {
         let link = |light: &str, shadow: &str| Link {

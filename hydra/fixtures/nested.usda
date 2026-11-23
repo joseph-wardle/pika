@@ -5,8 +5,7 @@
     upAxis = "Y"
 )
 
-# A point instancer whose prototype is a native instance, as ALab's bonsai is
-# built: the native instancer is nested in the point instancer.
+# A point instancer whose prototype is a native instance, as ALab's bonsai is built.
 def Xform "world"
 {
     def Camera "camera" {}
