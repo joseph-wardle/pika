@@ -46,6 +46,12 @@ mixed.<UDIM>.exr
             ((x + 0.5) / 4, (y + 0.5) / 4), which a bake enlarges to the
             set's 8×8 bilinearly, so its texels hold the ramp at their own
             centres, the outer half texel clamped.
+sky.exr     64×32, three float channels, a latlong sky smooth in direction:
+            the texel toward d holds 0.5 + 0.4 d, so no two directions match
+            and a turned or flipped sky shows (hydra/images/skylit.usda).
+spot.exr    64×32, three float channels, a latlong sky of grey 0.3 with one
+            texel of SPOT, 59° up and 20° round from +z toward +x: a sun for a
+            dome light to lift (hydra/images/sunlit.usda).
 """
 
 import os
@@ -59,6 +65,7 @@ SWATCH = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)]
 # weights miss hydra/image.py's tolerance at larger steps.
 GREYS = [17 * i for i in range(16)]
 WRAPPED = [51, 102, 153, 204]
+SPOT = 400.0
 COLORS = [(240, 60, 60), (220, 100, 60), (200, 140, 60), (180, 180, 60),
           (140, 200, 80), (100, 200, 120), (60, 200, 160), (60, 180, 200)]
 # Linear Rec.709 to ACEScg: the inverse of hydra/image.py's ACESCG_TO_REC709.
@@ -188,6 +195,27 @@ def normal():
     out.close()
 
 
+def write_sky(name, pixels):
+    out = oiio.ImageOutput.create(name)
+    out.open(os.path.join(HERE, name), oiio.ImageSpec(64, 32, 3, oiio.FLOAT))
+    out.write_image(np.ascontiguousarray(pixels.astype(np.float32)))
+    out.close()
+
+
+def sky():
+    # shaders/view.slang's from_latlong.
+    y, x = np.mgrid[:32, :64]
+    longitude, latitude = (0.5 - (x + 0.5) / 64) * 2 * np.pi, (0.5 - (y + 0.5) / 32) * np.pi
+    d = np.stack([np.cos(latitude) * np.sin(longitude), np.sin(latitude), np.cos(latitude) * np.cos(longitude)], -1)
+    write_sky("sky.exr", 0.5 + 0.4 * d)
+
+
+def spot():
+    pixels = np.full((32, 64, 3), 0.3)
+    pixels[5, 28] = SPOT
+    write_sky("spot.exr", pixels)
+
+
 if __name__ == "__main__":
     ramp()
     swatch()
@@ -198,3 +226,5 @@ if __name__ == "__main__":
     acescg()
     udim()
     mixed()
+    sky()
+    spot()

@@ -89,6 +89,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "level 0 whatever the footprint", "the nearest level, not a blend", "levels filtered from level 0",
             "the cap ignored", "lowering ignored", "missing file's fallback ignored", "a zero mapped normal left unlit",
             "constant nodes at their default",
+            "dome's intensity halved", "sky upside down", "sky a quarter turn off", "sun left in the sky",
+            "metal read as matte",
             "frame 1's reference"]
 # The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
@@ -97,7 +99,8 @@ ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
                              [-0.130256, 1.140805, -0.010548],
                              [-0.024003, -0.128969, 1.152972]])
 # A material's closed form.
-Look = collections.namedtuple("Look", "albedo emission image normal facing")
+# `metal` is a white metal's roughness.
+Look = collections.namedtuple("Look", "albedo emission image normal facing metal", defaults=(None,))
 CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None, None)
 PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None, None)
 # Each lit surface's inputs.
@@ -107,6 +110,9 @@ LIT = {
     "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
                                           "specular", "normal", None),
 }
+# An OpenPBR surface's metalness and roughness. A UsdPreviewSurface's metal is no white one:
+# MaterialX holds its reflectivity to 0.99.
+METAL = ("base_metalness", "specular_roughness")
 # What a host hands Pika.
 Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
 # husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and husk holds it where
@@ -117,6 +123,16 @@ USDRECORD_CAMERA_LIGHT = 15000
 CAMERA_LIGHT_ANGLE = 0.53
 # The scenes rendered under the host's camera light.
 CAMERA_LIT = {"headlit"}
+# A dome light: its radiance, its image's texels less its sun (None for a constant sky), its axes'
+# world directions a row each, and its sun as the direction toward it and its illuminance.
+Sky = collections.namedtuple("Sky", "prim radiance texels axes sun")
+# Pika's default pika:sunThreshold, the share of a sky's light below which no sun is lifted, and
+# the angle a sun is lit and shadowed at (src/dome.rs, src/light.rs).
+SUN_THRESHOLD = 10.0
+SUN_SHARE = 0.01
+SUN_ANGLE = 0.53
+# Directions to a sky texel's side in the sum over a hemisphere.
+SKY_RAYS = 2
 
 
 def usdrecord_host():
@@ -440,13 +456,15 @@ def constant(shader, name):
 
 def lit(surface, time, control=None):
     """The Look of an OpenPBR or Standard Surface shader with its specular off
-    (hydra/images/pbr.usda), its inputs read at `time` as values or constant nodes' values
+    (hydra/images/pbr.usda) or of an OpenPBR white metal (hydra/images/sky.usda), its inputs read
+    at `time` as values or constant nodes' values
     (hydra/images/constant.usda), its normal mapped when connected
     (hydra/images/normalmap.usda)."""
     *names, bump, facing = LIT[surface.GetShaderId()]
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
-    extra = sorted(set(authored) - set(names) - {bump})
+    metal = METAL if facing else ()
+    extra = sorted(set(authored) - set(names) - {bump} - set(metal))
     connected = [n for n, i in authored.items()
                  if i.HasConnectedSource() and n != bump and not constant(surface, n)]
     if extra or connected:
@@ -473,8 +491,17 @@ def lit(surface, time, control=None):
             v = NODEDEFS.getNodeDef(shader.GetShaderId()).getActiveInput(name).getValue()
         return tuple(v) if hasattr(v, "__len__") else v
 
-    if value(names[4]) != 0:
-        raise ValueError(f"{path}: the reference has no closed form for a specular lobe; set {names[4]} to 0")
+    if metal and value(metal[0]) == 1:
+        # A white metal reflects all the light, whatever the angle and its roughness.
+        if set(authored) - {names[1], *metal} or value(names[1]) != (1.0, 1.0, 1.0):
+            raise ValueError(f"{path}: the reference has a closed form for a metal only when it is white, "
+                             "with nothing but its roughness set")
+        if control == "metal read as matte":
+            return Look((1.0,) * 3, (0.0,) * 3, None, None, None)
+        return Look((0.0,) * 3, (0.0,) * 3, None, None, None, value(metal[1]))
+    if value(names[4]) != 0 or set(metal) & set(authored):
+        raise ValueError(f"{path}: the reference has no closed form for a specular lobe; set {names[4]} to 0, "
+                         "or the surface a white metal")
     weight = 1.0 if control == "base weight ignored" else value(names[0])
     glow = 0.0 if control == "emission ignored" else value(names[2])
     return Look(tuple(weight * c for c in value(names[1])), tuple(glow * c for c in value(names[3])),
@@ -1091,15 +1118,109 @@ def shadow_casters(prim, faces, control):
     return member(prim, query, faces, control)
 
 
-def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=None):
+def sky_directions(height, width):
+    """Each texel of a latlong's direction, +y along the top row, +z at the centre and +x a quarter
+    in from the left (shaders/view.slang's from_latlong), and its solid angle."""
+    y, x = np.mgrid[:height, :width]
+    longitude = (0.5 - (x + 0.5) / width) * 2 * np.pi
+    latitude = (0.5 - (y + 0.5) / height) * np.pi
+    d = np.stack([np.cos(latitude) * np.sin(longitude), np.sin(latitude), np.cos(latitude) * np.cos(longitude)], -1)
+    edge = np.cos(np.pi * np.arange(height + 1) / height)
+    return d, np.broadcast_to(((edge[:-1] - edge[1:]) * 2 * np.pi / width)[:, None], (height, width))
+
+
+def lifted(texels, radiance, threshold):
+    """A sky's texels with the light they give over `threshold` taken out, their colour kept, and
+    that light as a sun: the direction toward it in the sky's axes and what it held, or None when
+    it is under SUN_SHARE of the sky's."""
+    if threshold <= 0:
+        return texels, None
+    d, solid_angle = sky_directions(*texels.shape[:2])
+    scaled = texels * radiance / threshold
+    kept = 1 / np.maximum(scaled.max(-1), 1)
+    power = scaled.sum(-1) * solid_angle
+    gone = power * (1 - kept)
+    if gone.sum() < SUN_SHARE * power.sum():
+        return texels, None
+    toward = (d * gone[..., None]).sum((0, 1))
+    light = (texels * ((1 - kept) * solid_angle)[..., None]).sum((0, 1))
+    return texels * kept[..., None], (toward / np.linalg.norm(toward), light)
+
+
+def dome(stage, time, host, control=None):
+    """The stage's dome light, or None."""
+    found = [prim for prim in stage.Traverse() if prim.IsA(UsdLux.DomeLight)
+             and UsdGeom.Imageable(prim).ComputeVisibility(time) != UsdGeom.Tokens.invisible]
+    if not found:
+        return None
+    if len(found) > 1:
+        raise ValueError("the reference lights a stage by one dome light")
+    prim = found[0]
+    api = UsdLux.LightAPI(prim)
+    radiance = np.array(api.GetColorAttr().Get(time)) * api.GetIntensityAttr().Get(time) * 2 ** api.GetExposureAttr().Get(time)
+    if control == "dome's intensity halved":
+        radiance = radiance / 2
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
+    axes = normalize(np.array([[m[r][c] for c in range(3)] for r in range(3)]))
+    file = UsdLux.DomeLight(prim).GetTextureFileAttr().Get(time)
+    if not file or not file.resolvedPath:
+        return Sky(prim, radiance, None, axes, None)
+    texels = np.asarray(oiio.ImageBuf(file.resolvedPath).get_pixels(oiio.FLOAT), float)[..., :3]
+    if control == "sky upside down":
+        texels = texels[::-1]
+    if control == "sky a quarter turn off":
+        texels = np.roll(texels, texels.shape[1] // 4, axis=1)
+    authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:sunThreshold")
+    threshold = authored.Get() if host.settings and authored else SUN_THRESHOLD
+    if control == "sun left in the sky":
+        threshold = 0
+    texels, sun = lifted(texels, radiance, threshold)
+    return Sky(prim, radiance, texels, axes, sun and (sun[0] @ axes, sun[1] * radiance))
+
+
+def skylight(sky, n):
+    """What a white matte surface of each normal shows of the sky: its radiance summed over the
+    normal's hemisphere, over π, unshadowed as Pika's is."""
+    if sky.texels is None:
+        return np.broadcast_to(sky.radiance, (len(n), 3))
+    fine = sky.texels.repeat(SKY_RAYS, 0).repeat(SKY_RAYS, 1)
+    d, solid_angle = sky_directions(*fine.shape[:2])
+    light = (fine * solid_angle[..., None]).reshape(-1, 3)
+    local = n @ sky.axes.T
+    out = np.zeros((len(n), 3))
+    for first in range(0, len(n), 1024):
+        out[first:first + 1024] = np.clip(local[first:first + 1024] @ d.reshape(-1, 3).T, 0, None) @ light
+    return out * sky.radiance / np.pi
+
+
+def mirrored(sky, n, toward):
+    """The sky along each hit's reflected ray: its image's four texels about it, a row wrapping."""
+    if sky.texels is None:
+        return np.broadcast_to(sky.radiance, (len(n), 3))
+    local = (2 * dot(n, toward)[:, None] * n - toward) @ sky.axes.T
+    height, width = sky.texels.shape[:2]
+    x = (0.5 - np.arctan2(local[:, 0], local[:, 2]) / (2 * np.pi)) * width - 0.5
+    y = np.arccos(np.clip(local[:, 1], -1, 1)) / np.pi * height - 0.5
+    x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
+    fx, fy = (x - x0)[:, None], (y - y0)[:, None]
+
+    def texel(x, y):
+        return sky.texels[np.clip(y, 0, height - 1), x % width]
+
+    top = texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx
+    bottom = texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx
+    return (top * (1 - fy) + bottom * fy) * sky.radiance
+
+
+def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, sky, control=None):
     """Each light as the direction toward it, one for every hit or one per hit, the illuminance it
     gives a surface facing it unshadowed, likewise, the sine of the angle it subtends, 0 but for
     a sphere, and each hit's share of it its shadow leaves."""
     own, world, faces = casters
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
-        if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, *AREA)):
-            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant, sphere, rect, disk and cylinder lights have a closed form")
+        if not any(prim.IsA(t) for t in (UsdLux.DistantLight, UsdLux.SphereLight, UsdLux.DomeLight, *AREA)):
+            raise ValueError(f"{prim.GetPath()} is a {prim.GetTypeName()}: only distant, sphere, rect, disk, cylinder and dome lights have a closed form")
     if not found and lit:
         light = toward if control == "camera light from the eye" else -axis
         intensity = USDRECORD_CAMERA_LIGHT if control == "usdview's camera light in every host" else host.camera_light
@@ -1112,8 +1233,16 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, control=N
     if not found and control == "Pika's old headlight":
         return [(-axis, (np.pi,) * 3, 0, np.ones(len(p)))]
     out = []
+    if sky and sky.sun:
+        # A distant light with the dome's links.
+        on = links(sky.prim, paths, control)
+        d, e, left = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.ones(len(p))
+        d[on], e[on] = sky.sun
+        casts = shadow_casters(sky.prim, faces, control)
+        left[on] = share(None, time, sky.sun[0], SUN_ANGLE, p[on], own[on], world, casts, control)
+        out.append((d, e, np.zeros(len(p)), left))
     for prim in found:
-        if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible:
+        if UsdGeom.Imageable(prim).ComputeVisibility(time) == UsdGeom.Tokens.invisible or prim.IsA(UsdLux.DomeLight):
             continue
         api = UsdLux.LightAPI(prim)
         on = links(prim, paths, control)
@@ -1364,7 +1493,11 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
     looks = [t["look"] for t in tris]
-    image["textured"] = any(l.image or l.normal for l in looks)
+    sky = dome(stage, time, host, control)
+    metal = np.array([np.nan if l.metal is None else l.metal for l in looks])[i]
+    # A mirror's colour turns within a pixel as a texture's does.
+    mirror = sky is not None and sky.texels is not None and not np.isnan(metal).all()
+    image["textured"] = any(l.image or l.normal for l in looks) or mirror
 
     def sampled(field):
         """Each hit's sample of its look's `field` image at its st, 0 where it has none, and which
@@ -1410,7 +1543,19 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     paths = [tris[k]["face"][0] for k in i]
     # Two bits a light.
     shadow = np.zeros(len(p), int)
-    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, casting, faces), control)
+    found = lights(stage, time, axis, toward, p, facing, paths, host, lit, (i, casting, faces), sky, control)
+    reflected = np.zeros((len(p), 3))
+    if not np.isnan(metal).all():
+        if found:
+            raise ValueError("a metal's highlight of a light has no closed form: light it by a dome alone")
+        if mirror and (metal > 0).any():
+            raise ValueError("a rough metal has a closed form only under a dome light with no image")
+        if sky:
+            shiny = ~np.isnan(metal)
+            reflected[shiny] = mirrored(sky, facing[shiny], toward[shiny])
+    if sky:
+        ambient = skylight(sky, facing)
+        shine, low, high = shine + ambient, low + ambient, high + ambient
     for bit, (d, e, sin, left) in enumerate(found):
         partly = (left > 0) & (left < 1)
         shadow |= ((left == 0) * 2 + partly) << (2 * bit)
@@ -1426,7 +1571,7 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
         raise ValueError("a surface is seen from further round than the angle its closed form holds within")
     albedo = np.array([l.albedo for l in looks])[i]
     emission = np.array([l.emission for l in looks])[i]
-    emitted = emission + sampled("image")[0]
+    emitted = emission + sampled("image")[0] + reflected
     color = np.c_[albedo * shine + emitted, np.ones(len(p))]
     clip = np.c_[p, np.ones(len(p))] @ np.array(to_clip)
     depth = (clip[:, 2] / clip[:, 3] + 1) / 2
