@@ -5,6 +5,7 @@
 *.usdz
 *.exr
 !bake/fixtures/*.exr
+!hydra/scenes/look/sky.exr
 *.tx
 *.tex
 *.abc
