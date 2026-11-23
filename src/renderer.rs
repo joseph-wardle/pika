@@ -7,8 +7,10 @@ use std::time::Instant;
 
 use ash::vk;
 
+use crate::bake::Bake;
 use crate::commands::Commands;
 use crate::cull::Cull;
+use crate::dome::Dome;
 use crate::film::Film;
 use crate::geometry::Geometry;
 use crate::gpu;
@@ -143,6 +145,7 @@ pub struct Renderer {
     shade: Shade,
     shadows: Shadows,
     cull: Cull,
+    dome: Dome,
     film: Film,
     geometry: Geometry,
     device: gpu::Device<'static>,
@@ -241,6 +244,8 @@ impl Renderer {
         let tangent = shader::compile("tangent")?;
         let shadow = shader::compile("shadow")?;
         let film = shader::compile("film")?;
+        let dome = shader::compile("dome")?;
+        let bake = Bake::new()?;
         Ok(Self {
             store: Store::new(),
             stats,
@@ -248,9 +253,10 @@ impl Renderer {
             target: None,
             view: None,
             raster: Raster::new(&device, &mesh.spirv)?,
-            shade: Shade::new(&device)?,
+            shade: Shade::new(&device, bake.clone())?,
             shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
+            dome: Dome::new(&device, &dome.spirv, bake)?,
             film: Film::new(&device, &film.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
@@ -361,6 +367,7 @@ impl Renderer {
             (self.film.previous_view_projection()).unwrap_or(unjittered.view_projection);
         let addresses = self.geometry.addresses();
         let (mut lights, casters) = light::gather(&self.store);
+        let dome = self.dome.update(&self.device, &self.store, cb)?;
         laps.lap("lights");
         if let Some(g) = &addresses {
             let (device, geometry) = (&self.device, &self.geometry);
@@ -401,6 +408,7 @@ impl Renderer {
                 [w, h],
                 self.film.pattern(),
                 shadows,
+                dome,
             );
             self.cull.record(cb, geometry, view);
         }
@@ -526,9 +534,11 @@ impl Renderer {
         let (vram_used, vram_budget) = (vram.used, vram.allowed);
         let mut targets = target.memory();
         targets += self.film.memory();
+        let mut views = self.view.as_ref().map(View::memory).unwrap_or_default();
+        views += self.dome.memory();
         let memory = stats::Memory {
             geometry: self.geometry.memory(),
-            views: self.view.as_ref().map(View::memory).unwrap_or_default(),
+            views,
             targets,
             materials: self.shade.memory(),
             shadows: self.shadows.memory(),

@@ -3,6 +3,7 @@
 
 use ash::vk;
 
+use crate::dome;
 use crate::geometry::Addresses;
 use crate::gpu::{self, Buffer};
 use crate::light::{Light, Tiles};
@@ -37,6 +38,7 @@ struct Constants {
     visible: vk::DeviceAddress,
     drawn: vk::DeviceAddress,
     shadows: vk::DeviceAddress,
+    dome: dome::Constants,
 }
 
 pub struct View {
@@ -114,6 +116,7 @@ impl View {
         extent: [u32; 2],
         pattern: u32,
         shadows: vk::DeviceAddress,
+        dome: dome::Constants,
     ) {
         self.drawn.bytes().fill(0);
         let parts = [
@@ -157,6 +160,7 @@ impl View {
             visible: self.visible.address,
             drawn: self.drawn.address,
             shadows,
+            dome,
         };
         let bytes = gpu::bytes(std::slice::from_ref(&constants));
         let light_region = vk::BufferCopy {

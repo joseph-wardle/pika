@@ -252,6 +252,10 @@ int pika_light_params(const pika_renderer *renderer, uint64_t id,
 // shadowLink collection's, of the meshes that cast its shadows; "" reaches every mesh.
 int pika_light_link(const pika_renderer *renderer, uint64_t id, const char *light,
                     const char *shadow);
+// A dome light's image, empty when it has none or its path did not resolve, and UsdLux's
+// texture:format.
+int pika_light_texture(const pika_renderer *renderer, uint64_t id, const char *file,
+                       const char *format);
 // A distant light shines down its -z axis.
 int pika_light_transform(const pika_renderer *renderer, uint64_t id,
                          const double matrix[16]);

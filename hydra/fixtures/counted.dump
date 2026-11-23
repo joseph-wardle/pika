@@ -1,6 +1,6 @@
 sync 1
 counted points /world/dust
-counted domeLight /world/key
+counted pluginLight /world/key
 counted nurbsCurves /world/wire
 sync 2
 counted points /world/dust

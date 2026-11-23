@@ -34,6 +34,27 @@ uint2 tile(float3 P)
     return view->light_tiles[xy.y * grid.x + xy.x];
 }
 
+// MaterialX's environment hook for diffuse: the dome's irradiance over π on a surface facing
+// N, from its image's four texels about N, a row wrapping.
+float3 mx_environment_irradiance(float3 N)
+{
+    Dome dome = view->dome;
+    float3 d = float3(dot(dome.axes[0], N), dot(dome.axes[1], N), dot(dome.axes[2], N));
+    float2 at = latlong(d) * IRRADIANCE - 0.5;
+    int2 t = int2(floor(at));
+    float2 f = at - floor(at);
+    float3 rows[2];
+    for (int j = 0; j < 2; j++)
+    {
+        uint row = uint(clamp(t.y + j, 0, int(IRRADIANCE.y) - 1)) * IRRADIANCE.x;
+        uint2 x = uint2(t.x + int2(0, 1) + int(IRRADIANCE.x)) % IRRADIANCE.x;
+        float *a = dome.irradiance + 3 * (row + x.x);
+        float *b = dome.irradiance + 3 * (row + x.y);
+        rows[j] = lerp(float3(a[0], a[1], a[2]), float3(b[0], b[1], b[2]), f.x);
+    }
+    return dome.radiance * lerp(rows[0], rows[1], f.y);
+}
+
 // Lambert's formula over the light's outline as P sees it, a polygon of up to 8 corners;
 // dot(N, it) is exact while the light is wholly above the horizon.
 float3 illuminance_vector(Light light, float3 c)

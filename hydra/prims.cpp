@@ -686,8 +686,12 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     if (!renderer || !_id)
         return;
     SdfPath const &id = GetId();
-    if (bits & DirtyTransform) {
+    bool dome = _type == HdPrimTypeTokens->domeLight;
+    // A dome's pole axis arrives as a param.
+    if (bits & (dome ? DirtyTransform | DirtyParams : DirtyTransform)) {
         GfMatrix4d matrix = delegate->GetTransform(id);
+        if (dome)
+            matrix = light_param(delegate, id, HdLightTokens->domeOffset, GfMatrix4d(1.0)) * matrix;
         _pika.report(pika_light_transform(renderer, _id, matrix.data()),
                      id.GetString() + " transform");
     }
@@ -701,6 +705,14 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     }
     if (!(bits & DirtyParams))
         return;
+    if (dome) {
+        SdfAssetPath file = light_param(delegate, id, HdLightTokens->textureFile, SdfAssetPath());
+        TfToken format =
+            light_param(delegate, id, HdLightTokens->textureFormat, TfToken("automatic"));
+        _pika.report(pika_light_texture(renderer, _id, file.GetResolvedPath().c_str(),
+                                        format.GetText()),
+                     id.GetString() + " texture");
+    }
     pika_light params = {};
     params.type = _type.GetText();
     // DistantLight's schema overrides LightAPI's fallback intensity of 1,

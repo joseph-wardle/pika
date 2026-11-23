@@ -135,6 +135,16 @@ pub struct Light {
     pub params: Option<LightParams>,
     pub transform: Option<[f64; 16]>,
     pub link: Option<Link>,
+    /// A dome light's.
+    pub texture: Option<Texture>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Texture {
+    /// Empty when the light has none or its path did not resolve.
+    pub file: String,
+    /// UsdLux's texture:format.
+    pub format: String,
 }
 
 /// Collection tokens, each empty when the light reaches every mesh.
@@ -181,6 +191,7 @@ pub enum Shape {
         length: f32,
         radius: f32,
     },
+    Dome,
 }
 
 /// Counted only: Hydra inserts no prim of a type the delegate does not support.
@@ -828,6 +839,7 @@ impl Store {
             params: None,
             transform: None,
             link: None,
+            texture: None,
         };
         self.lights.insert(id, light);
         self.moved.lights = true;
@@ -857,6 +869,13 @@ impl Store {
             transform,
             MATRIX,
         );
+        Ok(())
+    }
+
+    pub fn set_light_texture(&mut self, id: u64, texture: Texture) -> Result<(), String> {
+        let bytes = texture.file.len() + texture.format.len();
+        let light = self.lights.get_mut(&id).ok_or_else(|| stale("light", id))?;
+        self.moved.lights |= write(&mut self.stats.light, &mut light.texture, texture, bytes);
         Ok(())
     }
 
@@ -1173,9 +1192,13 @@ impl fmt::Display for Light {
                     Shape::Cylinder { length, radius } => {
                         writeln!(f, "  cylinder length {length} radius {radius}")?
                     }
+                    Shape::Dome => writeln!(f, "  dome")?,
                 }
             }
             None => writeln!(f, "  params {UNSYNCED}")?,
+        }
+        if let Some(texture) = &self.texture {
+            writeln!(f, "  texture {:?} format {}", texture.file, texture.format)?;
         }
         match &self.link {
             Some(link) => writeln!(f, "  link {:?} shadow {:?}", link.light, link.shadow)?,

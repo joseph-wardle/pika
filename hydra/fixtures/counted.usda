@@ -11,7 +11,7 @@ def Xform "world"
 {
     def Camera "camera" {}
 
-    def DomeLight "key" {}
+    def PluginLight "key" {}
 
     def Points "dust"
     {

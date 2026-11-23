@@ -238,6 +238,8 @@ fn resolve(light: &store::Light) -> Option<Light> {
                 bound,
             ))
         }
+        // Lit by src/dome.rs.
+        Shape::Dome => None,
     }?;
     (params.visible && light.illuminance != [0.0; 3]).then_some(light)
 }
@@ -260,7 +262,7 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// UsdLux radiance in nits, before normalize divides by the size factor.
-fn radiance(p: &LightParams) -> [f32; 3] {
+pub fn radiance(p: &LightParams) -> [f32; 3] {
     p.color.map(|c| c * p.intensity * p.exposure.exp2())
 }
 
@@ -602,6 +604,7 @@ mod tests {
             params: Some(params(1.0, 0.0, false)),
             transform: Some(transform),
             link: None,
+            texture: None,
         };
         let resolved = resolve(&light).unwrap();
         assert_eq!(resolved.position, [0.0, -1.0, 0.0]);
@@ -744,6 +747,7 @@ mod tests {
             }),
             transform: Some(transform),
             link: None,
+            texture: None,
         }
     }
 
@@ -804,6 +808,7 @@ mod tests {
             }),
             transform: Some(m),
             link: None,
+            texture: None,
         }
     }
 

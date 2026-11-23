@@ -241,7 +241,7 @@ public:
             return new PikaMaterial(id, _pika);
         if (typeId == HdPrimTypeTokens->distantLight || typeId == HdPrimTypeTokens->sphereLight ||
             typeId == HdPrimTypeTokens->rectLight || typeId == HdPrimTypeTokens->diskLight ||
-            typeId == HdPrimTypeTokens->cylinderLight)
+            typeId == HdPrimTypeTokens->cylinderLight || typeId == HdPrimTypeTokens->domeLight)
             return new PikaLight(typeId, id, _pika);
         return new PikaCountedSprim(typeId, id, _pika);
     }
