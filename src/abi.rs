@@ -173,6 +173,7 @@ pub struct CFrame {
     render_tag_count: usize,
     texture_cap: u32,
     shadow_pool: u32,
+    sun_threshold: f32,
 }
 
 thread_local! {
@@ -394,6 +395,7 @@ pub unsafe extern "C" fn pika_render(
             render_tags,
             texture_cap: f.texture_cap,
             shadow_pool: f.shadow_pool,
+            sun_threshold: f.sun_threshold,
         };
         let done = lock(handle)?.render(frame)?;
         // SAFETY: the caller guarantees one write.
