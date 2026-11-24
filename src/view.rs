@@ -1,5 +1,5 @@
-//! One view's constants, lights, tiles and cull outputs. Every view is culled against
-//! its own frustum into its own `View`, never reusing another's.
+//! One view's constants, lights, tiles and cull outputs. Every view is culled against its own
+//! frustum into its own `View`, and never reuses another view's.
 
 use ash::vk;
 
@@ -9,7 +9,7 @@ use crate::gpu::{self, Buffer};
 use crate::light::{Light, Tiles};
 use crate::transform::Camera;
 
-/// `shaders/view.slang`'s `View`.
+/// Must match `View` in `shaders/view.slang`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Constants {
@@ -42,7 +42,7 @@ struct Constants {
 }
 
 pub struct View {
-    // A copy of the owner's device table, which outlives this (field order).
+    // A copy of the owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     constants: Buffer,
     /// The lights, then the tiles, then the tiles' lights.
@@ -98,11 +98,9 @@ impl View {
             && self.lights.size >= lights
     }
 
-    /// Records outside rendering. `geometry` and the lights must fit; no GPU work may be pending.
-    /// `pattern` is the frame's index into the shadow pattern's sequence (`Film::pattern`).
-    /// `camera` is jittered by `jitter` (`film::jitter`); `previous_view_projection` is the frame before's
-    /// view-projection, unjittered, which motion is measured from.
-    /// `shadows` addresses `shaders/view.slang`'s `Shadow`s.
+    /// Records outside a render pass. `geometry` and the lights must fit, and no GPU work may be
+    /// pending. `camera` is jittered by `jitter`, and motion is measured from
+    /// `previous_view_projection`, which is unjittered.
     #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &mut self,
@@ -185,8 +183,8 @@ impl View {
                 vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
             );
         let d = &self.device;
-        // SAFETY: `cb` is recording outside rendering, buffers are from `d`, and the regions
-        // lie inside them, as `fits` checked. Vulkan has no empty copies; tiles are never empty.
+        // SAFETY: recording outside a render pass, with buffers from this device whose regions `fits`
+        // checked. The tiles are never empty, which Vulkan's copies need.
         unsafe {
             d.cmd_update_buffer(cb, self.constants.raw, 0, bytes);
             d.cmd_copy_buffer(cb, self.staging.raw, self.lights.raw, &[light_region]);

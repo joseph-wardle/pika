@@ -5,10 +5,9 @@
     upAxis = "Y"
 )
 
-# cube.usda's cube under a material, for hydra/engine.py: it is drawn clay,
-# as cube.usda's is, until the material's build lands. The surface's diffuse
-# colour is then connected to the green node, a structural edit, and the
-# cube keeps its red look until that build lands.
+# cube.usda's cube under a material, for hydra/engine.py. It draws clay until the build lands,
+# then its diffuse colour is connected to the green node, a structural edit, and it stays red until
+# that build lands.
 def Xform "world"
 {
     def Mesh "cube" (prepend apiSchemas = ["MaterialBindingAPI"])
@@ -23,8 +22,7 @@ def Xform "world"
         rel material:binding = </world/mtl/paint>
     }
 
-    # π lux toward the camera's view, under which a facing Lambert surface
-    # shows its albedo.
+    # π lux along the view, under which a facing Lambert surface shows its albedo.
     def DistantLight "light"
     {
         float inputs:angle = 0

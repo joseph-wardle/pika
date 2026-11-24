@@ -45,8 +45,7 @@ def RectLight "panel"
     uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
 }
 
-# Radiance 2.5 at frame 1, of its area π / 4, and 1.5 at frame 2, of radius
-# 0.7.
+# Radiance 2.5 at frame 1, of its area π / 4, and 1.5 at frame 2, of radius 0.7.
 def DiskLight "spot"
 {
     float inputs:radius = 0.5

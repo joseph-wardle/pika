@@ -1,5 +1,4 @@
-// Lengyel's tangents. w is -1 on a mirrored mapping. A vertex with no texcoord
-// area still gets a unit tangent orthogonal to its normal, so a frame exists.
+// Lengyel's tangents, w -1 on a mirrored mapping.
 
 #include "view.slang"
 
@@ -11,7 +10,7 @@ struct Push
     uint2 *vertices;
     float *texcoord;
     uint *vertex_texcoord;
-    // Vertex v's corners, as positions in `indices`, are offsets[v]..offsets[v + 1].
+    // Vertex v's corners are offsets[v]..offsets[v + 1] into `indices`.
     uint *offsets;
     uint *corners;
     // Counted from the mesh's first vertex.

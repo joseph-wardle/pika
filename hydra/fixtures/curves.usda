@@ -5,9 +5,8 @@
     upAxis = "Y"
 )
 
-# Basis curves are fetched only to measure them. Each frame re-pulls the
-# time-sampled points (48 bytes) and nothing else: topology (4 bytes) and
-# widths (16 bytes) are pulled once.
+# Basis curves are fetched only to measure them. Each frame re-pulls only the time-sampled points
+# (48 bytes). Topology (4 bytes) and widths (16 bytes) are pulled once.
 def Xform "world"
 {
     def Camera "camera" {}

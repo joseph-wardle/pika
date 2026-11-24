@@ -5,11 +5,9 @@
     upAxis = "Y"
 )
 
-# A primvar change leaves a mesh's texcoord alone unless it changed: the
-# subdivided quad's st is read by its material and refined with it, and its
-# displayColor, which no material reads, is animated, as are its points, the
-# edit. The second frame's sync hands over the points and nothing twice: no
-# mesh bytes are redundant, and the texcoord is not refined again.
+# A primvar change leaves the texcoord alone unless it changed. The subdivided quad's st is read
+# by its material, and its unread displayColor and its points are animated. Frame 2 hands over
+# the points and nothing twice, and the texcoord is not refined again.
 #
 # compiles: 1 then 0
 # bakes: 1 then 0

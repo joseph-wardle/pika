@@ -5,10 +5,8 @@
     upAxis = "Y"
 )
 
-# A wrap mode is a value, not structure: frame 2 turns the texture's wrapS
-# from clamp to repeat, which rewrites the material's block and rebinds its
-# sampler, compiling no surface and baking no texture (hydra/images/rewrapped.usda
-# shows the sampler following).
+# A wrap mode is a value, not structure. Frame 2's wrapS change rewrites the material's block and
+# rebinds its sampler, compiling and baking nothing.
 #
 # compiles: 1 then 0
 # bakes: 1 then 0

@@ -1,4 +1,4 @@
-// Smooth normals as Hydra's Hd_SmoothNormals computes them.
+// As Hydra's Hd_SmoothNormals.
 
 struct Push
 {

@@ -1,28 +1,24 @@
-"""Summarises a PIKA_STATS file: every time as p50/p95/max over the warm
-syncs and frames, the frames over the gate's period, each budget line's p95
-against its budget, and the last frame's memory.
+"""Summarises a PIKA_STATS file: each time as p50/p95/max over the warm syncs and frames, the
+frames over the gate's period, each budget line's p95 against its budget, and the last frame's
+memory.
 
     python3 hydra/stats.py <file.stats> [<warm>]
 
-Pika appends one line per Hydra sync and per rendered frame: the kind and
-index, then `key value` pairs (src/stats.rs). A key ending in `_ms` is
-milliseconds; any other value is a count. The warm window is the last <warm>
-syncs and frames, claimed warm: one with a material still pending, or a
-surface compiled or a texture baked, fails. Without it, the window is all
-but the first, or the only one. A loop played twice over 54 frames
-summarises with 54.
+Each line is a sync or frame, its index, then `key value` pairs (src/stats.rs). `_ms` keys are
+milliseconds, the rest counts. Given <warm>, the last <warm> syncs and frames are claimed warm,
+and one still building a material or texture fails. Otherwise the window is all but the first.
+A loop played twice over 54 frames summarises with 54.
 """
 
 import sys
 
 # 24 fps: the gate's frame period.
 BUDGET_MS = 41.67
-# Mesh drawing's budget lines, each the sum of the frame keys named: measured warm p95 on
-# ALab in usdview at 1080p, not limits.
+# Sums of the frame keys named. Measured warm p95 on ALab in usdview at 1080p, not limits.
 LINES = (
     ("draw", ("gpu_draw_ms",), 4.0),
     ("shade", ("gpu_shade_ms",), 12.0),
-    # Listing, drawing and copying shadow pages; their lookups are in shade.
+    # Listing, drawing and copying pages. Their lookups are in shade.
     ("shadow", ("gpu_shadow_list_ms", "gpu_shadow_pages_ms", "gpu_shadow_copy_ms",
                 "gpu_shadow_live_ms"), 3.0),
     # The copies out of the attachments, history's resolve or the still sum, and the copy back.
@@ -33,16 +29,12 @@ LINES = (
     ("cpu", ("record_ms", "wait_ms"), 2.0),
     ("period", ("period_ms",), BUDGET_MS),
 )
-# Frame counts of material and texture work going on: none may be in a
-# warm window.
 BUILDING = ("pending_materials", "pending_textures", "compiled_surfaces", "baked_textures")
 
 
 def read(path):
-    """The file's host and device, and its sync and frame records, each a
-    dict of key to float. The frames must all have the first frame's keys
-    (the first's missing period aside), and the syncs the first sync's,
-    counted prim types aside, so a line cut short fails here."""
+    """Records must have the first's keys, the first frame's missing period and counted prim types
+    aside, so a line cut short fails here."""
     host = device = ""
     records = {"sync": [], "frame": []}
     for line in open(path):
@@ -69,19 +61,17 @@ def read(path):
 
 
 def keys(row):
-    """A record's keys, without those that may differ between records."""
     return {k for k in row if k != "period_ms" and not k.startswith("counted_")}
 
 
 def percentiles(values):
-    """p50, p95 and max, nearest rank."""
+    """Nearest rank."""
     values = sorted(values)
     rank = lambda p: values[min(len(values) - 1, int(p * len(values)))]
     return rank(0.5), rank(0.95), values[-1]
 
 
 def misses(periods):
-    """How many periods exceed the budget, and the longest run of them."""
     over = run = longest = 0
     for period in periods:
         run = run + 1 if period > BUDGET_MS else 0

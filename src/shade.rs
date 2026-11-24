@@ -1,5 +1,6 @@
-//! The material pass: each surface's pipelines and each material's block, textures and
-//! descriptor set, drawn after the prepass; a material is drawn clay until its build lands.
+//! The material pass, drawn after the prepass. It owns each surface's pipelines and each
+//! material's block, textures and descriptor set. A material is drawn as clay until its build
+//! is ready.
 
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,16 +23,16 @@ use crate::uniforms::{self, Layout, Manifest};
 use crate::view::View;
 
 pub struct Shade {
-    // A copy of the owner's device table, which outlives this (field order).
+    // A copy of the owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     pub builder: Builder,
     textures: Textures,
     surfaces: BTreeMap<u64, Surface>,
-    /// By the store's material id; no entry means drawn clay.
+    /// Keyed by the store's material id. A material with no entry is drawn as clay.
     looks: BTreeMap<u64, Look>,
     /// A look changed since unbound textures were last dropped.
     prune: bool,
-    /// Warn once per cap change, a line per kind, not per texture (thousands on production assets).
+    /// Warn once per cap change, with one line per kind, since production assets have thousands.
     warn_cap: bool,
     warn_blur: bool,
     warn_short: bool,
@@ -41,7 +42,7 @@ pub struct Shade {
 
 enum Look {
     Built(Box<Material>),
-    /// Warned of once; retried only when its network moves.
+    /// Warned about once, and retried only when its network changes.
     Failed,
 }
 
@@ -54,14 +55,14 @@ impl Look {
     }
 }
 
-/// One shader structure: the pipelines of every material sharing a document.
+/// One shader structure, holding the pipelines of every material that shares a document.
 pub struct Surface {
     device: ash::Device,
     pub manifest: Manifest,
     pub layout: Layout,
     set_layout: vk::DescriptorSetLayout,
     pipeline_layout: vk::PipelineLayout,
-    /// One per `COLOR_FORMATS` entry.
+    /// One pipeline per `COLOR_FORMATS` entry.
     pipelines: Vec<vk::Pipeline>,
 }
 
@@ -71,19 +72,18 @@ struct Material {
     buffer: Buffer,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
-    /// While unchanged, with the document, a material edit only rewrites the block.
+    /// While these and the document are unchanged, a material edit only rewrites the block.
     sources: Vec<Source>,
     textures: Vec<String>,
 }
 
 #[derive(Default)]
 pub struct Update {
-    /// Surfaces slangc compiled; the cache answered for the rest.
+    /// Surfaces slangc compiled. The cache answered for the rest.
     pub compiled: usize,
     pub baked: usize,
     pub loaded: u64,
-    /// The render thread's time filling staging: loads' reads, and swaps' copies of
-    /// what the readers read.
+    /// The render thread's time filling staging, for loads and swaps.
     pub read: Duration,
     pub pending: usize,
     pub pending_textures: usize,
@@ -118,8 +118,8 @@ impl Shade {
         })
     }
 
-    /// A material that fails is warned of and drawn pink; a missing texture file, as its
-    /// fallback. `cap` 0 is none. Records uploads into `cb`; no GPU work may be pending.
+    /// A failing material is warned about and drawn pink, and a missing texture draws its fallback.
+    /// A `cap` of 0 means no cap. No GPU work may be pending.
     pub fn update(
         &mut self,
         device: &gpu::Device,
@@ -135,8 +135,8 @@ impl Shade {
             .retain(|id, _| store.materials().contains_key(id));
         self.prune |= self.looks.len() != before;
         (self.builder).retain(|id| store.materials().contains_key(id));
-        // Before any load: a failed install keeps its textures until its uploads have run.
-        // Collecting used paths costs milliseconds, so only a look change asks for it.
+        // This comes before any load, because a failed install keeps its textures until its uploads
+        // have run. Collecting the used paths takes milliseconds, so only a look change asks for it.
         if self.prune {
             let used: BTreeSet<String> = (self.looks.values().filter_map(Look::built))
                 .flat_map(|m| m.textures.iter().cloned())
@@ -144,7 +144,7 @@ impl Shade {
             self.textures.retain(&used);
             self.prune = false;
         }
-        // Before the builds land, so they load under the new cap.
+        // Before the builds are installed, so they load under the new cap.
         if self.textures.set_cap(cap) {
             (self.warn_cap, self.warn_blur, self.warn_short) = (true, true, true);
         }
@@ -170,7 +170,7 @@ impl Shade {
                 continue;
             };
             let id = built.id;
-            // Even a failed install leaves textures it loaded unbound.
+            // Even a failed install leaves the textures it loaded unbound.
             self.prune = true;
             let missing = built.missing().to_vec();
             let (surfaces, textures) = (&mut self.surfaces, &mut self.textures);
@@ -204,8 +204,8 @@ impl Shade {
             }
         }
         self.textures.weigh();
-        // Only once the builds land, so first textures are not raised past what fits then
-        // lowered again. Loads meanwhile draw their floors.
+        // Only once the builds are installed, so first textures aren't raised past what fits and then
+        // lowered again. Meanwhile, loads draw at their floors.
         let heaps = device.heaps();
         if self.builder.is_empty() {
             self.textures.refit(&heaps);
@@ -265,12 +265,12 @@ impl Shade {
         Ok(update)
     }
 
-    /// Every build landed and every texture fits, which a converging host waits for.
+    /// Every build is installed and every texture fits, which a converging host waits for.
     pub fn settled(&self) -> bool {
         self.builder.is_empty() && self.textures.pending() == 0
     }
 
-    /// A value-only edit rewrites the block in place; anything else submits a build.
+    /// A value-only edit rewrites the block in place. Anything else submits a build.
     fn material(
         &mut self,
         id: u64,
@@ -295,7 +295,7 @@ impl Shade {
                     network,
                     drawn.buffer.bytes(),
                 )?;
-                // An address mode is a value too: the samplers follow it.
+                // An address mode counts as a value too, and the samplers follow it.
                 return drawn.bind(&mut self.textures, surface, document, network);
             }
         }
@@ -366,8 +366,8 @@ impl Shade {
         };
         let stride = size_of::<vk::DrawIndexedIndirectCommand>() as u32;
         let d = &self.device;
-        // SAFETY: `cb` is recording inside rendering of the pipelines' formats, handles are
-        // from `d`, and the view's constants address live buffers as large as the draws read.
+        // SAFETY: recording inside rendering with the pipelines' formats. The handles came from this
+        // device, and the view's constants point at buffers as large as the draws read.
         unsafe {
             d.cmd_set_viewport(cb, 0, &[viewport]);
             d.cmd_set_scissor(cb, 0, &[area]);
@@ -449,8 +449,8 @@ impl Surface {
             pipelines: Vec::new(),
         };
         let set_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings);
-        // SAFETY (this and every call below): `d` is live, infos outlive their calls, handles
-        // are from `d`. `drop` destroys what was made before an error.
+        // SAFETY (this and every call below): the device is alive, each info outlives its call, and
+        // the handles came from this device. `drop` destroys whatever was made before an error.
         s.set_layout = unsafe { d.create_descriptor_set_layout(&set_info, None) }
             .map_err(|e| format!("vkCreateDescriptorSetLayout failed: {e}"))?;
         let push = [vk::PushConstantRange::default()
@@ -465,7 +465,8 @@ impl Surface {
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
-        // Shades what the prepass left, inside its rendering, so it declares its attachments.
+        // It shades what the prepass left, inside the prepass's rendering, so it declares the same
+        // attachments.
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(true)
             .depth_write_enable(false)
@@ -491,7 +492,7 @@ impl Surface {
                 )
             })
             .collect();
-        // SAFETY: pipeline creation is complete, so the module is no longer used.
+        // SAFETY: the pipeline is built, so nothing uses the shader module any more.
         unsafe { d.destroy_shader_module(module, None) };
         s.pipelines = built.iter().filter_map(|p| p.clone().ok()).collect();
         built.into_iter().collect::<Result<Vec<_>, _>>()?;
@@ -501,8 +502,8 @@ impl Surface {
 
 impl Drop for Surface {
     fn drop(&mut self) {
-        // SAFETY: every handle was created on `device` or is null, and the
-        // owner's target waited for idle before this drops (field order).
+        // SAFETY: every handle was created on this device or is null, and the owner's target waited
+        // for the device to go idle before this drops, by field order.
         unsafe {
             for &p in &self.pipelines {
                 self.device.destroy_pipeline(p, None);
@@ -527,7 +528,7 @@ impl Material {
                 .ty(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1),
         ];
-        // Vulkan has no empty pool sizes.
+        // Vulkan doesn't allow empty pool sizes.
         let textures = layout.textures.len() as u32;
         if textures > 0 {
             sizes.push(
@@ -549,8 +550,8 @@ impl Material {
         let pool_info = vk::DescriptorPoolCreateInfo::default()
             .max_sets(1)
             .pool_sizes(&sizes);
-        // SAFETY (this and every call below): `d` is live, infos outlive their calls, and
-        // handles are from `d`.
+        // SAFETY (this and every call below): the device is alive, each info outlives its call, and
+        // the handles came from this device.
         let pool = unsafe { d.create_descriptor_pool(&pool_info, None) }
             .map_err(|e| format!("vkCreateDescriptorPool failed: {e}"))?;
         let mut u = Self {
@@ -571,8 +572,8 @@ impl Material {
         Ok(u)
     }
 
-    /// Samplers follow each node's address modes (`material::address_modes`).
-    /// The GPU must not be reading the set.
+    /// Samplers follow each node's address modes (see `material::address_modes`). The GPU must not
+    /// be reading the set.
     fn bind(
         &self,
         textures: &mut Textures,
@@ -634,14 +635,15 @@ impl Material {
                     .buffer_info(table),
             );
         }
-        // SAFETY: the set, buffers, views and samplers are from live `device`; infos outlive it.
+        // SAFETY: the set, buffers, views and samplers came from this live device.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }
 }
 
 impl Material {
-    /// After a swap replaced images; samplers stay. The GPU must not be reading the set.
+    /// Rebinds the views after a swap replaced images. The samplers stay. The GPU must not be
+    /// reading the set.
     fn bind_views(&self, textures: &Textures, surface: &Surface) -> Result<(), String> {
         let mut views = Vec::new();
         for key in &self.textures {
@@ -658,7 +660,7 @@ impl Material {
                     .image_info(info)
             })
             .collect();
-        // SAFETY: the set and views are from live `device`; infos outlive the call.
+        // SAFETY: the set and views came from this live device.
         unsafe { self.device.update_descriptor_sets(&writes, &[]) };
         Ok(())
     }
@@ -666,8 +668,8 @@ impl Material {
 
 impl Drop for Material {
     fn drop(&mut self) {
-        // Destroying the pool frees its set; the buffer drops after.
-        // SAFETY: the pool is from `device`; the owner's target waited for idle (field order).
+        // SAFETY: the pool came from this device, which the owner's target waited on to go idle.
+        // Destroying the pool frees its set.
         unsafe { self.device.destroy_descriptor_pool(self.pool, None) };
     }
 }

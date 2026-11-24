@@ -5,11 +5,8 @@
     upAxis = "Y"
 )
 
-# A texture past the device's memory budget, here a budget of one byte that
-# nothing fits: its material builds, its 8×8 texture is lowered to its 4×4
-# floor, which blurs nothing since no view draws it, with one warning
-# saying by how much textures still exceed it, and the device goes on
-# rendering. The edit disconnects the texture.
+# A budget of one byte that nothing fits. The material builds, its 8×8 texture is lowered to its
+# 4×4 floor with one warning, and the device goes on rendering. The edit disconnects the texture.
 #
 # compiles: 1 then 1
 # bakes: 1 then 0

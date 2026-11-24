@@ -62,7 +62,7 @@ if "$GENERATE" "$OUT/missing.mtlx" "$OUT/missing" 2> "$OUT/missing.err"; then
     fail "missing: a document with an unknown nodedef generated"
 fi
 grep -q "ND_missing" "$OUT/missing.err" || fail "missing: the error does not name the nodedef"
-# The vertices carry one float2 primvar; a color3 one must fail.
+# The vertices carry one float2 primvar. A color3 one must fail.
 sed -e 's|<input name="diffuseColor" nodename="n1" output="rgb" />|&\n    <input name="emissiveColor" nodename="n3" />|' \
     -e 's|  <surfacematerial|  <node name="n3" nodedef="ND_geompropvalue_color3">\n    <input name="geomprop" type="string" value="displayColor" />\n  </node>\n  <surfacematerial|' \
     "$ROOT/bake/fixtures/network.mtlx" > "$OUT/primvar.mtlx"
@@ -70,7 +70,7 @@ if "$GENERATE" "$OUT/primvar.mtlx" "$OUT/primvar" 2> "$OUT/primvar.err"; then
     fail "primvar: a surface reading a color3 primvar generated"
 fi
 grep -q "i_geomprop_displayColor" "$OUT/primvar.err" || fail "primvar: the error does not name the varying"
-# UV0 is st; UV0 beside another primvar has no vertex stage.
+# UV0 is st. UV0 beside another primvar has no vertex stage.
 sed -e '/<input name="st" nodename="n2" \/>/d' "$ROOT/bake/fixtures/network.mtlx" > "$OUT/uv0.mtlx"
 "$GENERATE" "$OUT/uv0.mtlx" "$OUT/uv0" || fail "uv0: a surface reading UV0 failed to generate"
 grep -q "o.texcoord_0 = p.texcoord;" "$OUT/uv0/surface.slang" ||
@@ -108,7 +108,7 @@ texture ramp.exr auto float ramp_auto
 cmp "$FIXTURES/ramp.texture" "$OUT/textures/ramp_auto.texture" || fail "ramp_auto: auto is not raw for an EXR"
 texture greys.jpg auto color greys
 texture acescg.exr acescg color acescg
-# A UDIM set is one array with a tile table; a tile past 1100 is refused.
+# A UDIM set is one array with a tile table. A tile past 1100 is refused.
 "$TEXTURE" raw float "" "$OUT/textures/udim.texture" 1001 "$FIXTURES/udim.1001.exr" 1012 "$FIXTURES/udim.1012.exr" ||
     fail "udim: texture failed"
 "$TEXTURE" raw float "" "$OUT/textures/mixed.texture" 1001 "$FIXTURES/mixed.1001.exr" 1002 "$FIXTURES/mixed.1002.exr" ||

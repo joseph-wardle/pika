@@ -1,4 +1,4 @@
-//! What one Hydra render delegate owns on the Rust side.
+//! Everything one Hydra render delegate owns on the Rust side.
 
 use std::fs::File;
 use std::io::Write;
@@ -25,7 +25,8 @@ use crate::target::Target;
 use crate::transform::Camera;
 use crate::view::View;
 
-/// Color is half or full float, as the host asks; the delegate's default, half, halves readback.
+/// Colour is half or full float, as the host asks. The delegate defaults to half, which halves
+/// the readback.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
     Float16Vec4,
@@ -55,7 +56,7 @@ impl Format {
     }
 }
 
-/// A render buffer Hydra bound to one AOV, bottom row first.
+/// A render buffer Hydra bound to one AOV, stored bottom row first.
 pub struct Aov<'a> {
     pub format: Format,
     pub pixels: &'a mut [u8],
@@ -63,23 +64,23 @@ pub struct Aov<'a> {
 
 pub struct Frame<'a> {
     pub world_to_view: [f64; 16],
-    /// Conformed to the framing: it maps the data window to clip space.
+    /// Conformed to the framing, so it maps the data window to clip space.
     pub projection: [f64; 16],
     pub width: u32,
     pub height: u32,
-    /// x, y, width, height, with y counted down from the top row, as CameraUtilFraming counts it.
+    /// x, y, width and height, with y counted down from the top row as CameraUtilFraming does.
     pub window: [u32; 4],
     pub clear_color: [f32; 4],
     pub color: Option<Aov<'a>>,
     pub depth: Option<Aov<'a>>,
     pub normal: Option<Aov<'a>>,
-    /// The render tags the pass draws; none means every tag.
+    /// The render tags the pass draws. An empty list means every tag.
     pub render_tags: Vec<String>,
-    /// `pika:textureCap`, 0 for none.
+    /// `pika:textureCap`, or 0 for no cap.
     pub texture_cap: u32,
     /// `pika:shadowPool`, in MB.
     pub shadow_pool: u32,
-    /// `pika:sunThreshold`, 0 for no sun.
+    /// `pika:sunThreshold`, or 0 for no sun.
     pub sun_threshold: f32,
 }
 
@@ -116,8 +117,7 @@ impl Frame<'_> {
         expect(&self.normal, "normal", &[Format::Float32Vec3])
     }
 
-    /// Each attachment's format and bytes per pixel, in the AOVs' order: color as the host
-    /// asks, half float without it.
+    /// Each attachment's format and bytes per pixel, in the AOVs' order.
     fn formats(&self) -> [(vk::Format, usize); 3] {
         let color = match self.color.as_ref().map(|a| a.format) {
             Some(Format::Float32Vec4) => (raster::COLOR_FORMATS[1], 16),
@@ -127,19 +127,20 @@ impl Frame<'_> {
     }
 }
 
-/// The color AOV's place among a frame's three: color, depth, normal.
+/// The colour AOV's place among a frame's three AOVs: colour, depth and normal.
 const COLOR: usize = 0;
 
 /// OpenGL's far plane.
 const FAR: f32 = 1.0;
 
-// One instance per process: plugins are never unloaded, and each delegate's device borrows it.
+// One instance per process, because plugins are never unloaded and each delegate's device
+// borrows it.
 static INSTANCE: OnceLock<Result<gpu::Instance, String>> = OnceLock::new();
 
 pub struct Renderer {
     pub store: Store,
     pub stats: Stats,
-    // Field order is drop order: the commands and target wait for idle before the device goes.
+    // Fields drop in order, so the commands and target wait for idle before the device goes.
     commands: Commands,
     target: Option<Target>,
     view: Option<View>,
@@ -152,13 +153,13 @@ pub struct Renderer {
     geometry: Geometry,
     device: gpu::Device<'static>,
     pub device_name: String,
-    /// `PIKA_STORE_DUMP`, for the fixture checks; writing it changes nothing about rendering.
+    /// `PIKA_STORE_DUMP`, for the fixture checks. Writing it changes nothing about rendering.
     dump: Option<(String, File)>,
     syncs: usize,
-    /// The frame the last call submitted, when it left placing it to this one.
+    /// The frame the last call submitted, when it left placing it to this call.
     pending: Option<Pending>,
-    /// The buffers the last frame was placed in and what it was drawn from. A call with both
-    /// the same draws the next still sample; one with the same buffers may place its frame late.
+    /// The buffers the last frame was placed in and what it was drawn from. A call with both the
+    /// same draws the next still sample. A call with the same buffers may place its frame late.
     placed: Option<(Buffers, Inputs)>,
 }
 
@@ -188,7 +189,7 @@ impl Inputs {
     }
 }
 
-/// The host's buffers are taken to hold the last frame placed into ones that match.
+/// The host's buffers are assumed to hold the last frame placed into matching ones.
 #[derive(Clone, Copy, PartialEq)]
 struct Buffers {
     width: u32,
@@ -211,14 +212,13 @@ impl Buffers {
     }
 }
 
-/// A frame submitted and not yet placed in the host's buffers.
+/// A frame that was submitted and not yet placed in the host's buffers.
 struct Pending {
     buffers: Buffers,
     inputs: Inputs,
     formats: [(vk::Format, usize); 3],
-    /// Per AOV, whether the frame read it back.
     read: [bool; 3],
-    /// Whether the view was culled, so its counts are this frame's.
+    /// Whether the view was culled, so its counts belong to this frame.
     culled: bool,
     recorded: stats::Recorded,
 }
@@ -289,14 +289,9 @@ impl Renderer {
         Ok(())
     }
 
-    /// Returns whether the buffers now hold this frame, with no material build still out and
-    /// its samples all drawn. While frames change, each call returns the frame before and leaves
-    /// this one on the GPU, so GPU work overlaps the host's own frame time instead of running in
-    /// series with it. While nothing changes, each call draws the next sample until converged.
-    ///
-    /// In order: place the frame before; return if nothing is left to draw; update the geometry,
-    /// materials, lights and view; record the passes; submit; place the frame now or leave it
-    /// pending.
+    /// Returns whether the buffers now hold this frame, with no build still out and all its samples
+    /// drawn. While frames change, each call places the frame before and leaves this one on the
+    /// GPU, so GPU work overlaps the host's own frame time.
     pub fn render(&mut self, frame: Frame) -> Result<bool, String> {
         let period = self.stats.begin_render();
         frame.check()?;
@@ -327,7 +322,7 @@ impl Renderer {
         let target = match &mut self.target {
             Some(t) if t.fits(&formats, w, h) => t,
             slot => {
-                // Free the old target before allocating its replacement.
+                // Free the old target before allocating the new one.
                 *slot = None;
                 slot.insert(Target::new(
                     &self.device,
@@ -359,10 +354,10 @@ impl Renderer {
         )?;
         self.commands.mark("texture")?;
         laps.lap("textures");
-        // Asked again, since the update above may have ended a texture swap: a swap begun draws
-        // the old image until whole, but its end must start the sum again.
+        // Asked again, because the update above may have finished a texture swap. A swap draws the
+        // old image until the new one is complete, but finishing must start the sum again.
         let sample = (self.film).begin(unchanged && self.shade.settled());
-        // Texture needs above take the unjittered camera: jitter moves a pixel by under one.
+        // Texture needs use the unjittered camera, since jitter moves a pixel by less than one.
         let unjittered = camera;
         let jitter = self.film.jitter();
         let camera = unjittered.jittered(jitter, [w, h]);
@@ -437,7 +432,8 @@ impl Renderer {
         target.end_rendering(cb);
         self.commands.mark("draw")?;
         laps.lap("draw");
-        // Between the prepass and shading, which reads them: pages follow the depth drawn.
+        // This sits between the prepass and shading, which reads the shadows, because pages follow
+        // the depth drawn.
         if let Some((geometry, view)) = drawn {
             let moving = self.geometry.moved_instances(&moved, &update);
             let commands = &mut self.commands;
@@ -457,9 +453,8 @@ impl Renderer {
         (self.film).record(&self.device, cb, target, &unjittered)?;
         self.commands.mark("film")?;
         laps.lap("film");
-        // A still view's depth and normal are its sample 0's, at the pixels' centres, as
-        // EEVEE's data passes keep the sample nearest; the host's buffers hold them after.
-        // While anything changes they are each frame's, jittered.
+        // A still view's depth and normal come from its sample 0, at the pixels' centres, as EEVEE's
+        // data passes keep the nearest sample. While anything changes, they come from each frame.
         let read = [0, 1, 2].map(|i| aovs[i].is_some() && (i == COLOR || sample == 0));
         target.readback(cb, &read);
         self.commands.mark("readback")?;
@@ -492,7 +487,7 @@ impl Renderer {
         Ok(self.shade.settled() && self.film.converged())
     }
 
-    /// Places the pending frame only if `aovs` are the buffers it was drawn for.
+    /// Places the pending frame, but only if `aovs` are the buffers it was drawn for.
     fn collect(
         &mut self,
         pending: Pending,
@@ -511,7 +506,7 @@ impl Renderer {
         let fits = pending.buffers == *buffers;
         if fits {
             for (i, aov) in aovs.iter_mut().enumerate() {
-                // An AOV not read back keeps what the buffer holds.
+                // An AOV that wasn't read back keeps what the buffer holds.
                 let Some(aov) = aov.as_mut().filter(|_| pending.read[i]) else {
                     continue;
                 };

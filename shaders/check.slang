@@ -1,4 +1,4 @@
-// The first-frame check: fills `rect` (pixels, x0 y0 x1 y1, end exclusive) of a `size` target.
+// Fills `rect` (x0 y0 x1 y1 in pixels, end exclusive) of a `size` target.
 
 struct Push
 {
@@ -18,7 +18,7 @@ float4 vs(uint id: SV_VulkanVertexID) : SV_Position
 {
     int2 c = corners[id];
     int2 px = int2(c.x == 1 ? push.rect.z : push.rect.x, c.y == 1 ? push.rect.w : push.rect.y);
-    // Vulkan's NDC has y down; exact in float for a power-of-two size, keeping pixel edges.
+    // Vulkan's NDC has y down. Exact in float for a power-of-two size, keeping pixel edges.
     return float4(float2(px) * 2.0 / float2(push.size) - 1.0, 0.0, 1.0);
 }
 

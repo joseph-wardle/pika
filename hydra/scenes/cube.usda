@@ -18,8 +18,7 @@ def Xform "world"
         uniform token subdivisionScheme = "none"
     }
 
-    # π lux toward the camera's view, under which a facing Lambert surface
-    # shows its albedo.
+    # π lux along the view, under which a facing Lambert surface shows its albedo.
     def DistantLight "light"
     {
         float inputs:angle = 0

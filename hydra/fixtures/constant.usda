@@ -5,9 +5,8 @@
     upAxis = "Y"
 )
 
-# A constant node's value is a value: the generator folds the node into
-# the input it feeds, whose uniform carries the value, so frame 2's edit to
-# it compiles nothing.
+# The generator folds a constant node into the input it feeds, so frame 2's edit to it compiles
+# nothing.
 #
 # compiles: 1 then 0
 def Xform "world"

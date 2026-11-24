@@ -1,15 +1,11 @@
-// One view as its passes read it, at the one push constant's address: push constants
-// guarantee only 128 bytes, which the camera and addresses alone filled.
+// One view, read at the push constant's address. Push constants guarantee only 128 bytes.
 
 #pragma once
 
-// A vertex's normal index when its normal is its point's smooth normal.
 static const uint SMOOTH = 0xffffffff;
-// A vertex's texcoord index when its mesh has none.
 static const uint NONE = 0xffffffff;
 
-// x, y, z as signed 10-bit fractions of 511 from the low bits, handedness in the top two
-// (A2B10G10R10_SNORM); 10 bits turn a unit vector by at most 0.1°, under 8-bit normal maps.
+// A2B10G10R10_SNORM, handedness in the top two bits.
 uint pack_tangent(float4 t)
 {
     uint3 xyz = uint3(int3(round(clamp(t.xyz, -1, 1) * 511))) & 0x3ff;
@@ -23,14 +19,13 @@ float4 unpack_tangent(uint packed)
     return float4(float3(xyz) / 511, float(int(packed) >> 30));
 }
 
-// A light's shape (src/light.rs).
 static const uint DISTANT = 0;
 static const uint SPHERE = 1;
 static const uint RECT = 2;
 static const uint DISK = 3;
 static const uint CYLINDER = 4;
 
-// A light as src/light.rs writes it, field for field.
+// src/light.rs mirrors it.
 struct Light
 {
     float3 position;
@@ -43,53 +38,37 @@ struct Light
     float fade;
     uint link;
     float far;
-    // Its map in the view's shadows, or NO_SHADOW.
     uint shadow;
     uint pad;
 };
 
 static const uint NO_SHADOW = 0xffffffff;
 
-// A light's virtual shadow map, as src/shadow.rs's module doc describes it. A page holds depth
-// from the light as float bits, so the nearest caster is the least. A distant light's level i
-// spans 2^(finest + i) world units, its depth in [0, 1] over the casters; its tiles are held
-// wrapped, at their place from the light-space origin modulo TILES, so a level moving with the
-// camera keeps the tiles it still covers. A local light's depth is the distance along the
-// face's axis.
+// Depth as float bits, nearest least. A distant light's level i spans 2^(finest + i) world units,
+// its tiles wrapping modulo TILES so a level moving with the camera keeps those it still covers.
 static const uint LEVELS = 16;
-// At most 32: shadow.slang keeps a row of tiles in one uint's bits and packs a tile's place in
-// 8.
+// At most 32, since shadow.slang keeps a row of tiles in a uint and a tile's place in 8 bits.
 static const uint TILES = 32;
 static const uint PAGE = 256;
 static const uint TILEMAP = TILES * TILES;
-// A tile with no page; before allocation, 0 is unmarked.
+// Before allocation, 0 means unmarked.
 static const uint NO_PAGE = 0xffffffff;
 
 struct Shadow
 {
-    // World to light space, rows of the column-vector matrix. A distant light's: x and y in
-    // world units across the light, z its depth in [0, 1] over the casters. A local light's:
-    // its frame about its centre, z out of a rect or disk light's lit side.
+    // Rows of the column-vector matrix.
     float4 light_space[3];
-    // Per level, its first tile counted from the light-space origin, in that level's tiles;
-    // 0 for a local light.
     int2 origin[LEVELS];
-    // A distant light's finest level's exponent, and how many levels follow it.
     int finest;
     uint levels;
-    // A pixel's world width per unit of camera clip w.
+    // A pixel's world width per unit of clip w.
     float pixel;
-    // The shadow-link bit casters must carry, 0 when every mesh casts.
     uint link;
-    // 0 for a distant light, else 6, or 5 for a rect or disk light, whose -z face sees
-    // nothing it lights.
+    // 0 for distant, 5 for a rect or disk, whose -z face sees nothing it lights, else 6.
     uint faces;
-    // A local light's clipping distances along a face's axis.
     float near;
     float far;
-    // 1 when its light's map changed or the frame is fresh: every page it holds is drawn anew.
     uint reset;
-    // LEVELS × TILEMAP per shadow (start()): a page or NO_PAGE.
     uint *tiles;
     Atomic<uint> *pool;
 };
@@ -105,26 +84,22 @@ bool distant(Shadow *s)
     return s->faces == 0;
 }
 
-// The faces of a shadow's map: a distant light's level is one.
 uint face_count(Shadow *s)
 {
     return max(s->faces, 1);
 }
 
-// Tiles across level i, or a local light's LOD i.
 uint tiles_across(Shadow *s, uint i)
 {
     return distant(s) ? TILES : TILES >> i;
 }
 
-// Where level i's tiles start in a shadow's tiles: a distant light's level by level, a local
-// light's LOD by LOD, six faces each, face by face, then row by row; a distant light's
-// level is wrapped.
+// Distant levels in order. Local LODs in order, six faces each. Then row by row.
 uint start(Shadow *s, uint i)
 {
     if (distant(s))
         return i * TILEMAP;
-    // 6 × the tiles of LODs 0 to i - 1: 4096 (1 - 4^-i) / 3 × 6.
+    // 6 × the tiles of LODs 0 to i - 1, 4096 (1 - 4^-i) / 3 × 6
     return 8192 - (8192 >> (2 * i));
 }
 
@@ -136,7 +111,6 @@ uint tile_index(Shadow *s, uint i, uint face, int2 t)
     return start(s, i) + (face * across + t.y) * across + t.x;
 }
 
-// A face's axes in a local light's space: x and y across it, z along it.
 float3 on_face(uint face, float3 q)
 {
     switch (face)
@@ -150,7 +124,6 @@ float3 on_face(uint face, float3 q)
     }
 }
 
-// The face a direction from the light's centre meets, 0 for +z (on_face's order).
 uint face_of(float3 q)
 {
     float3 a = abs(q);
@@ -161,19 +134,17 @@ uint face_of(float3 q)
     return q.y > 0 ? 3 : 4;
 }
 
-// A point across a face, in [-1, 1], in its tiles at LOD i.
 float2 face_tiles(float2 uv, uint across)
 {
     return (uv * 0.5 + 0.5) * float(across);
 }
 
-// A tile's world width at level i: a power of two, so dividing by it is exact.
+// A power of two, so dividing by it is exact.
 float tile_width(Shadow *s, uint i)
 {
     return exp2(float(s->finest + int(i))) / TILES;
 }
 
-// Outside the level, a tile index just past its edge.
 int2 tile_at(Shadow *s, float2 q, uint i)
 {
     float2 t = floor(q / tile_width(s, i)) - float2(s->origin[i]);
@@ -185,8 +156,7 @@ bool inside(int2 t)
     return all(t >= 0) && all(t < int(TILES));
 }
 
-// The finest level whose texels are no wider than a pixel at P, w its camera clip w, and
-// whose tiles hold P; the coarsest holds every mesh (src/shadow.rs).
+// The finest level whose texels are no wider than a pixel at P and whose tiles hold P.
 uint level_at(Shadow *s, float3 q, float w)
 {
     float want = floor(log2(w * s->pixel * TILES * PAGE)) - float(s->finest);
@@ -196,21 +166,17 @@ uint level_at(Shadow *s, float3 q, float w)
     return i;
 }
 
-// The finest LOD whose texels are no wider than a pixel at a point depth along its face from
-// a local light; a face is 2 depth wide.
 uint lod_at(Shadow *s, float depth, float w)
 {
     float want = floor(log2(w * s->pixel * TILES * PAGE / (2 * depth)));
     return uint(clamp(want, 0, float(s->levels - 1)));
 }
 
-// A texel's world width at level i; for a local light, at a point depth along its face.
 float texel_width(Shadow *s, uint i, float depth)
 {
     return distant(s) ? tile_width(s, i) / PAGE : 2 * depth * exp2(float(i)) / (TILES * PAGE);
 }
 
-// Past its reach it has faded to 0; a rect or disk lights only the cross(u, v) side.
 bool lit_by(Light light, float3 P, uint link)
 {
     if ((light.link & link) != light.link)
@@ -223,35 +189,28 @@ bool lit_by(Light light, float3 P, uint link)
     return (light.shape != RECT && light.shape != DISK) || dot(d, cross(light.u, light.v)) > 0;
 }
 
-// The dome light's irradiance image, a latlong (src/dome.rs).
 static const uint2 IRRADIANCE = uint2(64, 32);
 
-// The dome light a view is lit by; black when it has none.
 struct Dome
 {
-    // World to its image's axes, a row each.
     float3 axes[3];
     float3 radiance;
-    // Per IRRADIANCE texel from the top row, 3 floats: its image's irradiance over π.
+    // 3 floats per texel from the top row, irradiance over π.
     float *irradiance;
-    // Its image in folded squares, 3 floats a texel: the sharp one, REFLECTION wide; each
-    // blurred level, half as wide as the one before down to REFLECTION_LEAST; then the sharp
-    // one's plain halvings.
+    // Folded squares, 3 floats a texel: the sharp one, then each blurred level at half the width
+    // down to REFLECTION_LEAST, then the sharp one's plain halvings.
     float *reflection;
 };
 
-// The sharp square's side, and the levels a roughness reads (src/dome.rs).
 static const uint REFLECTION = 1024;
 static const uint REFLECTION_LEVELS = 8;
-// A coarser level creases along the fold's edges, where four texels blend across a bend.
+// Coarser levels crease along the fold's edges, where four texels blend across a bend.
 static const uint REFLECTION_LEAST = 128;
-// The last level's roughness, the roughness that reads the irradiance alone, and the power
-// of roughness the levels are spaced evenly in.
 static const float REFLECTION_ROUGHEST = 0.6;
 static const float REFLECTION_MATTE = 0.9;
 static const float REFLECTION_SPACING = 0.75;
 
-// Where a folded (octahedral) square holds direction d: +y at its centre, -y at its corners.
+// Octahedral, +y at the centre, -y at the corners.
 float2 folded(float3 d)
 {
     d /= abs(d.x) + abs(d.y) + abs(d.z);
@@ -272,7 +231,6 @@ uint reflection_side(uint level)
     return max(REFLECTION >> level, REFLECTION_LEAST);
 }
 
-// A blurred level's first texel, or a plain halving's, in a dome's reflection.
 uint reflection_level(uint level)
 {
     uint first = 0;
@@ -291,7 +249,6 @@ uint reflection_halving(uint halving)
 
 float3 reflection_texel(float *square, int side, int2 t)
 {
-    // Past an edge is the edge's own texel mirrored about the edge's middle.
     if (t.x < 0 || t.x >= side)
         t = int2(clamp(t.x, 0, side - 1), side - 1 - t.y);
     if (t.y < 0 || t.y >= side)
@@ -300,7 +257,6 @@ float3 reflection_texel(float *square, int side, int2 t)
     return float3(texel[0], texel[1], texel[2]);
 }
 
-// A square's four texels about uv.
 float3 reflection_square(float *square, int side, float2 uv)
 {
     float2 at = uv * side - 0.5;
@@ -311,8 +267,7 @@ float3 reflection_square(float *square, int side, float2 uv)
     return lerp(a, b, f.y);
 }
 
-// Where a latlong image holds direction d, as OpenEXR and so UsdLux lay it out: +y along the
-// top row, +z at the centre, +x a quarter in from the left.
+// As OpenEXR and UsdLux lay it out: +y along the top row, +z at the centre, +x a quarter in.
 float2 latlong(float3 d)
 {
     // atan2 is undefined at a pole, where any column serves.
@@ -326,51 +281,39 @@ float3 from_latlong(float2 uv)
     return float3(cos(angle.y) * sin(angle.x), sin(angle.y), cos(angle.y) * cos(angle.x));
 }
 
-// The side of a light tile in pixels (src/light.rs TILE).
 static const uint LIGHT_TILE = 16;
 
 struct View
 {
-    // World to clip space (src/transform.rs Camera): rows of the
-    // column-vector matrix, depth reversed.
+    // Rows of the column-vector matrix, depth reversed.
     float4 view_projection[4];
-    // The camera position (w = 1), or the direction toward it (w = 0).
+    // The camera position (w = 1), or the direction to it (w = 0).
     float4 eye;
-    // The frame before's view_projection, unjittered (src/film.rs).
     float4 previous_view_projection[4];
     Light *lights;
-    // Per tile, row by row: the first of its tile_lights and how many.
     uint2 *light_tiles;
     uint *tile_lights;
     uint2 extent;
-    // Where view_projection moves each pixel's sample, in pixels from its centre.
+    // In pixels from the pixel's centre.
     float2 jitter;
-    // The frame's index into the shadow pattern's sequence (src/film.rs Film::pattern).
     uint pattern;
     uint unused;
     float *points;
     float *normals;
     float *smooth;
     uint2 *vertices;
-    // Per texcoord value, and the texcoord index (or NONE) per vertex.
     float *texcoord;
     uint *vertex_texcoord;
     uint *tangents;
-    // 7 per instance (src/transform.rs Instance).
     float4 *instances;
-    // The instances as the frame before drew them (src/draw.rs Draws).
     float4 *previous_instances;
-    // The points as the frame before drew them (src/geometry.rs Layout).
     float *previous_points;
     uint *owners;
-    // Per record: the low corner of its mesh's box, then the high one.
     float *boxes;
-    // vk::DrawIndexedIndirectCommand, 5 per record; the cull pass counts instance_count.
+    // The cull pass counts instance_count.
     Atomic<uint> *records;
-    // The instances the cull pass kept, at each record's first instance.
     uint *visible;
     Atomic<uint> *drawn;
-    // Each shadowed light's, at its Light.shadow.
     Shadow *shadows;
     Dome dome;
 };

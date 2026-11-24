@@ -5,9 +5,8 @@
     upAxis = "Y"
 )
 
-# A mesh carries one texcoord: the float2 primvar its material reads, by
-# name. This one has two, perfuv and st, and its material reads perfuv; the
-# edit makes it read st, which reaches the mesh through its material.
+# A mesh carries one texcoord, the float2 primvar its material reads by name. Of perfuv and st it
+# reads perfuv, and the edit makes it read st, which reaches the mesh through its material.
 #
 # compiles: 1 then 1
 # bakes: 1 then 0

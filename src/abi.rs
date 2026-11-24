@@ -1,4 +1,4 @@
-//! The C ABI the Hydra delegate calls; `hydra/pika.h` states its contract.
+//! The C functions the Hydra delegate calls.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -17,7 +17,6 @@ pub const OK: i32 = 0;
 pub const ERROR: i32 = 1;
 pub const PANIC: i32 = 2;
 
-/// The mutex serializes Hydra's parallel sync and is what a panic poisons.
 pub type Handle = Mutex<Renderer>;
 
 #[repr(C)]
@@ -86,9 +85,9 @@ pub struct CRefinedTexcoord {
 }
 
 /// # Safety
-/// `s`'s arrays must be valid for the reads its counts say.
+/// Each of `s`'s arrays must be as long as its count says.
 unsafe fn stencils(s: &CStencils) -> Stencils {
-    // SAFETY: the caller guarantees the arrays.
+    // SAFETY: the caller passes arrays as long as their counts.
     unsafe {
         Stencils {
             offsets: slice(s.offsets, s.count + 1).to_vec(),
@@ -192,7 +191,7 @@ fn call(f: impl FnOnce() -> Result<(), String>) -> i32 {
             ),
         ),
     };
-    // C would cut a message at a NUL.
+    // C would end the message at the first NUL.
     let message = CString::new(message.replace('\0', " ")).unwrap_or_default();
     LAST_ERROR.with(|e| *e.borrow_mut() = message);
     status
@@ -206,7 +205,7 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
         .unwrap_or_else(|| "unknown payload".into())
 }
 
-/// Empty Hydra arrays may pass null, which `slice::from_raw_parts` forbids.
+/// Hydra may pass null for an empty array, which `slice::from_raw_parts` does not allow.
 ///
 /// # Safety
 /// Unless `len` is 0, `ptr` must be valid for `len` reads for `'a`.
@@ -259,14 +258,14 @@ unsafe fn value(p: &CParam) -> Result<Value, String> {
 }
 
 /// # Safety
-/// `c`'s arrays must be valid for their counts and its strings NUL-terminated.
+/// `c`'s arrays must be as long as their counts, and its strings NUL-terminated.
 unsafe fn network(c: &CNetwork) -> Result<Network, String> {
     let mut network = Network {
-        // SAFETY: the caller guarantees the string.
+        // SAFETY: the caller passes a NUL-terminated surface path.
         surface: unsafe { path(c.surface)? },
         ..Default::default()
     };
-    // SAFETY: the caller guarantees the arrays.
+    // SAFETY: the caller passes node and connection arrays as long as their counts.
     let (nodes, connections) = unsafe {
         (
             slice(c.nodes, c.node_count),
@@ -274,7 +273,7 @@ unsafe fn network(c: &CNetwork) -> Result<Network, String> {
         )
     };
     for n in nodes {
-        // SAFETY: as above.
+        // SAFETY: each node's strings are NUL-terminated and its params as long as its count.
         let (path, node_type, params) = unsafe {
             (
                 string(n.path)?,
@@ -287,14 +286,14 @@ unsafe fn network(c: &CNetwork) -> Result<Network, String> {
             ..Default::default()
         };
         for p in params {
-            // SAFETY: as above.
+            // SAFETY: each param's strings are NUL-terminated.
             let (name, value) = unsafe { (string(p.name)?, value(p)?) };
             node.params.insert(name, value);
         }
         network.nodes.insert(path, node);
     }
     for c in connections {
-        // SAFETY: as above.
+        // SAFETY: each connection's strings are NUL-terminated.
         let (from, output, to, input) = unsafe {
             (
                 string(c.from)?,
@@ -333,7 +332,7 @@ pub unsafe extern "C" fn pika_renderer_new(out: *mut *mut Handle) -> i32 {
         let renderer = Renderer::new()?;
         eprintln!("pika: rendering on {}", renderer.device_name);
         let handle = Box::into_raw(Box::new(Mutex::new(renderer)));
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(handle) };
         Ok(())
     })
@@ -344,7 +343,7 @@ pub unsafe extern "C" fn pika_renderer_new(out: *mut *mut Handle) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
     call(|| {
-        // SAFETY: the caller passes ownership of a pointer from `Box::into_raw`.
+        // SAFETY: the delegate hands back a pointer from `Box::into_raw` and never uses it again.
         let handle = unsafe { Box::from_raw(renderer) };
         let renderer = handle.into_inner().unwrap_or_else(|e| e.into_inner());
         eprintln!("pika: {}", renderer.stats.summary());
@@ -353,7 +352,7 @@ pub unsafe extern "C" fn pika_renderer_free(renderer: *mut Handle) -> i32 {
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_render(
     renderer: *const Handle,
@@ -361,25 +360,25 @@ pub unsafe extern "C" fn pika_render(
     converged: *mut bool,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the frame.
+        // SAFETY: the delegate passes a renderer it has not freed and a frame.
         let (handle, f) = unsafe { (&*renderer, &*frame) };
         let aov = |a: &CAov, name: &str| -> Result<Option<Aov>, String> {
             if a.pixels.is_null() {
                 return Ok(None);
             }
-            // SAFETY: the caller guarantees the format string.
+            // SAFETY: the AOV's format is a NUL-terminated string.
             let format = unsafe { string(a.format)? };
             Ok(Some(Aov {
                 format: Format::from_name(&format).map_err(|e| format!("the {name} AOV: {e}"))?,
-                // SAFETY: the caller guarantees `len` writable bytes.
+                // SAFETY: the delegate passes an AOV buffer of `len` bytes.
                 pixels: unsafe { std::slice::from_raw_parts_mut(a.pixels, a.len) },
             }))
         };
         let window = f.window.map(|v| u32::try_from(v).unwrap_or(u32::MAX));
-        // SAFETY: the caller guarantees the frame's arrays and strings.
+        // SAFETY: the delegate passes `render_tag_count` tags.
         let render_tags = unsafe { slice(f.render_tags, f.render_tag_count) }
             .iter()
-            // SAFETY: as above.
+            // SAFETY: each tag is a NUL-terminated string.
             .map(|&t| unsafe { string(t) })
             .collect::<Result<_, _>>()?;
         let frame = Frame {
@@ -398,14 +397,14 @@ pub unsafe extern "C" fn pika_render(
             sun_threshold: f.sun_threshold,
         };
         let done = lock(handle)?.render(frame)?;
-        // SAFETY: the caller guarantees one write.
+        // SAFETY: the delegate passes room for one value.
         unsafe { *converged = done };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_new(
     renderer: *const Handle,
@@ -413,25 +412,25 @@ pub unsafe extern "C" fn pika_mesh_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, path) = unsafe { (&*renderer, string(path)?) };
         let id = lock(handle)?.store.insert_mesh(path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_mesh(id))
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_topology(
     renderer: *const Handle,
@@ -439,30 +438,30 @@ pub unsafe extern "C" fn pika_mesh_topology(
     topology: *const CTopology,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and every array.
+        // SAFETY: the delegate passes a renderer it has not freed and arrays as long as their counts.
         let (handle, t) = unsafe { (&*renderer, &*topology) };
         let mut subsets = Vec::new();
-        // SAFETY: as above.
+        // SAFETY: `t.subsets` holds `t.subset_count` subsets.
         for s in unsafe { slice(t.subsets, t.subset_count) } {
             subsets.push(Subset {
-                // SAFETY: as above.
+                // SAFETY: each subset's material is NUL-terminated and its faces as long as their count.
                 material: unsafe { string(s.material)? },
                 faces: unsafe { slice(s.faces, s.face_count) }.to_vec(),
             });
         }
         let topology = Topology {
-            // SAFETY: as above.
+            // SAFETY: the scheme is a NUL-terminated string.
             scheme: Scheme::from_token(&unsafe { string(t.scheme)? })?,
-            // SAFETY: as above.
+            // SAFETY: the topology's arrays are as long as their counts.
             face_vertex_counts: unsafe { slice(t.face_vertex_counts, t.face_count) }.to_vec(),
             face_vertex_indices: unsafe { slice(t.face_vertex_indices, t.index_count) }.to_vec(),
             left_handed: t.left_handed,
-            // SAFETY: as above.
+            // SAFETY: the holes are as long as their count.
             holes: unsafe { slice(t.holes, t.hole_count) }.to_vec(),
             subsets,
-            // SAFETY: as above.
+            // SAFETY: `refined` is null or points at a refined topology.
             refined: unsafe { t.refined.as_ref() }.map(|r| Refined {
-                // SAFETY: as above.
+                // SAFETY: the refined arrays and stencils are as long as their counts.
                 face_vertex_counts: unsafe { slice(r.face_vertex_counts, r.face_count) }.to_vec(),
                 face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
                     .to_vec(),
@@ -475,7 +474,7 @@ pub unsafe extern "C" fn pika_mesh_topology(
 }
 
 /// # Safety
-/// `renderer` must be live, and `points` valid for `count` reads.
+/// `renderer` must not have been freed, and `points` must point at `count` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_points(
     renderer: *const Handle,
@@ -484,14 +483,14 @@ pub unsafe extern "C" fn pika_mesh_points(
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the array.
+        // SAFETY: the delegate passes a renderer it has not freed and `count` values.
         let (handle, points) = unsafe { (&*renderer, slice(points, count).to_vec()) };
         lock(handle)?.store.set_points(id, points)
     })
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_normals(
     renderer: *const Handle,
@@ -501,9 +500,9 @@ pub unsafe extern "C" fn pika_mesh_normals(
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the string and the array.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, token) = unsafe { (&*renderer, string(interpolation)?) };
-        // SAFETY: as above.
+        // SAFETY: `normals` holds `count` values.
         let values = unsafe { slice(normals, count) }.to_vec();
         let normals = Normals {
             interpolation: Interpolation::from_token(&token)?,
@@ -514,15 +513,15 @@ pub unsafe extern "C" fn pika_mesh_normals(
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_no_normals(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.set_normals(id, None))
 }
 
 /// # Safety
-/// `renderer` must be live and `out` valid for `capacity` writes.
+/// `renderer` must not have been freed, and `out` must have room for `capacity` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_texcoord_name(
     renderer: *const Handle,
@@ -531,7 +530,7 @@ pub unsafe extern "C" fn pika_mesh_texcoord_name(
     capacity: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer.
+        // SAFETY: the delegate passes a renderer it has not freed.
         let name = lock(unsafe { &*renderer })?.store.texcoord_name(id)?;
         let name = CString::new(name.unwrap_or_default())
             .map_err(|_| "the primvar's name holds a NUL".to_owned())?;
@@ -541,8 +540,7 @@ pub unsafe extern "C" fn pika_mesh_texcoord_name(
                 "the primvar's name {name:?} is longer than {capacity} bytes"
             ));
         }
-        // SAFETY: the caller guarantees `capacity` writable bytes at `out`,
-        // and `bytes` is no longer.
+        // SAFETY: the delegate passes `capacity` bytes at `out`, and `bytes` is no longer than that.
         unsafe {
             out.cast::<u8>()
                 .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len())
@@ -552,7 +550,7 @@ pub unsafe extern "C" fn pika_mesh_texcoord_name(
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_texcoord(
     renderer: *const Handle,
@@ -564,17 +562,17 @@ pub unsafe extern "C" fn pika_mesh_texcoord(
     refined: *const CRefinedTexcoord,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the strings and the arrays.
+        // SAFETY: the delegate passes a renderer it has not freed and NUL-terminated strings.
         let (handle, name, token) = unsafe { (&*renderer, string(name)?, string(interpolation)?) };
-        // SAFETY: as above.
+        // SAFETY: `values` holds `count` values.
         let values = unsafe { slice(values, count) }.to_vec();
         let texcoord = Texcoord {
             name,
             interpolation: Interpolation::from_token(&token)?,
             values,
-            // SAFETY: as above.
+            // SAFETY: `refined` is null or points at a refined texcoord.
             refined: unsafe { refined.as_ref() }.map(|r| RefinedTexcoord {
-                // SAFETY: as above.
+                // SAFETY: its indices and stencils are as long as their counts.
                 face_vertex_indices: unsafe { slice(r.face_vertex_indices, r.index_count) }
                     .to_vec(),
                 stencils: unsafe { stencils(&r.stencils) },
@@ -585,15 +583,15 @@ pub unsafe extern "C" fn pika_mesh_texcoord(
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_no_texcoord(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.set_texcoord(id, None))
 }
 
 /// # Safety
-/// `renderer` must be live, and `matrix` valid for 16 reads.
+/// `renderer` must not have been freed, and `matrix` must point at 16 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_transform(
     renderer: *const Handle,
@@ -601,22 +599,22 @@ pub unsafe extern "C" fn pika_mesh_transform(
     matrix: *const [f64; 16],
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the matrix.
+        // SAFETY: the delegate passes a renderer it has not freed and 16 matrix values.
         let (handle, matrix) = unsafe { (&*renderer, *matrix) };
         lock(handle)?.store.set_transform(id, matrix)
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_visible(renderer: *const Handle, id: u64, visible: bool) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.set_visible(id, visible))
 }
 
 /// # Safety
-/// `renderer` must be live, and `tag` a NUL-terminated string.
+/// `renderer` must not have been freed, and `tag` must be a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_render_tag(
     renderer: *const Handle,
@@ -624,14 +622,14 @@ pub unsafe extern "C" fn pika_mesh_render_tag(
     tag: *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, tag) = unsafe { (&*renderer, string(tag)?) };
         lock(handle)?.store.set_render_tag(id, tag)
     })
 }
 
 /// # Safety
-/// `renderer` must be live, and `material` a NUL-terminated string.
+/// `renderer` must not have been freed, and `material` must be a NUL-terminated string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_material(
     renderer: *const Handle,
@@ -639,14 +637,14 @@ pub unsafe extern "C" fn pika_mesh_material(
     material: *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, material) = unsafe { (&*renderer, string(material)?) };
         lock(handle)?.store.set_material(id, material)
     })
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_instancer(
     renderer: *const Handle,
@@ -656,11 +654,11 @@ pub unsafe extern "C" fn pika_mesh_instancer(
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the string and the array.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, instancer) = unsafe { (&*renderer, path(instancer)?) };
         let instancing = instancer.map(|instancer| Instancing {
             instancer,
-            // SAFETY: as above.
+            // SAFETY: `indices` holds `count` values.
             indices: unsafe { slice(indices, count) }.to_vec(),
         });
         lock(handle)?.store.set_instancing(id, instancing)
@@ -668,7 +666,7 @@ pub unsafe extern "C" fn pika_mesh_instancer(
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_mesh_categories(
     renderer: *const Handle,
@@ -677,10 +675,10 @@ pub unsafe extern "C" fn pika_mesh_categories(
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the array.
+        // SAFETY: the delegate passes a renderer it has not freed and `count` values.
         let (handle, categories) = unsafe { (&*renderer, slice(categories, count)) };
         let categories = (categories.iter())
-            // SAFETY: as above.
+            // SAFETY: each category is a NUL-terminated string.
             .map(|&c| unsafe { string(c) })
             .collect::<Result<_, _>>()?;
         lock(handle)?.store.set_categories(id, categories)
@@ -688,7 +686,7 @@ pub unsafe extern "C" fn pika_mesh_categories(
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_new(
     renderer: *const Handle,
@@ -696,25 +694,25 @@ pub unsafe extern "C" fn pika_instancer_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, path) = unsafe { (&*renderer, string(path)?) };
         let id = lock(handle)?.store.insert_instancer(path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_instancer(id))
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_parent(
     renderer: *const Handle,
@@ -724,11 +722,11 @@ pub unsafe extern "C" fn pika_instancer_parent(
     count: usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer, the string and the array.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, parent) = unsafe { (&*renderer, path(parent)?) };
         let parent = parent.map(|instancer| Instancing {
             instancer,
-            // SAFETY: as above.
+            // SAFETY: `indices` holds `count` values.
             indices: unsafe { slice(indices, count) }.to_vec(),
         });
         lock(handle)?.store.set_instancer_parent(id, parent)
@@ -736,7 +734,7 @@ pub unsafe extern "C" fn pika_instancer_parent(
 }
 
 /// # Safety
-/// `renderer` must be live, `counts` valid for `count` reads and `categories` for their sum.
+/// `renderer` must not have been freed. `counts` must hold `count` values, and `categories` as many strings as they add up to.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_categories(
     renderer: *const Handle,
@@ -746,16 +744,16 @@ pub unsafe extern "C" fn pika_instancer_categories(
     categories: *const *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the arrays.
+        // SAFETY: the delegate passes a renderer it has not freed and `count` counts.
         let (handle, counts) = unsafe { (&*renderer, slice(counts, count)) };
-        // SAFETY: as above.
+        // SAFETY: `categories` holds as many strings as `counts` adds up to.
         let tokens = unsafe { slice(categories, counts.iter().sum()) };
         let mut instances = Vec::with_capacity(count);
         let mut rest = tokens;
         for &n in counts {
             let (now, later) = rest.split_at(n);
             rest = later;
-            // SAFETY: as above.
+            // SAFETY: each of them is a NUL-terminated string.
             let set = (now.iter()).map(|&c| unsafe { string(c) });
             instances.push(set.collect::<Result<_, _>>()?);
         }
@@ -765,7 +763,7 @@ pub unsafe extern "C" fn pika_instancer_categories(
 }
 
 /// # Safety
-/// `renderer` must be live, and `matrix` valid for 16 reads.
+/// `renderer` must not have been freed, and `matrix` must point at 16 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_transform(
     renderer: *const Handle,
@@ -773,14 +771,14 @@ pub unsafe extern "C" fn pika_instancer_transform(
     matrix: *const [f64; 16],
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the matrix.
+        // SAFETY: the delegate passes a renderer it has not freed and 16 matrix values.
         let (handle, matrix) = unsafe { (&*renderer, *matrix) };
         lock(handle)?.store.set_instancer_transform(id, matrix)
     })
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_instancer_primvars(
     renderer: *const Handle,
@@ -788,9 +786,9 @@ pub unsafe extern "C" fn pika_instancer_primvars(
     primvars: *const CInstancePrimvars,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and every array.
+        // SAFETY: the delegate passes a renderer it has not freed and arrays as long as their counts.
         let (handle, p) = unsafe { (&*renderer, &*primvars) };
-        // SAFETY: as above.
+        // SAFETY: each primvar array is null or as long as its count.
         let primvars = unsafe {
             InstancePrimvars {
                 transforms: primvar(p.transforms, p.transform_count),
@@ -804,7 +802,7 @@ pub unsafe extern "C" fn pika_instancer_primvars(
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_new(
     renderer: *const Handle,
@@ -812,25 +810,25 @@ pub unsafe extern "C" fn pika_material_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, path) = unsafe { (&*renderer, string(path)?) };
         let id = lock(handle)?.store.insert_material(path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_material(id))
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_material_network(
     renderer: *const Handle,
@@ -839,17 +837,17 @@ pub unsafe extern "C" fn pika_material_network(
     dirty: *mut bool,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the network.
+        // SAFETY: the delegate passes a renderer it has not freed and a network whose arrays and strings are valid.
         let (handle, network) = unsafe { (&*renderer, self::network(&*network)?) };
         let changed = lock(handle)?.store.set_network(id, network)?;
-        // SAFETY: the caller guarantees `dirty` is writable.
+        // SAFETY: the delegate passes room for one value at `dirty`.
         unsafe { dirty.write(changed) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_curves_new(
     renderer: *const Handle,
@@ -857,33 +855,33 @@ pub unsafe extern "C" fn pika_curves_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, path) = unsafe { (&*renderer, string(path)?) };
         let id = lock(handle)?.store.insert_curves(path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_curves_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_curves(id))
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_curves_pulled(renderer: *const Handle, id: u64, bytes: usize) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.pulled_curves(id, bytes))
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_new(
     renderer: *const Handle,
@@ -891,25 +889,25 @@ pub unsafe extern "C" fn pika_light_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the string.
+        // SAFETY: the delegate passes a renderer it has not freed and a NUL-terminated string.
         let (handle, path) = unsafe { (&*renderer, string(path)?) };
         let id = lock(handle)?.store.insert_light(path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_light(id))
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_params(
     renderer: *const Handle,
@@ -917,9 +915,9 @@ pub unsafe extern "C" fn pika_light_params(
     params: *const CLight,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the params.
+        // SAFETY: the delegate passes a renderer it has not freed and the light's parameters.
         let (handle, p) = unsafe { (&*renderer, &*params) };
-        // SAFETY: the caller guarantees the type string.
+        // SAFETY: the light's type is a NUL-terminated string.
         let shape = match unsafe { string(p.light_type)? }.as_str() {
             "distantLight" => Shape::Distant { angle: p.angle },
             "sphereLight" => Shape::Sphere { radius: p.radius },
@@ -949,7 +947,7 @@ pub unsafe extern "C" fn pika_light_params(
 }
 
 /// # Safety
-/// `renderer` must be live, and `matrix` valid for 16 reads.
+/// `renderer` must not have been freed, and `matrix` must point at 16 values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_transform(
     renderer: *const Handle,
@@ -957,14 +955,14 @@ pub unsafe extern "C" fn pika_light_transform(
     matrix: *const [f64; 16],
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the matrix.
+        // SAFETY: the delegate passes a renderer it has not freed and 16 matrix values.
         let (handle, matrix) = unsafe { (&*renderer, *matrix) };
         lock(handle)?.store.set_light_transform(id, matrix)
     })
 }
 
 /// # Safety
-/// `renderer` must be live, and `file` and `format` NUL-terminated strings.
+/// `renderer` must not have been freed, and `file` and `format` must be NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_texture(
     renderer: *const Handle,
@@ -973,7 +971,7 @@ pub unsafe extern "C" fn pika_light_texture(
     format: *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the strings.
+        // SAFETY: the delegate passes a renderer it has not freed and NUL-terminated strings.
         let (handle, file, format) = unsafe { (&*renderer, string(file)?, string(format)?) };
         let texture = Texture { file, format };
         lock(handle)?.store.set_light_texture(id, texture)
@@ -981,7 +979,7 @@ pub unsafe extern "C" fn pika_light_texture(
 }
 
 /// # Safety
-/// `renderer` must be live, and `light` and `shadow` NUL-terminated strings.
+/// `renderer` must not have been freed, and `light` and `shadow` must be NUL-terminated strings.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_light_link(
     renderer: *const Handle,
@@ -990,7 +988,7 @@ pub unsafe extern "C" fn pika_light_link(
     shadow: *const c_char,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the strings.
+        // SAFETY: the delegate passes a renderer it has not freed and NUL-terminated strings.
         let (handle, light, shadow) = unsafe { (&*renderer, string(light)?, string(shadow)?) };
         let link = Link { light, shadow };
         lock(handle)?.store.set_light_link(id, link)
@@ -998,7 +996,7 @@ pub unsafe extern "C" fn pika_light_link(
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_counted_new(
     renderer: *const Handle,
@@ -1007,44 +1005,44 @@ pub unsafe extern "C" fn pika_counted_new(
     out: *mut u64,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer and the strings.
+        // SAFETY: the delegate passes a renderer it has not freed and NUL-terminated strings.
         let (handle, prim_type, path) = unsafe { (&*renderer, string(prim_type)?, string(path)?) };
         let id = lock(handle)?.store.insert_counted(prim_type, path);
-        // SAFETY: the caller guarantees `out` is writable.
+        // SAFETY: the delegate passes room for one value at `out`.
         unsafe { out.write(id) };
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_counted_free(renderer: *const Handle, id: u64) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.store.remove_counted(id))
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_sync_begin(renderer: *const Handle) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer.
+        // SAFETY: the delegate passes a renderer it has not freed.
         lock(unsafe { &*renderer })?.begin_sync();
         Ok(())
     })
 }
 
 /// # Safety
-/// `renderer` must be live.
+/// `renderer` must not have been freed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_sync_end(renderer: *const Handle) -> i32 {
-    // SAFETY: the caller guarantees the renderer.
+    // SAFETY: the delegate passes a renderer it has not freed.
     call(|| lock(unsafe { &*renderer })?.end_sync())
 }
 
 /// # Safety
-/// `renderer` must be live and every pointer valid for the call.
+/// `renderer` must not have been freed, and every other pointer must be valid for the whole call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn pika_stats(
     renderer: *const Handle,
@@ -1053,7 +1051,7 @@ pub unsafe extern "C" fn pika_stats(
     count: *mut usize,
 ) -> i32 {
     call(|| {
-        // SAFETY: the caller guarantees the renderer.
+        // SAFETY: the delegate passes a renderer it has not freed.
         let pairs = lock(unsafe { &*renderer })?.stats.host();
         if pairs.len() > capacity {
             return Err(format!("{} stats do not fit in {capacity}", pairs.len()));
@@ -1069,10 +1067,10 @@ pub unsafe extern "C" fn pika_stats(
             for (c, b) in stat.key.iter_mut().zip(key.bytes()) {
                 *c = b as c_char;
             }
-            // SAFETY: `i` is below `capacity`, which the caller guarantees.
+            // SAFETY: `i` is below `capacity`, and the delegate passes room for that many stats.
             unsafe { out.add(i).write(stat) };
         }
-        // SAFETY: the caller guarantees one write.
+        // SAFETY: the delegate passes room for one value.
         unsafe { count.write(pairs.len()) };
         Ok(())
     })
@@ -1135,7 +1133,7 @@ mod tests {
             panic!("bug");
         };
         assert_eq!(call(panic_while_locked), PANIC);
-        // The same lock passed above, so this fails only because of the panic.
+        // The same call passed before the panic, so the panic is why it fails now.
         assert_eq!(call(use_lock), ERROR);
         assert_eq!(last_error(), "poisoned");
     }

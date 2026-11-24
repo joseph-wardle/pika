@@ -5,8 +5,8 @@
     upAxis = "Y"
 )
 
-# A point instancer hands its positions, orientations and scales over as
-# separate primvars, with the instancer's own transform beside them.
+# Positions, orientations and scales arrive as separate primvars, with the instancer's own
+# transform beside them.
 def Xform "world"
 {
     def Camera "camera" {}

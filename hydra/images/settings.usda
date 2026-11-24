@@ -20,8 +20,7 @@ def Scope "render"
                 </render/settings/product/normal>,
             ]
 
-            # husk names the Hydra AOV after driver:parameters:aov:husk:name,
-            # not sourceName.
+            # husk names the Hydra AOV after driver:parameters:aov:husk:name, not sourceName.
             def RenderVar "color"
             {
                 uniform token dataType = "color4f"

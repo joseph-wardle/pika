@@ -32,12 +32,9 @@ public:
     Pika(Pika const &) = delete;
     Pika &operator=(Pika const &) = delete;
 
-    // Null when no GPU opened, or after Pika panicked: it then renders nothing until the delegate
-    // is recreated.
     pika_renderer *renderer() const { return _stopped ? nullptr : _renderer; }
 
-    // After a panic every call fails, so the first to see it stops the rest and is the only one
-    // reported.
+    // After a panic every call fails, so only the first to see it is reported.
     bool report(int status, std::string const &what) const {
         if (status == PIKA_OK)
             return true;
@@ -49,7 +46,6 @@ public:
 
 private:
     pika_renderer *_renderer = nullptr;
-    // Hydra reads the stats through a const delegate.
     mutable std::atomic<bool> _stopped = false;
 };
 

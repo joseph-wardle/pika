@@ -1,4 +1,5 @@
-//! The prepass: draws the culled instances into depth, the depth and normal AOVs and motion.
+//! The prepass. It draws the culled instances into depth, the depth and normal AOVs, and
+//! motion.
 
 use ash::vk;
 
@@ -7,15 +8,13 @@ use crate::gpu;
 use crate::target;
 use crate::view::View;
 
-/// After color, in `shaders/mesh.slang`'s target order. Devices need not render to
-/// three-channel formats, so normals are drawn with a fourth.
+/// Comes after colour, in the target order of `shaders/mesh.slang`. Devices needn't render to
+/// three-channel formats, so normals are drawn with a fourth channel.
 pub const DEPTH_AOV: (vk::Format, usize) = (vk::Format::R32_SFLOAT, 4);
 pub const NORMAL_AOV: (vk::Format, usize) = (vk::Format::R32G32B32A32_SFLOAT, 16);
-/// After the AOVs: per pixel, the offset in pixels to where its surface was in the frame before,
-/// which `film` reprojects its history by. Half floats hold it within a sixty-fourth of a pixel
-/// below 32 pixels, where history matters most.
+/// Each pixel's offset to where its surface was in the frame before, which `film` reprojects
+/// with. Half floats keep it within 1/64 px below 32 px, where history matters most.
 pub const MOTION: vk::Format = vk::Format::R16G16_SFLOAT;
-/// Motion's place among the target's color attachments.
 pub const MOTION_ATTACHMENT: usize = 3;
 
 /// In the order of `pipelines`.
@@ -25,7 +24,7 @@ pub const COLOR_FORMATS: [vk::Format; 2] = [
 ];
 
 pub struct Raster {
-    // A copy of the owner's device table, which outlives this (field order).
+    // A copy of the owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     layout: vk::PipelineLayout,
     pipelines: Vec<vk::Pipeline>,
@@ -38,7 +37,7 @@ impl Raster {
             .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .size(size_of::<vk::DeviceAddress>() as u32)];
         let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `d` is live and `layout_info` outlives the call.
+        // SAFETY: the device is alive and `layout_info` outlives the call.
         let layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let mut r = Self {
@@ -47,7 +46,7 @@ impl Raster {
             pipelines: Vec::new(),
         };
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
-        // SAFETY: `d` is live and `module_info` outlives the call.
+        // SAFETY: the device is alive and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
@@ -76,7 +75,7 @@ impl Raster {
                 )
             })
             .collect();
-        // SAFETY: pipeline creation is complete, so the module is no longer used.
+        // SAFETY: the pipeline is built, so nothing uses the shader module any more.
         unsafe { d.destroy_shader_module(module, None) };
         // Kept before the error returns, so `drop` destroys them.
         r.pipelines = built.iter().filter_map(|p| p.clone().ok()).collect();
@@ -109,9 +108,8 @@ impl Raster {
             max_depth: 1.0,
         };
         let d = &self.device;
-        // SAFETY: `cb` is recording inside rendering of the formats this
-        // pipeline was built for, and every handle was created on `d`. The
-        // view's constants address live buffers, as large as the draws read.
+        // SAFETY: recording inside rendering with this pipeline's formats and handles from this device.
+        // The view's constants point at buffers as large as the draws read.
         unsafe {
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
             d.cmd_set_viewport(cb, 0, &[viewport]);
@@ -132,8 +130,8 @@ impl Raster {
 
 impl Drop for Raster {
     fn drop(&mut self) {
-        // SAFETY: every handle was created on `device`, and the owner's
-        // target waited for idle before this drops (field order).
+        // SAFETY: every handle was created on this device, and the owner's target waited for the
+        // device to go idle before this drops, by field order.
         unsafe {
             for &p in &self.pipelines {
                 self.device.destroy_pipeline(p, None);

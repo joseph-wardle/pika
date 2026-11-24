@@ -1,5 +1,5 @@
-//! The first-frame check: draws a known rectangle offscreen and compares the
-//! read-back pixels with the image it must produce.
+//! The first-frame check. It draws a known rectangle offscreen and compares the pixels read
+//! back with the image it must produce.
 
 use ash::vk;
 
@@ -8,24 +8,24 @@ use pika::gpu;
 use pika::shader::Shader;
 use pika::target::{self, Target};
 
-/// Width and height of the target. A power of two keeps the shader's pixel to
-/// NDC mapping exact, and positions must fit the 8-bit channels.
+/// The target's width and height. A power of two keeps the shader's mapping from pixels to NDC
+/// exact, and positions must fit in the 8-bit channels.
 pub const SIZE: i32 = 64;
 
-/// The drawn rectangle in pixels, `[x0, y0, x1, y1]` with exclusive ends.
-/// Off-centre and not square, so a flipped or transposed image fails.
+/// The drawn rectangle in pixels, `[x0, y0, x1, y1]` with exclusive ends. It is off-centre and
+/// not square, so a flipped or transposed image fails.
 pub const RECT: [i32; 4] = [16, 8, 56, 40];
 
-/// `RECT` moved 1 px right, the negative control. Because each pixel holds its
-/// own position, only the two edge columns differ: 2 × height pixels.
+/// `RECT` moved 1 px right, which is the negative control. Each pixel holds its own position,
+/// so only the two edge columns differ, which is 2 × height pixels.
 pub const SHIFTED: [i32; 4] = [17, 8, 57, 40];
 
 pub const SHIFTED_MISMATCHES: usize = 2 * (RECT[3] - RECT[1]) as usize;
 
 const FORMAT: vk::Format = vk::Format::R8G8B8A8_UINT;
 
-/// The image a draw of `rect` must produce: tightly packed RGBA8_UINT rows,
-/// `[x, y, 1, 255]` inside the rectangle and zero outside.
+/// The image a draw of `rect` must produce, as tightly packed RGBA8_UINT rows. Pixels inside
+/// the rectangle hold `[x, y, 1, 255]`, and pixels outside hold zero.
 pub fn expected(rect: [i32; 4]) -> Vec<u8> {
     let [x0, y0, x1, y1] = rect;
     let mut pixels = Vec::with_capacity((SIZE * SIZE * 4) as usize);
@@ -50,7 +50,7 @@ pub fn mismatches(a: &[u8], b: &[u8]) -> usize {
 }
 
 pub struct Offscreen<'a> {
-    // Field order is drop order: the commands and target wait for idle first.
+    // Fields drop in order, so the commands and target wait for idle first.
     commands: Commands,
     target: Target,
     device: &'a gpu::Device<'a>,
@@ -66,7 +66,7 @@ impl<'a> Offscreen<'a> {
             .stage_flags(vk::ShaderStageFlags::VERTEX)
             .size(size_of::<Push>() as u32)];
         let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `device.raw` is live and `layout_info` outlives the call.
+        // SAFETY: the device is alive and `layout_info` outlives the call.
         let layout = unsafe { device.raw.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let mut o = Self {
@@ -81,7 +81,7 @@ impl<'a> Offscreen<'a> {
     }
 
     pub fn draw(&mut self, rect: [i32; 4]) -> Result<Vec<u8>, String> {
-        // A draw or copy that never lands leaves 0xCD, which no pixel can be.
+        // A draw or copy that never lands leaves 0xCD, which no pixel can hold.
         self.target.pixels(0).fill(0xCD);
         let cb = self.commands.begin()?;
         self.target
@@ -91,7 +91,8 @@ impl<'a> Offscreen<'a> {
             size: [SIZE, SIZE],
         };
         let d = &self.device.raw;
-        // SAFETY: `cb` is recording inside rendering of the format the pipeline was built for on `d`.
+        // SAFETY: the command buffer is recording inside rendering with the format the pipeline was
+        // built for on this device.
         unsafe {
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
             d.cmd_push_constants(
@@ -114,7 +115,8 @@ impl<'a> Offscreen<'a> {
 impl Drop for Offscreen<'_> {
     fn drop(&mut self) {
         let d = &self.device.raw;
-        // SAFETY: both handles are `d`'s or null, and no submit is pending: `draw` waits for each.
+        // SAFETY: both handles came from this device or are null, and no submit is pending, because
+        // `draw` waits for each one.
         unsafe {
             d.destroy_pipeline(self.pipeline, None);
             d.destroy_pipeline_layout(self.layout, None);
@@ -122,7 +124,7 @@ impl Drop for Offscreen<'_> {
     }
 }
 
-/// Laid out as Slang lays out `check.slang`'s `Push`.
+/// Laid out as Slang lays out `Push` in `check.slang`.
 #[repr(C)]
 struct Push {
     rect: [i32; 4],
@@ -139,7 +141,8 @@ impl Push {
     }
 }
 
-/// No blending: integer formats cannot blend. The target's depth buffer is attached but unused.
+/// No blending, because integer formats can't blend. The target's depth buffer is attached but
+/// unused.
 fn pipeline(
     d: &ash::Device,
     layout: vk::PipelineLayout,
@@ -147,7 +150,7 @@ fn pipeline(
     area: vk::Rect2D,
 ) -> Result<vk::Pipeline, String> {
     let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
-    // SAFETY: `d` is live and `module_info` outlives the call.
+    // SAFETY: the device is alive and `module_info` outlives the call.
     let module = unsafe { d.create_shader_module(&module_info, None) }
         .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
     let stages = [
@@ -200,9 +203,10 @@ fn pipeline(
         .depth_stencil_state(&depth)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: `d` is live, `module` and `layout` are its, and `info`'s pointees outlive the call.
+    // SAFETY: the device is alive, `module` and `layout` came from it, and everything `info`
+    // points to outlives the call.
     let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) };
-    // SAFETY: pipeline creation is complete, so the module is no longer used.
+    // SAFETY: the pipeline is built, so nothing uses the shader module any more.
     unsafe { d.destroy_shader_module(module, None) };
     pipeline
         .map(|p| p[0])
@@ -245,7 +249,7 @@ mod tests {
 
     #[test]
     fn unwritten_readback_fails_every_pixel() {
-        // The GPU path prefills the readback buffer with 0xCD before each draw.
+        // The GPU path fills the readback buffer with 0xCD before each draw.
         let unwritten = vec![0xCD; (SIZE * SIZE * 4) as usize];
         assert_eq!(
             mismatches(&expected(RECT), &unwritten),

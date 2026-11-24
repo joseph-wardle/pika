@@ -1,9 +1,6 @@
-"""usdview's --testScript for the gate run (hydra/gate.sh): sizes the
-viewport to 1080p at ALab's 3:2, shows the render purpose, repaints until
-Pika's stats say a frame was drawn with no material or texture pending
-(every build landed, every texture at the levels that fit), then plays frames 1004-1057 twice as the Play button does
-(playing on, setFrame, a synchronous repaint). Pika writes the numbers to
-PIKA_STATS.
+"""usdview's --testScript for hydra/gate.sh. Sizes the viewport to 1080p at ALab's 3:2, shows the
+render purpose, repaints until Pika's stats say a frame was drawn with nothing pending, then plays
+frames 1004-1057 twice as the Play button does (playing on, setFrame, a synchronous repaint).
 """
 
 import os
@@ -20,7 +17,7 @@ PATIENCE = 600
 def testUsdviewInputFunction(appController):
     app = QtWidgets.QApplication.instance()
     view = appController._stageView
-    # ALab's textures are 145 GB at their own size; GATE_CAP=512 is the run to compare with.
+    # ALab's textures are 145 GB at their own size. GATE_CAP=512 is the run to compare with.
     cap = int(os.environ.get("GATE_CAP", "0"))
     if cap:
         view.SetRendererSetting("pika:textureCap", cap)

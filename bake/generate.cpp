@@ -1,6 +1,3 @@
-// The generate tool, run apart from the host so MaterialX never loads beside the host's own.
-// MaterialX supplies the BSDFs; the eye, the lights and the light loop are Pika's.
-
 #include <MaterialXCore/Document.h>
 #include <MaterialXFormat/Util.h>
 #include <MaterialXFormat/XmlIo.h>
@@ -217,13 +214,10 @@ void generate(std::string const &path, std::string const &out) {
     context.registerSourceCodeSearchPath(mx::FilePath(materialx));
     mx::GenOptions &options = context.getOptions();
     options.hwSpecularEnvironmentMethod = mx::SPECULAR_ENVIRONMENT_NONE;
-    // Surface's loop reads the lights from the view.
     options.hwMaxActiveLightSources = 0;
     options.hwImplicitBitangents = true;
     mx::ShaderPtr shader = generator->generate("pika", material, context);
 
-    // Without environment lighting the generated code reads this without
-    // declaring it.
     std::string pixel = "static const bool u_refractionTwoSided = false;\n" +
                         shader->getSourceCode(mx::Stage::PIXEL);
     mx::ShaderStage const &stage = shader->getStage(mx::Stage::PIXEL);
@@ -240,7 +234,7 @@ void libraries() {
     for (auto const &entry : std::filesystem::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file())
             continue;
-        // stat, as std::filesystem's clock has its own epoch before C++20.
+        // std::filesystem's clock has its own epoch before C++20.
         struct stat status;
         if (stat(entry.path().c_str(), &status) != 0)
             throw std::runtime_error("cannot stat " + entry.path().string());

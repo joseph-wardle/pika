@@ -1,4 +1,4 @@
-//! Vulkan instance, device, buffers and pipelines.
+//! The Vulkan instance and device, and the buffers and pipelines built on them.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -18,7 +18,7 @@ pub struct DeviceInfo {
     pub vram_bytes: u64,
     pub ray_query: bool,
     pub memory_budget: bool,
-    /// First family with graphics, compute and timestamps.
+    /// The first queue family with graphics, compute and timestamps.
     pub queue_family: Option<u32>,
     pub timestamp_bits: u32,
     /// Nanoseconds per timestamp tick.
@@ -74,10 +74,10 @@ pub fn version_string(v: u32) -> String {
 }
 
 pub struct Instance {
-    // `entry` keeps libvulkan loaded; it must outlive `raw`.
+    // `entry` keeps libvulkan loaded, so it must outlive `raw`.
     _entry: ash::Entry,
     raw: ash::Instance,
-    // Boxed: the messenger's callback holds a pointer to it.
+    // Boxed, because the messenger's callback holds a pointer to it.
     messages: Box<AtomicU32>,
     messenger: Option<(ash::ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     pub loader_version: u32,
@@ -86,7 +86,7 @@ pub struct Instance {
 
 impl Instance {
     pub fn new() -> Result<Self, String> {
-        // SAFETY: loading libvulkan runs its initialisers; the loader is trusted.
+        // SAFETY: loading libvulkan runs its initialisers, and the system's loader is trusted.
         let entry = unsafe { ash::Entry::load() }.map_err(|e| {
             format!(
                 "could not load the Vulkan loader (libvulkan.so.1): {e}. \
@@ -95,7 +95,7 @@ impl Instance {
             )
         })?;
 
-        // SAFETY: `entry` is a loaded Vulkan library.
+        // SAFETY: `entry` holds a loaded Vulkan library.
         let loader_version = unsafe { entry.try_enumerate_instance_version() }
             .map_err(|e| format!("vkEnumerateInstanceVersion failed: {e}"))?
             .unwrap_or(vk::API_VERSION_1_0);
@@ -109,13 +109,13 @@ impl Instance {
         let validation = validation_found(&entry)?;
         let messages = Box::new(AtomicU32::new(0));
 
-        // Sync validation is off in the layer's defaults.
+        // The layer leaves sync validation off by default.
         let sync_on = vk::TRUE;
         let mut sync = vk::LayerSettingEXT::default()
             .layer_name(VALIDATION_LAYER)
             .setting_name(c"validate_sync")
             .ty(vk::LayerSettingTypeEXT::BOOL32);
-        // ash's `values` takes bytes and would count four values, not one.
+        // ash's `values` takes bytes, so it would count four values instead of one.
         sync.value_count = 1;
         sync.p_values = (&raw const sync_on).cast();
         let settings = [sync];
@@ -149,11 +149,11 @@ impl Instance {
                 .push_next(&mut layer_settings)
                 .push_next(&mut messenger_info);
         }
-        // SAFETY: `create_info` and what it points to outlive the call.
+        // SAFETY: `create_info` and everything it points to outlive the call.
         let raw = unsafe { entry.create_instance(&create_info, None) }
             .map_err(|e| format!("vkCreateInstance failed: {e}"))?;
 
-        // From here `raw` must be destroyed on error, so build `Self` first.
+        // From here on `raw` must be destroyed if anything fails, so build `Self` first.
         let mut instance = Self {
             messenger: None,
             messages,
@@ -164,12 +164,12 @@ impl Instance {
         };
         if validation {
             let loader = ash::ext::debug_utils::Instance::new(&instance._entry, &instance.raw);
-            // SAFETY: debug_utils is enabled; `user_data` outlives the messenger.
+            // SAFETY: debug_utils is enabled, and `user_data` outlives the messenger.
             let messenger = unsafe { loader.create_debug_utils_messenger(&messenger_info, None) }
                 .map_err(|e| format!("vkCreateDebugUtilsMessengerEXT failed: {e}"))?;
             instance.messenger = Some((loader, messenger));
         }
-        // SAFETY: `instance.raw` is a live instance.
+        // SAFETY: the instance is alive.
         let physical = unsafe { instance.raw.enumerate_physical_devices() }
             .map_err(|e| format!("vkEnumeratePhysicalDevices failed: {e}"))?;
         instance.devices = physical
@@ -179,7 +179,7 @@ impl Instance {
         Ok(instance)
     }
 
-    /// `None` if the validation layer was not found.
+    /// `None` if the validation layer wasn't found.
     pub fn validation_messages(&self) -> Option<u32> {
         self.messenger
             .as_ref()
@@ -187,7 +187,7 @@ impl Instance {
     }
 
     fn describe(&self, pd: vk::PhysicalDevice) -> Result<DeviceInfo, String> {
-        // SAFETY: `pd` came from this instance, which is live.
+        // SAFETY: `pd` came from this instance, which is alive.
         let (props, memory, families, extensions) = unsafe {
             (
                 self.raw.get_physical_device_properties(pd),
@@ -246,8 +246,8 @@ impl Instance {
         let queues = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family)
             .queue_priorities(&priorities)];
-        // Scalar block layout is slangc's pointer layout and `repr(C)`'s: a float3
-        // after a float3 sits at offset 12.
+        // Scalar block layout matches slangc's pointer layout and `repr(C)`. A float3 that follows a
+        // float3 sits at offset 12.
         let mut vulkan13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true);
@@ -270,7 +270,7 @@ impl Instance {
             .enabled_extension_names(extensions)
             .push_next(&mut vulkan12)
             .push_next(&mut vulkan13);
-        // SAFETY: the physical device is this instance's; `create_info` outlives the call.
+        // SAFETY: the physical device belongs to this instance, and `create_info` outlives the call.
         let raw =
             unsafe { self.raw.create_device(info.handle, &create_info, None) }.map_err(|e| {
                 format!(
@@ -281,9 +281,9 @@ impl Instance {
                     info.name
                 )
             })?;
-        // SAFETY: `raw` was created with one queue in `queue_family`.
+        // SAFETY: the device was created with one queue in `queue_family`.
         let queue = unsafe { raw.get_device_queue(queue_family, 0) };
-        // SAFETY: the physical device belongs to this live instance.
+        // SAFETY: the physical device belongs to this instance, which is alive.
         let memory = unsafe { self.raw.get_physical_device_memory_properties(info.handle) };
         let ceiling = match std::env::var("PIKA_BUDGET") {
             Ok(s) if !s.is_empty() => Some(
@@ -310,16 +310,16 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         if let Some((loader, messenger)) = &self.messenger {
-            // SAFETY: the messenger was created on this instance and is destroyed once.
+            // SAFETY: the messenger was created on this instance and is destroyed only here.
             unsafe { loader.destroy_debug_utils_messenger(*messenger, None) };
         }
-        // SAFETY: every `Device` borrows this instance, so none outlives it.
+        // SAFETY: every `Device` borrows this instance, so none of them outlives it.
         unsafe { self.raw.destroy_instance(None) };
     }
 }
 
 fn validation_found(entry: &ash::Entry) -> Result<bool, String> {
-    // SAFETY: `entry` is a loaded Vulkan library.
+    // SAFETY: `entry` holds a loaded Vulkan library.
     let layers = unsafe { entry.enumerate_instance_layer_properties() }
         .map_err(|e| format!("vkEnumerateInstanceLayerProperties failed: {e}"))?;
     if !layers
@@ -328,7 +328,7 @@ fn validation_found(entry: &ash::Entry) -> Result<bool, String> {
     {
         return Ok(false);
     }
-    // SAFETY: `entry` is a loaded Vulkan library.
+    // SAFETY: `entry` holds a loaded Vulkan library.
     let extensions =
         unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) }
             .map_err(|e| format!("vkEnumerateInstanceExtensionProperties failed: {e}"))?;
@@ -351,7 +351,7 @@ unsafe extern "system" fn count_message(
     data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     messages: *mut c_void,
 ) -> vk::Bool32 {
-    // SAFETY: the layer passes valid data; `messages` outlives the messenger.
+    // SAFETY: the layer passes valid data, and `messages` outlives the messenger.
     let (text, messages) = unsafe { ((*data).message_as_c_str(), &*messages.cast::<AtomicU32>()) };
     messages.fetch_add(1, Ordering::Relaxed);
     let text = text.map_or("<no message>".into(), |t| t.to_string_lossy());
@@ -369,17 +369,17 @@ pub struct Device<'a> {
     pub timestamp_period: f32,
     pub memory_types: Vec<vk::MemoryType>,
     memory_budget: bool,
-    /// `PIKA_BUDGET` bytes, replacing each device-local heap's budget.
+    /// `PIKA_BUDGET` in bytes, which replaces each device-local heap's budget.
     ceiling: Option<u64>,
 }
 
 impl Device<'_> {
     pub fn limits(&self) -> vk::PhysicalDeviceLimits {
-        // SAFETY: the physical device belongs to this live instance.
+        // SAFETY: the physical device belongs to this instance, which is alive.
         unsafe { (self.instance.raw).get_physical_device_properties(self.physical) }.limits
     }
 
-    /// Use and budget by heap index. Each heap is checked alone: the small
+    /// Use and budget for each heap, by index. Each heap is judged on its own, because the small
     /// CPU-writable device-local heap holds no textures however free it is.
     pub fn heaps(&self) -> Vec<Heap> {
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
@@ -387,7 +387,8 @@ impl Device<'_> {
         if self.memory_budget {
             properties = properties.push_next(&mut budget);
         }
-        // SAFETY: the device is the live instance's; `budget` is chained only if enabled.
+        // SAFETY: the device belongs to this instance, which is alive, and `budget` is chained only
+        // when the extension is enabled.
         unsafe {
             (self.instance.raw)
                 .get_physical_device_memory_properties2(self.physical, &mut properties)
@@ -413,14 +414,15 @@ impl Device<'_> {
     }
 }
 
-/// Bytes used and allowed; both 0 without `VK_EXT_memory_budget`.
+/// Bytes used and allowed. Both are 0 without `VK_EXT_memory_budget`.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Heap {
     pub used: u64,
     pub allowed: u64,
 }
 
-/// The first heap `needs` (bytes per heap) would overflow; an unknown budget takes anything.
+/// The first heap that `needs` (bytes per heap) would overflow. A heap with an unknown budget
+/// takes anything.
 pub fn overflow(heaps: &[Heap], needs: &[u64]) -> Option<usize> {
     (0..heaps.len()).find(|&i| {
         let h = heaps[i];
@@ -430,7 +432,7 @@ pub fn overflow(heaps: &[Heap], needs: &[u64]) -> Option<usize> {
 
 impl Drop for Device<'_> {
     fn drop(&mut self) {
-        // SAFETY: every object on this device borrows it, so all are destroyed and idle.
+        // SAFETY: every object on this device borrows it, so all of them are destroyed and idle.
         unsafe { self.raw.destroy_device(None) };
     }
 }
@@ -450,7 +452,7 @@ pub fn allocate(
             flags,
         )?)
         .push_next(&mut flags_info);
-    // SAFETY: `device.raw` is live and `info` outlives the call.
+    // SAFETY: the device is alive and `info` outlives the call.
     unsafe { device.raw.allocate_memory(&info, None) }.map_err(|e| {
         format!(
             "vkAllocateMemory ({} bytes, {flags:?}) failed: {e}",
@@ -472,15 +474,16 @@ impl std::ops::AddAssign for Memory {
     }
 }
 
-/// Handles start null so a failed `new` can drop a partly built buffer.
-/// Only for padding-free plain values: floats, integers, the shaders' `repr(C)` records.
+/// Only for plain values without padding, such as floats, integers and the shaders' `repr(C)`
+/// records.
 pub fn bytes<T: Copy>(values: &[T]) -> &[u8] {
-    // SAFETY: callers pass padding-free plain data, so every byte is initialized.
+    // SAFETY: callers pass plain data without padding, so every byte is initialized.
     unsafe { std::slice::from_raw_parts(values.as_ptr().cast(), size_of_val(values)) }
 }
 
+/// Handles start null, so a failed `new` can drop a partly built buffer.
 pub struct Buffer {
-    // Owners keep the `Device` alive longer than their buffers (field order).
+    // Owners keep the `Device` alive longer than their buffers, by field order.
     device: ash::Device,
     pub raw: vk::Buffer,
     memory: vk::DeviceMemory,
@@ -490,7 +493,7 @@ pub struct Buffer {
     mapped: *mut u8,
 }
 
-// SAFETY: `mapped` is memory this buffer owns, dereferenced only through `&mut self`.
+// SAFETY: `mapped` is memory this buffer owns, and it is only reached through `&mut self`.
 unsafe impl Send for Buffer {}
 
 impl Buffer {
@@ -501,7 +504,7 @@ impl Buffer {
     ) -> Result<Self, String> {
         let usage = usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         let mut b = Self::create(device, size, usage)?;
-        // SAFETY: `b.raw` was created on `device.raw`, which is live.
+        // SAFETY: the buffer was created on this device, which is alive.
         let needs = unsafe { device.raw.get_buffer_memory_requirements(b.raw) };
         b.memory = allocate(
             device,
@@ -509,11 +512,11 @@ impl Buffer {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
             vk::MemoryAllocateFlags::DEVICE_ADDRESS,
         )?;
-        // SAFETY: as above, and the memory was just allocated for this buffer.
+        // SAFETY: the buffer was created on this device, and the memory was just allocated for it.
         unsafe { device.raw.bind_buffer_memory(b.raw, b.memory, 0) }
             .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
         let info = vk::BufferDeviceAddressInfo::default().buffer(b.raw);
-        // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS and is bound.
+        // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS usage and its memory is bound.
         b.address = unsafe { device.raw.get_buffer_device_address(&info) };
         Ok(b)
     }
@@ -526,7 +529,7 @@ impl Buffer {
         flags: vk::MemoryPropertyFlags,
     ) -> Result<Self, String> {
         let mut b = Self::create(device, size, usage)?;
-        // SAFETY: `b.raw` was created on `device.raw`, which is live.
+        // SAFETY: the buffer was created on this device, which is alive.
         let needs = unsafe { device.raw.get_buffer_memory_requirements(b.raw) };
         let addressed = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
         let allocate_flags = match addressed {
@@ -534,16 +537,16 @@ impl Buffer {
             false => vk::MemoryAllocateFlags::empty(),
         };
         b.memory = allocate(device, needs, flags, allocate_flags)?;
-        // SAFETY: as above, and the memory was just allocated for this buffer.
+        // SAFETY: the buffer was created on this device, and the memory was just allocated for it.
         unsafe { device.raw.bind_buffer_memory(b.raw, b.memory, 0) }
             .map_err(|e| format!("vkBindBufferMemory failed: {e}"))?;
         if addressed {
             let info = vk::BufferDeviceAddressInfo::default().buffer(b.raw);
-            // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS and is bound.
+            // SAFETY: the buffer was created with SHADER_DEVICE_ADDRESS usage and its memory is bound.
             b.address = unsafe { device.raw.get_buffer_device_address(&info) };
         }
         // Freeing the memory in `drop` also unmaps it.
-        // SAFETY: the memory is host visible and not yet mapped.
+        // SAFETY: the memory is host visible and not mapped yet.
         let mapped = unsafe {
             device
                 .raw
@@ -556,7 +559,7 @@ impl Buffer {
     }
 
     fn info(size: u64, usage: vk::BufferUsageFlags) -> vk::BufferCreateInfo<'static> {
-        // Vulkan has no empty buffers.
+        // Vulkan doesn't allow empty buffers.
         vk::BufferCreateInfo::default()
             .size(size.max(16))
             .usage(usage)
@@ -572,16 +575,16 @@ impl Buffer {
             mapped: std::ptr::null_mut(),
         };
         let info = Self::info(size, usage);
-        // SAFETY: `device.raw` is live and `info` outlives the call.
+        // SAFETY: the device is alive and `info` outlives the call.
         b.raw = unsafe { device.raw.create_buffer(&info, None) }
             .map_err(|e| format!("vkCreateBuffer ({size} bytes, {usage:?}) failed: {e}"))?;
         Ok(b)
     }
 
-    /// The caller must have waited for GPU work using the buffer.
+    /// The caller must have waited for any GPU work that uses the buffer.
     pub fn bytes(&mut self) -> &mut [u8] {
         assert!(!self.mapped.is_null(), "a device-local buffer has no bytes");
-        // SAFETY: `mapped` covers the whole memory, at least `size` bytes.
+        // SAFETY: `mapped` covers the whole memory, which is at least `size` bytes.
         unsafe { std::slice::from_raw_parts_mut(self.mapped, self.size as usize) }
     }
 
@@ -601,7 +604,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        // SAFETY: handles are from `device` or null, and the owner waited for idle.
+        // SAFETY: the handles came from this device or are null, and the device is idle.
         unsafe {
             self.device.destroy_buffer(self.raw, None);
             self.device.free_memory(self.memory, None);
@@ -634,8 +637,8 @@ pub fn graphics(
     let viewport = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);
-    // USD's counter-clockwise front faces wind clockwise here, as y is not
-    // flipped. hydra/images/behind.usda fails if this is reversed.
+    // USD's counter-clockwise front faces wind clockwise here, because y isn't flipped.
+    // hydra/images/behind.usda fails if this is reversed.
     let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
         .cull_mode(vk::CullModeFlags::NONE)
@@ -665,15 +668,16 @@ pub fn graphics(
         .dynamic_state(&dynamic)
         .layout(layout)
         .push_next(&mut rendering);
-    // SAFETY: `module` and `layout` are from the live `d`; `info` outlives the call.
+    // SAFETY: `module` and `layout` came from this live device, and `info` outlives the call.
     unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }
         .map(|p| p[0])
         .map_err(|(_, e)| format!("vkCreateGraphicsPipelines ({colors:?}) failed: {e}"))
 }
 
-/// Shaders read only push constants and walk their items in a grid-stride loop.
+/// A compute pass. Its shaders read only push constants and walk their items in a grid-stride
+/// loop.
 pub struct Compute {
-    // The owner's device table, which outlives this (field order).
+    // The owner's device table. The owner's device outlives this, by field order.
     device: ash::Device,
     layout: vk::PipelineLayout,
     pipeline: vk::Pipeline,
@@ -682,10 +686,9 @@ pub struct Compute {
 impl Compute {
     /// Must match the shaders' `numthreads(64, 1, 1)`.
     const GROUP_SIZE: u64 = 64;
-    /// Vulkan's guaranteed minimum of groups in one dispatch dimension.
+    /// The fewest groups Vulkan guarantees in one dispatch dimension.
     const MAX_GROUPS: u64 = 65535;
 
-    /// `name` is the module's entry point to build.
     pub fn new(
         device: &Device,
         spirv: &[u32],
@@ -697,7 +700,7 @@ impl Compute {
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
             .size(push_size as u32)];
         let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
-        // SAFETY: `d` is live and `layout_info` outlives the call.
+        // SAFETY: the device is alive and `layout_info` outlives the call.
         let layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
             .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
         let mut c = Self {
@@ -706,7 +709,7 @@ impl Compute {
             pipeline: vk::Pipeline::null(),
         };
         let module_info = vk::ShaderModuleCreateInfo::default().code(spirv);
-        // SAFETY: `d` is live and `module_info` outlives the call.
+        // SAFETY: the device is alive and `module_info` outlives the call.
         let module = unsafe { d.create_shader_module(&module_info, None) }
             .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
         let stage = vk::PipelineShaderStageCreateInfo::default()
@@ -716,9 +719,9 @@ impl Compute {
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage)
             .layout(c.layout);
-        // SAFETY: `module` and the layout are from the live `d`; `info` outlives the call.
+        // SAFETY: `module` and the layout came from this live device, and `info` outlives the call.
         let built = unsafe { d.create_compute_pipelines(vk::PipelineCache::null(), &[info], None) };
-        // SAFETY: pipeline creation is complete, so the module is no longer used.
+        // SAFETY: the pipeline is built, so nothing uses the shader module any more.
         unsafe { d.destroy_shader_module(module, None) };
         c.pipeline = built
             .map(|p| p[0])
@@ -726,8 +729,8 @@ impl Compute {
         Ok(c)
     }
 
-    /// One dispatch per range, outside rendering. `push(first, count, stride)`
-    /// returns a `repr(C)` struct without padding.
+    /// Records one dispatch per range, outside a render pass. `push(first, count, stride)` must
+    /// return a `repr(C)` struct without padding.
     pub fn record<P: Copy>(
         &self,
         cb: vk::CommandBuffer,
@@ -735,7 +738,7 @@ impl Compute {
         push: impl Fn(u32, u32, u32) -> P,
     ) {
         let d = &self.device;
-        // SAFETY: `cb` records outside rendering; the pipeline is from `d`.
+        // SAFETY: recording outside a render pass, with a pipeline from this device.
         unsafe { d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline) };
         for r in ranges.iter().filter(|r| !r.is_empty()) {
             let count = r.end - r.start;
@@ -744,7 +747,7 @@ impl Compute {
                 .min(Self::MAX_GROUPS);
             let constants = push(r.start, count, (groups * Self::GROUP_SIZE) as u32);
             let bytes = bytes(std::slice::from_ref(&constants));
-            // SAFETY: the layout was created on `d`.
+            // SAFETY: the layout was created on this device.
             unsafe {
                 d.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, bytes);
                 d.cmd_dispatch(cb, groups as u32, 1, 1);
@@ -755,7 +758,7 @@ impl Compute {
 
 impl Drop for Compute {
     fn drop(&mut self) {
-        // SAFETY: handles are from `device` or null; the owner waited for idle first.
+        // SAFETY: the handles came from this device or are null, and the device is idle.
         unsafe {
             self.device.destroy_pipeline(self.pipeline, None);
             self.device.destroy_pipeline_layout(self.layout, None);
@@ -799,23 +802,23 @@ mod tests {
             memory(host | vk::MemoryPropertyFlags::HOST_CACHED),
         ];
         assert_eq!(memory_type(&types, 0b1111, host), Ok(2));
-        // Type 2 matches but is not allowed.
+        // Type 2 has the properties but is not among the allowed types.
         assert_eq!(memory_type(&types, 0b1011, host), Ok(3));
         assert!(memory_type(&types, 0b0011, host).is_err());
     }
 
     #[test]
     fn each_heap_holds_only_its_own_allocations() {
-        // VRAM, host, and NVIDIA's small CPU-writable VRAM window.
+        // VRAM, host memory, and NVIDIA's small CPU-writable window into VRAM.
         let heap = |used, allowed| Heap { used, allowed };
         let heaps = [heap(10, 12), heap(0, 100), heap(1, 4)];
         assert_eq!(overflow(&heaps, &[2, 50, 3]), None);
         assert_eq!(overflow(&heaps, &[0, 0, 0]), None);
-        // Negative control: fits the summed free bytes, not heap 0's.
+        // Negative control: the needs fit the free bytes summed over heaps, but not heap 0's.
         assert_eq!(overflow(&heaps, &[3, 0, 0]), Some(0));
         assert_eq!(overflow(&heaps, &[0, 101, 0]), Some(1));
         assert_eq!(overflow(&heaps, &[0, 0, 4]), Some(2));
-        // A heap whose budget the driver does not report takes anything.
+        // A heap whose budget the driver doesn't report takes anything.
         assert_eq!(overflow(&[heap(0, 0)], &[1 << 40]), None);
     }
 

@@ -1,11 +1,10 @@
-// The frame data a generated pixel stage reads, the eye and the lights, written once a
-// frame in the view rather than in each material's block.
+// What a generated pixel stage reads of the frame, written once in the view, not per material.
 
 #pragma once
 
 #include "vertex.slang"
 
-// An orthographic eye goes far along its direction, so the view vector is that everywhere.
+// An orthographic eye is far along its direction, so the view vector is that everywhere.
 float3 eye()
 {
     return view->eye.w == 0.0 ? view->eye.xyz * 1e7 : view->eye.xyz;
@@ -34,8 +33,6 @@ uint2 tile(float3 P)
     return view->light_tiles[xy.y * grid.x + xy.x];
 }
 
-// MaterialX's environment hook for diffuse: the dome's irradiance over π on a surface facing
-// N, from its image's four texels about N, a row wrapping.
 float3 mx_environment_irradiance(float3 N)
 {
     Dome dome = view->dome;
@@ -55,9 +52,7 @@ float3 mx_environment_irradiance(float3 N)
     return dome.radiance * lerp(rows[0], rows[1], f.y);
 }
 
-// The dome's light reflected about N toward L by a surface of GGX alpha, for
-// mx_environment_radiance: the two levels about its roughness, and past the last the
-// irradiance, as EEVEE fades.
+// Blends the two levels about the roughness, past the last the irradiance, as EEVEE fades.
 float3 dome_radiance(float3 N, float3 L, float alpha)
 {
     Dome dome = view->dome;
@@ -74,8 +69,7 @@ float3 dome_radiance(float3 N, float3 L, float alpha)
     return matte == 0 ? radiance : lerp(radiance, mx_environment_irradiance(N), matte);
 }
 
-// Lambert's formula over the light's outline as P sees it, a polygon of up to 8 corners;
-// dot(N, it) is exact while the light is wholly above the horizon.
+// Lambert's formula over the light's outline as P sees it, up to 8 corners.
 float3 illuminance_vector(Light light, float3 c)
 {
     float3 corners[8];
@@ -85,12 +79,11 @@ float3 illuminance_vector(Light light, float3 c)
         float3 axis = normalize(light.u);
         float3 out = dot(c, axis) * axis - c;
         float rho = length(out);
-        // Inside it, or past an end within its radius, P sees no side.
         if (rho <= light.radius)
             return 0;
         out /= rho;
         float3 side = cross(axis, out);
-        // Each end arc gets four points, the middle two pushed out so chords touch it midway.
+        // Four points per end arc, the middle two pushed out so chords touch it midway.
         float phi = acos(light.radius / rho);
         for (uint k = 0; k < 4; k++)
         {
@@ -130,12 +123,11 @@ float3 illuminance_vector(Light light, float3 c)
         if (s > 0)
             sum += atan2(s, dot(a, b)) / s * k;
     }
-    // Wound either way round, it points toward the light.
     return 0.5 * (dot(sum, c) < 0 ? -sum : sum);
 }
 
-// Past its far: a point showing its projected area, 4 |u × v| for a rect, 2√2 |u × v|
-// for the octagon, 2 radius × 2 |u| side on for a cylinder.
+// Past `far`, a point of the light's projected area: 4 |u × v| for a rect, 2√2 |u × v| for the
+// octagon, 2 radius × 2 |u| side on for a cylinder.
 float3 far_illuminance_vector(Light light, float3 c)
 {
     float d2 = dot(c, c);
@@ -174,9 +166,7 @@ struct Lights
     }
 }
 
-// The geometric normal, which the shadow lookup offsets along. Derivatives need the uniform
-// control flow lights_at() runs in, not the light loop's; the loop gives visibility() only P,
-// and changing the call bake/generate.cpp emits re-bakes every texture.
+// Set in lights_at() for its uniform control flow. Changing bake/generate.cpp's call re-bakes.
 static float3 shadow_normal;
 
 Lights lights_at(float3 P, int link)
@@ -207,13 +197,10 @@ Incident incident_light(uint light_index, float3 P, float3 N)
         float3 toward = light.position - P;
         float d2 = dot(toward, toward);
         incident.direction = toward * rsqrt(d2);
-        // Exact as a point while above the horizon. Inside, no more than at its surface,
-        // less what it gives at its reach, so it fades to 0 there.
         float r = light.radius;
         incident.illuminance = light.illuminance * max(1 / max(d2, r * r) - light.fade, 0);
         return incident;
     }
-    // Diffuse takes the illuminance vector, as the BSDF's cosine wants; specular a point's.
     float3 c = light.position - P;
     float3 e = dot(c, c) >= light.far * light.far ? far_illuminance_vector(light, c)
                                                   : illuminance_vector(light, c);
@@ -223,8 +210,6 @@ Incident incident_light(uint light_index, float3 P, float3 N)
     return incident;
 }
 
-// Where light-space q falls in level i's tiles: the tile, q's place across it in [0, 1] and
-// its depth from the light. False off the level, or off a local light's faces.
 bool locate(Shadow *s, float3 q, uint i, out uint tile, out float2 across, out float depth)
 {
     tile = 0;
@@ -255,13 +240,9 @@ bool locate(Shadow *s, float3 q, uint i, out uint tile, out float2 across, out f
     return true;
 }
 
-// A texel with no caster (shaders/shadow.slang clear).
 static const uint EMPTY = 0xffffffff;
 
-// What level i stores at light-space q moved a texel of that level along nq, off the surface
-// toward the light so the surface does not shadow itself: the caster nearest the light, as
-// float bits, and the moved q's depth. False where the level holds no page. along is q's depth
-// along its face of a local light, which sets the texel's width.
+// Read a texel along nq toward the light, so a surface doesn't shadow itself.
 bool read(Shadow *s, float3 q, float3 nq, uint i, float along, out uint caster, out float depth,
           out float texel)
 {
@@ -279,16 +260,14 @@ bool read(Shadow *s, float3 q, float3 nq, uint i, float along, out uint caster, 
     return true;
 }
 
-// What the level a pixel at camera clip w wants at q reads (read()). Past the pool a level may
-// have no page there, so coarser ones are tried, then the finer one a pixel on a level's edge
-// may have marked instead.
+// Past the pool a level may have no page, so coarser ones are tried, then the finer one a pixel
+// on a level's edge may have marked instead.
 bool lookup(Shadow *s, float3 q, float3 nq, float w, out uint caster, out float depth,
             out float texel)
 {
     caster = EMPTY;
     depth = 0;
     texel = 0;
-    // A local light's texels widen with the depth along q's own face.
     float along = on_face(face_of(q), q).z;
     uint first = distant(s) ? level_at(s, q, w) : lod_at(s, along, w);
     for (uint i = first; i < s->levels; i++)
@@ -299,7 +278,6 @@ bool lookup(Shadow *s, float3 q, float3 nq, float w, out uint caster, out float 
     return first > 0 && read(s, q, nq, first - 1, along, caster, depth, texel);
 }
 
-// A light with no size: q, P in light space, is shadowed where its map holds a caster nearer.
 float hard(Shadow *s, float3 q, float3 nq, float w)
 {
     uint caster;
@@ -310,8 +288,6 @@ float hard(Shadow *s, float3 q, float3 nq, float w)
     return caster < asuint(depth) ? 0.0 : 1.0;
 }
 
-// World distance from the light to q, at depth, and to the caster its map holds on the line
-// from the light through q.
 float2 from_light(Shadow *s, float3 q, float depth, float caster)
 {
     if (distant(s))
@@ -320,21 +296,13 @@ float2 from_light(Shadow *s, float3 q, float depth, float caster)
     return float2(d, d * caster / max(depth, 1e-30));
 }
 
-// Steps along a shadow ray, and the last at P. Fewer is not free: at 3, ALab's converged
-// penumbrae and contact shadows changed visibly, an error no history averages away.
+// Fewer misses contact shadows, an error no history averages away.
 static const uint STEPS = 6;
 
-// Whether the ray from P, start in light space, to a point across the light, end, meets a
-// caster: 0 if so. The map is drawn from the light's centre, so a ray toward another point
-// may lie behind a caster's surface without meeting it, having passed under its edge. Marched
-// from the light toward P, the ray meets the surface it lies behind if at the step before it
-// lay nearer the light than that surface, or lay before another surface that came nearer the
-// light no faster than the ray went away (a side the light sees). Otherwise it came in under
-// the edge, so P inside the hard shadow of the light's centre is still lit by the part of the
-// light past the edge. A step too long to tell counts as meeting it.
+// The map is drawn from the light's centre, so a ray to another point may pass under a caster's
+// edge. A step too long to tell counts as meeting it.
 float soft(Shadow *s, float3 start, float3 end, float3 nq, float w, float jitter)
 {
-    // The ray's distance from the light at the step before, and the surface's there.
     float2 before = float2(-1e30, 0);
     for (uint k = 0; k <= STEPS; k++)
     {
@@ -356,26 +324,21 @@ float soft(Shadow *s, float3 start, float3 end, float3 nq, float w, float jitter
     return 1.0;
 }
 
-// Jimenez's interleaved gradient noise: a fixed pattern over pixels, in [0, 1).
+// Jimenez's interleaved gradient noise, in [0, 1).
 float noise(float2 pixel)
 {
     return frac(52.9829189 * frac(dot(floor(pixel), float2(0.06711056, 0.00583715))));
 }
 
-// The pattern's three values at a pixel for the view's index into its sequence, each shifted
-// per index along Roberts' R3 sequence, so a pixel's samples spread evenly; index 0's are the
-// pattern itself. While anything changes the index cycles too, so history averages a
-// penumbra's rays as the still sum does.
+// Shifted per index along Roberts' R3 so a pixel's samples spread evenly. The index cycles while
+// anything changes, so history averages a penumbra as the still sum does.
 float3 pattern(float2 pixel)
 {
     float3 shift = float(view->pattern) * float3(0.8191725, 0.6710436, 0.5497005);
     return frac(float3(noise(pixel), noise(pixel + float2(113, 47)), noise(pixel + float2(59, 193))) + shift);
 }
 
-// A point across the light's shape from P, at u in [0, 1)², or for a distant light a point
-// along the direction toward one across its disk: a rect's or cylinder's uniform over its
-// side, a sphere's or disk's over its disk. A distant light's disk is kept within a tile of
-// the level a pixel at camera clip w wants, so its ray stays over pages P's tile marked.
+// A distant light's disk stays within a tile of P's level, so its ray stays over marked pages.
 float3 across_light(Light light, Shadow *s, float3 P, float3 q, float w, float2 u)
 {
     float2 disk = sqrt(u.x) * float2(cos(6.2831853 * u.y), sin(6.2831853 * u.y));
@@ -410,8 +373,6 @@ float3 across_light(Light light, Shadow *s, float3 P, float3 q, float w, float2 
     }
 }
 
-// How much of light light_index reaches P: none where its map holds a caster nearer the
-// light, for a light with a size along a ray toward one point across it, its pattern's.
 float visibility(uint light_index, float3 P)
 {
     Light light = view->lights[light_index];
@@ -428,8 +389,7 @@ float visibility(uint light_index, float3 P)
         return hard(s, q, nq, w);
     float3 u = pattern(pixel_at(P));
     float3 e = across_light(light, s, P, q, w, u.xy);
-    // A point below P's horizon would have P shadow itself; the light's own evaluation leaves
-    // it out already.
+    // A point below P's horizon would have P shadow itself. The light's own evaluation drops it.
     float3 v = e - P;
     float below = dot(v, n);
     if (below < 0.01 * length(v))
@@ -437,7 +397,6 @@ float visibility(uint light_index, float3 P)
     float3 end;
     if (light.shape == DISTANT)
     {
-        // To depth 0, nearer the light than any caster.
         float3 r = to_light(s, e) - q;
         end = q + r * (q.z / max(-r.z, 1e-30));
     }

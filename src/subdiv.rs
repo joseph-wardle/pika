@@ -1,5 +1,5 @@
-//! The stencil pass: each refined subdivision value as the weighted sum of
-//! the cage values its OpenSubdiv stencil names.
+//! The stencil pass. Each refined subdivision value is the weighted sum of the cage values its
+//! OpenSubdiv stencil names.
 
 use std::ops::Range;
 
@@ -37,7 +37,7 @@ impl Subdiv {
         Ok(Self { compute })
     }
 
-    /// `width` is floats per value: 3 for points, 2 for texcoords.
+    /// `width` is the floats per value, 3 for points and 2 for texcoords.
     pub fn record(
         &self,
         cb: vk::CommandBuffer,

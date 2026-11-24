@@ -1,38 +1,24 @@
-// The film's two passes (src/film.rs), each leaving the image a frame shows for it to be copied
-// back. Each pixel gathers its 3×3 neighbours' samples by the frame's weights, the edge's pixels
-// standing in past the image's edge, as EEVEE's film extends them. accumulate adds a still frame
-// to the sum of still samples; resolve blends a frame drawn while anything changes into the
-// history, as EEVEE's film does: reprojected by the nearest motion, filtered by Catmull-Rom,
-// clipped to the box of the colors around the pixel and blended by luma-weighted factors.
-// Images are the color attachment's pixels: half floats packed in pairs, as half types would
-// need the shaderFloat16 feature, or floats.
+// accumulate adds a still frame to the sum. resolve blends a moving one into the history as EEVEE
+// does. Pixels are half floats in pairs, since half types need shaderFloat16, or floats.
 
 struct Push
 {
     float4 *sum;
-    // The color attachment's pixels as copied out: 2 words a pixel of half floats, or 4 of floats.
     uint *frame;
-    // The depth AOV's pixels, 0 at the near plane.
+    // 0 at the near plane.
     float *depth;
-    // The motion attachment's: per pixel two half floats, the offset in pixels to where it was.
+    // Two half floats per pixel, the offset in pixels to where it was.
     uint *motion;
-    // The image the history is: the one the view stopped at for accumulate, the one shown last
-    // for resolve. Laid out as frame is, as image is.
     uint *history;
     uint *image;
-    // Row by row from the neighbour at (-1, -1).
+    // Row by row from (-1, -1).
     float weights[9];
-    // What the colors summed weigh: every still sample's weights for accumulate, this frame's
-    // for resolve.
     float total;
     uint2 extent;
-    // How much the history counts: against the still mean for accumulate; for resolve, 1, or 0
-    // with no history.
     float prior;
     uint first;
     uint count;
     uint stride;
-    // The frame's sample index; for accumulate, 0 starts the sum.
     uint sample;
     uint words;
 };
@@ -72,7 +58,6 @@ uint at(int2 q)
     return q.y * push.extent.x + q.x;
 }
 
-// The frame's samples around q, filtered: the sum of their weighted colors.
 float4 gather(int2 q)
 {
     float4 sum = float4(0);
@@ -93,7 +78,6 @@ void accumulate(uint3 thread : SV_DispatchThreadID)
         float4 sum = (push.sample == 0 ? float4(0) : push.sum[p]) + gather(q);
         push.sum[p] = sum;
         float4 mean = sum / push.total;
-        // At the last sample the prior is 0, and the history is not read.
         if (push.prior > 0)
             mean = (mean + push.prior * load(push.history, p)) / (1 + push.prior);
         store(push.image, p, mean);
@@ -116,15 +100,13 @@ float4 ycocg_alpha(float4 c)
     return float4(ycocg(c.rgb), c.a);
 }
 
-// Karis's luma weight, which keeps a bright sample from flickering through the blend; exposure
-// is the host's, after Pika, so it is 1 here.
+// Karis's luma weight. Exposure is the host's, after Pika, so it is 1 here.
 float luma_weight(float luma)
 {
     return 1 / (4 + luma);
 }
 
-// The history at h, pixel centres at whole numbers: Catmull-Rom over its 4×4 pixels, which
-// keeps detail that bilinear filtering would blur away frame after frame.
+// Pixel centres at whole numbers. Catmull-Rom keeps detail bilinear would blur frame after frame.
 float4 catmull_rom(float2 h)
 {
     float2 base = floor(h);
@@ -142,8 +124,7 @@ float4 catmull_rom(float2 h)
     return color;
 }
 
-// How far along d from o the box [lo, hi] begins, per channel the plane o is beyond: 0 or less
-// when o is inside it. Clipping rather than clamping keeps the hue a corner would shift.
+// 0 or less when o is inside. Clipping rather than clamping keeps the hue a corner would shift.
 float entry(float3 o, float3 d, float3 lo, float3 hi)
 {
     float t = -1e30;
@@ -163,8 +144,7 @@ void resolve(uint3 thread : SV_DispatchThreadID)
         int2 q = int2(p % push.extent.x, p / push.extent.x);
         float4 current = ycocg_alpha(gather(q) / push.total);
 
-        // The box of the frame's own samples around q, the plus's and the 3×3's averaged, so its
-        // corners do not show as squares (Karis).
+        // The plus's and the 3×3's boxes averaged, so corners don't show as squares (Karis).
         float4 lo = 1e30, hi = -1e30;
         for (uint k = 0; k < 5; k++)
         {
@@ -182,8 +162,7 @@ void resolve(uint3 thread : SV_DispatchThreadID)
         lo = 0.5 * (lo + lo9);
         hi = 0.5 * (hi + hi9);
 
-        // Motion from the nearest surface among q and the corners 2 pixels off, so an edge's
-        // history follows the surface in front (Karis).
+        // Nearest of q and the corners 2 pixels off, so edges follow the front surface (Karis).
         uint nearest = at(q);
         for (uint k = 0; k < 4; k++)
         {
@@ -192,7 +171,7 @@ void resolve(uint3 thread : SV_DispatchThreadID)
                 nearest = c;
         }
         float2 motion = unpackHalf2x16ToFloat(push.motion[nearest]);
-        // Off the image at mesh.slang's 65504, for a surface that was behind the camera.
+        // mesh.slang's 65504 lands off the image, for a surface that was behind the camera.
         float2 h = float2(q) + motion;
 
         float blend = 1;
@@ -200,16 +179,12 @@ void resolve(uint3 thread : SV_DispatchThreadID)
         if (push.prior > 0 && all(h >= 0) && all(h < float2(push.extent)))
         {
             history = ycocg_alpha(catmull_rom(h));
-            // Mostly history; more of the frame as it moves faster, when the history is blurrier.
             blend = lerp(0.05, 0.2, saturate(length(motion) * 0.02));
-            // Less of the frame when the history is near the box's luma bounds, where the clip
-            // would otherwise flicker with each sample.
             float range = hi.x - lo.x;
             float near = range > 0 ? 2 * min(history.x - lo.x, hi.x - history.x) / range : 0;
             blend *= saturate(near * 4 + 0.1);
             float4 d = current - history;
             history.rgb += d.rgb * saturate(entry(history.rgb, d.rgb, lo.rgb, hi.rgb));
-            // Alpha is clipped on its own, as it is not a color.
             if (abs(d.a) > 1e-5)
                 history.a += d.a * saturate(((d.a > 0 ? lo.a : hi.a) - history.a) / d.a);
         }
@@ -217,7 +192,7 @@ void resolve(uint3 thread : SV_DispatchThreadID)
         float added = luma_weight(current.x) * blend;
         float4 color = (history * kept + current * added) / (kept + added);
         color.rgb = rgb(color.rgb);
-        // Catmull-Rom overshoots below 0; a NaN would stay in the history for good.
+        // Catmull-Rom overshoots below 0, and a NaN would stay in the history for good.
         if (any(isnan(color)))
             color = float4(0);
         store(push.image, p, max(color, 0));

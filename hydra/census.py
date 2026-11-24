@@ -1,19 +1,15 @@
-"""The census: syncs a shot uncached through Pika in husk, frame by frame,
-and says which renderer work its costs put first.
+"""The census: syncs a shot uncached through Pika in husk, frame by frame, and says which renderer
+work its costs put first.
 
     hython hydra/census.py <stage.usda> <camera> <first frame> <last frame> <out dir>
 
-Run it from a shell with houdini_setup_bash sourced and PXR_PLUGINPATH_NAME
-pointing at the delegate. It syncs the shot three times: twice without its
-basis curves (the gate's scene, as fur is out of the gate), first with the
-stage's value clip files evicted from this machine's page cache and then with
-them cached by that run, and once whole, to measure what fur costs. Each run's
-per-sync lines are in <out dir>/<run>.stats.
+Needs houdini_setup_bash and the delegate on PXR_PLUGINPATH_NAME. Three runs: without basis
+curves (the gate's scene) with the clip files evicted from the page cache, again with them
+cached, and whole, for fur's cost. Per-sync lines go to <out dir>/<run>.stats.
 
-The thresholds were fixed before the first run, in design.md's census entry.
-The first sync loads the scene, so the warm figures leave it out. Clip files
-are where each frame's animation is read; read cold from NFS they made ALab's
-sync two to three times slower than cached, so storage gets its own verdict.
+The thresholds were fixed before the first run. The first sync loads the scene, so warm figures
+leave it out. Read cold from NFS, clip files made ALab's sync two to three times slower, so
+storage gets its own verdict.
 """
 
 import os
@@ -47,7 +43,6 @@ def write_gate_layer(stage, path):
 
 
 def clip_files(stage):
-    """The files of the stage's value clips."""
     files = set()
     for prim in stage.TraverseAll():
         for clips in Usd.ClipsAPI(prim).GetClips().values():
@@ -56,8 +51,7 @@ def clip_files(stage):
 
 
 def evict(paths):
-    """Drops the files' pages from this machine's page cache, so the next read
-    goes to storage. A file server's own cache is out of reach."""
+    """A file server's own cache is out of reach."""
     for path in paths:
         fd = os.open(path, os.O_RDONLY)
         try:
@@ -67,8 +61,7 @@ def evict(paths):
 
 
 def sync(name, stage, camera, first, last, out):
-    """Runs husk over the frames; returns the stats lines and husk's peak
-    resident memory in GiB."""
+    """Returns the stats lines and husk's peak resident memory in GiB."""
     stats = os.path.join(out, f"{name}.stats")
     log = os.path.join(out, f"{name}.log")
     os.makedirs(os.path.join(out, name), exist_ok=True)
@@ -98,7 +91,7 @@ def mb(values):
 
 
 def report(name, rows, rss):
-    """Prints a run's figures; returns the warm sync p95 and redundant share."""
+    """Returns the warm sync p95 and redundant share."""
     cold, warm = rows[0], rows[1:]
     stored = lambda r: r["mesh_bytes"] + r["instancer_bytes"]
     redundant = sum(r["mesh_redundant_bytes"] + r["instancer_redundant_bytes"] for r in warm)

@@ -1,17 +1,19 @@
-//! What detail of each texture the view needs. The estimate is a mean over a mesh's faces and
-//! its box's nearest point, so uneven UVs or a mesh reaching past the camera read finer.
+//! How much detail of each texture the view needs. The estimate is a mean over a mesh's faces,
+//! taken at its box's nearest point, so uneven UVs or a mesh reaching past the camera read as
+//! needing finer detail.
 
 use crate::store::{Interpolation, Mesh, Stencils};
 
-/// Rendered frames a texture keeps its finest needed level: more than a looping shot, so a
-/// loop's second pass needs nothing its first did not. A paused view ages nothing.
+/// Rendered frames for which a texture keeps its finest needed level. This is longer than a
+/// looping shot, so a loop's second pass needs nothing its first pass didn't. A paused view
+/// ages nothing.
 pub const WINDOW: u64 = 240;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Footprint {
-    /// Infinite when none could be estimated.
+    /// Infinite when no need could be estimated.
     pub uv_per_pixel: f32,
-    /// One of them has no texcoord that varies over its faces.
+    /// One of the readers has no texcoord that varies over its faces.
     pub unestimated: bool,
 }
 
@@ -27,8 +29,8 @@ impl Footprint {
     }
 }
 
-/// Texture units per unit of the mesh's own space, over its drawn (refined) faces. `None`
-/// when it has no texcoord, one constant over a face, or no area.
+/// Texture units per unit of the mesh's own space, over its drawn (refined) faces. `None` when
+/// it has no texcoord, a texcoord that is constant over a face, or no area.
 pub fn density(mesh: &Mesh) -> Option<f32> {
     let (Some(topology), Some(points), Some(Some(texcoord))) =
         (&mesh.topology, &mesh.points, &mesh.texcoord)
@@ -62,7 +64,6 @@ pub fn density(mesh: &Mesh) -> Option<f32> {
     (density.is_finite() && density > 0.0).then_some(density as f32)
 }
 
-/// Summed area of `faces` in space and in texture space, triangulated as fans.
 fn areas<const N: usize>(
     (counts, indices): (&Vec<i32>, &Vec<i32>),
     points: &[[f32; 3]],
@@ -109,7 +110,7 @@ fn refine<const N: usize>(stencils: &Stencils, cage: &[[f32; N]]) -> Option<Vec<
         .collect()
 }
 
-/// `world` and `view_projection` are rows of column-vector matrices, clip space Vulkan's with
+/// `world` and `view_projection` are rows of column-vector matrices, in Vulkan's clip space with
 /// reversed z. `None` when the box is outside the view.
 pub fn uv_per_pixel(
     view_projection: &[[f32; 4]; 4],
@@ -124,7 +125,7 @@ pub fn uv_per_pixel(
         let p: [f32; 3] = std::array::from_fn(|k| bounds[k + 3 * ((i >> k) & 1)]);
         let w: [f32; 3] = std::array::from_fn(|r| dot3(world[r], p) + world[r][3]);
         let [x, y, z, d] = view_projection.map(|row| dot3(row, w) + row[3]);
-        // Past left, right, bottom, top, nearer than near, past far, behind the camera.
+        // Past the left, right, bottom or top, nearer than near, past far, or behind the camera.
         let past = [x < -d, x > d, y < -d, y > d, z > d, z < 0.0, d <= 0.0];
         for (o, p) in outside.iter_mut().zip(past) {
             *o &= p;
@@ -134,7 +135,7 @@ pub fn uv_per_pixel(
     if outside.iter().any(|&o| o) {
         return None;
     }
-    // A box reaching past the camera's plane is as near as can be.
+    // A box reaching past the camera's plane counts as being as near as it can be.
     let depth = nearest.max(f32::MIN_POSITIVE);
     let length = |r: [f32; 4]| dot3(r, [r[0], r[1], r[2]]).sqrt();
     let [vx, vy] = [length(view_projection[0]), length(view_projection[1])];
@@ -143,7 +144,7 @@ pub fn uv_per_pixel(
     Some(density / scale / pixels_per_unit)
 }
 
-/// The floor of a trilinear sampler's level of detail; 0 when magnified.
+/// The floor of a trilinear sampler's level of detail, or 0 when magnified.
 pub fn level(side: u32, uv_per_pixel: f32) -> usize {
     let texels_per_pixel = side as f32 * uv_per_pixel;
     match texels_per_pixel > 1.0 {
@@ -152,7 +153,7 @@ pub fn level(side: u32, uv_per_pixel: f32) -> usize {
     }
 }
 
-/// `seen` holds the last frame each level was the finest needed, 0 for never.
+/// `seen` holds the last frame each level was the finest needed, or 0 for never.
 pub fn finest(seen: &[u64], frame: u64) -> Option<usize> {
     seen.iter()
         .position(|&f| f > 0 && frame.saturating_sub(f) < WINDOW)
@@ -187,7 +188,7 @@ mod tests {
     use crate::store::{Refined, RefinedTexcoord, Scheme, Texcoord, Topology};
     use crate::transform::Camera;
 
-    /// At the origin looking down -z, 90° each way, near 0.1 and far 100.
+    /// At the origin looking down -z, 90° each way, with near 0.1 and far 100.
     fn camera() -> Camera {
         let (n, f) = (0.1, 100.0);
         #[rustfmt::skip]
@@ -256,7 +257,7 @@ mod tests {
     fn density_is_texture_units_per_unit_of_surface() {
         assert_eq!(density(&quad(1.0, Interpolation::Vertex)), Some(1.0));
         assert_eq!(density(&quad(4.0, Interpolation::FaceVarying)), Some(4.0));
-        // A texcoord that does not vary over a face cannot be estimated.
+        // A texcoord that doesn't vary over a face can't be estimated.
         assert_eq!(density(&quad(1.0, Interpolation::Uniform)), None);
         let mut flat = quad(1.0, Interpolation::Vertex);
         flat.texcoord = Some(Some(Texcoord {
@@ -274,7 +275,7 @@ mod tests {
             weights,
         };
         let mut mesh = quad(1.0, Interpolation::FaceVarying);
-        // One refined face, a quarter of the cage's area over the same texture area.
+        // One refined face, with a quarter of the cage's area over the same texture area.
         mesh.topology.as_mut().unwrap().refined = Some(Refined {
             face_vertex_counts: vec![4],
             face_vertex_indices: vec![0, 1, 2, 3],
@@ -287,7 +288,7 @@ mod tests {
             stencils: stencils(vec![0, 0, 1, 1, 2, 2, 3, 3], vec![0.5; 8]),
         });
         assert_eq!(density(&mesh), Some(2.0));
-        // The control: a texcoord not refined with its mesh is not drawn, nor estimated.
+        // The control: a texcoord that isn't refined with its mesh is neither drawn nor estimated.
         let texcoord = mesh.texcoord.as_mut().unwrap().as_mut().unwrap();
         texcoord.refined = None;
         assert_eq!(density(&mesh), None);
@@ -297,19 +298,19 @@ mod tests {
     fn near_and_far_quads_need_the_levels_worked_by_hand() {
         let vp = camera().view_projection;
         let size = [1000, 1000];
-        // At depth d, 90° across 1000 pixels: 500/d pixels per unit; a
-        // 1024-texel texture over one unit is 1024·d/500 texels a pixel.
+        // At depth d, 90° across 1000 pixels gives 500/d pixels per unit. A 1024-texel texture over
+        // one unit is then 1024·d/500 texels a pixel.
         let need = |scale: f32, depth: f32| {
             let uv = uv_per_pixel(&vp, size, &placed(scale, [0.0, 0.0, -depth]), &QUAD, 1.0);
             uv.map(|uv| level(1024, uv))
         };
         assert_eq!(need(1.0, 0.5), Some(0));
-        // 20.48: between 16 and 32, level 4.
+        // 20.48 lies between 16 and 32, so level 4.
         assert_eq!(need(1.0, 10.0), Some(4));
-        // Scaled twice as large, a unit of texture spans two: 10.24, level 3.
+        // Scaled twice as large, a unit of texture spans two units, giving 10.24 and level 3.
         assert_eq!(need(2.0, 10.0), Some(3));
         assert_eq!(need(1.0, 0.2), Some(0));
-        // Behind the camera, and off to its side, nothing is needed.
+        // Behind the camera, or off to its side, nothing is needed.
         assert_eq!(need(1.0, -5.0), None);
         let aside = uv_per_pixel(&vp, size, &placed(1.0, [50.0, 0.0, -5.0]), &QUAD, 1.0);
         assert_eq!(aside, None);
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn a_need_is_kept_for_the_window() {
-        // Level 1 was needed at frame 1, level 3 every frame since.
+        // Level 1 was needed at frame 1, and level 3 in every frame since.
         let mut seen = vec![0, 1, 0, 0];
         for frame in 2..=WINDOW + 1 {
             seen[3] = frame;

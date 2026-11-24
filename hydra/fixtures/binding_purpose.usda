@@ -5,9 +5,8 @@
     upAxis = "Y"
 )
 
-# Pika asks for the full (final-look) material bindings, as ALab authors
-# them beside its preview ones, on subsets and whole meshes. Hydra's default
-# would be the preview binding.
+# Pika asks for the full (final-look) bindings ALab authors beside its preview ones. Hydra's
+# default would be the preview one.
 def Xform "world"
 {
     def Camera "camera" {}

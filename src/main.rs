@@ -1,6 +1,7 @@
-//! `pika`: checks that this machine can run the renderer. Exits 0 only if the first-frame check
-//! matched, its shifted control failed by its predicted count, and validation reported nothing.
-//! The renderer is the library: a host's frame starts at `pika_render` in `src/abi.rs`.
+//! `pika` checks that this machine can run the renderer. It exits with 0 only if the
+//! first-frame check matched, its shifted control failed by the predicted count, and validation
+//! reported nothing. The renderer itself is the library, and a host's frame starts at
+//! `pika_render` in `src/abi.rs`.
 
 mod check;
 
@@ -66,7 +67,7 @@ fn run() -> Result<(), String> {
         check::SHIFTED_MISMATCHES
     );
 
-    // Read the count after the device is destroyed: vkDestroyDevice reports leaks.
+    // Read the count after the device is destroyed, because vkDestroyDevice reports leaks.
     drop(offscreen);
     drop(device);
     match instance.validation_messages() {

@@ -1,24 +1,42 @@
 # Pika
 
-Pika is a real-time raster renderer for animation production, in the style of Blender's EEVEE. It is built for a USD-native pipeline: it loads into any Hydra host, and aims to play cached shots back at their final look, 1080p at 24 fps on a 16 GB GPU. The goal is the visual range and creative flexibility of a production renderer at the speed of a game engine, without being a game engine.
+Pika is a real-time renderer for animation, in the style of Blender's EEVEE. It runs inside any Hydra host, such as usdview or Houdini, and aims to play cached shots back at their final look: 1080p at 24 fps on a 16 GB GPU.
 
-It is built in Rust. It runs on Vulkan through [ash](https://crates.io/crates/ash), with shaders in [Slang](https://shader-slang.org). A small C++ Hydra render delegate copies scene data in, and materials come from the upstream MaterialX shader generator rather than a custom compiler, so OpenPBR, Standard Surface, UsdPreviewSurface and any other surface the host's MaterialX libraries define draw as those libraries say.
+![ALab's laboratory: Remi the stoat on a red workbench among a chalkboard, a glove mould, a helmeted head and an oscilloscope, in warm sunlight](docs/alab.jpg)
 
-Today Pika draws meshes, synced from the host with their subdivision, instancing, holes, normals, visibility and purpose, and renders color, depth and normal AOVs for the host's camera. Each mesh is shaded by its material's MaterialX surface under the scene's distant, sphere, rect, disk and cylinder lights, those linked to it, the host's camera light among them, its GeomSubsets by theirs; textures are baked once into a cache, UDIM sets as one array, those the camera needs least are lowered until they fit the card's memory, and the render setting `pika:textureCap` shrinks them all. A mesh with no material, or one still being built, draws as grey clay; one Pika cannot build draws pink, and a missing texture file draws its node's fallback, each with a warning. Every light casts shadows by its shadow links, and a light with a size casts soft ones: while the view is still, each frame adds a sample until 64 have been drawn, as EEVEE renders take, so a still image converges and playback shows one sample a frame. Penumbrae follow EEVEE's method, and read somewhat narrower than a ray tracer's. Shadows are cached from frame to frame and redrawn only where a light or a moving mesh changes them, within a pool sized by the render setting `pika:shadowPool` (256 MB by default, and as much again for moving meshes); a view that needs more draws its farthest shadows coarser, with a warning. Dome lights come next.
+*ALab, frame 1030 of its render camera, drawn by Pika. Netflix Animation Studios ALab Copyright 2025 Netflix, Inc. All rights reserved.*
+
+Pika is written in Rust and draws with Vulkan through [ash](https://crates.io/crates/ash). Its shaders are written in [Slang](https://shader-slang.org). A small C++ Hydra render delegate copies the scene in. Materials come from the upstream MaterialX shader generator, so OpenPBR, Standard Surface, UsdPreviewSurface and any other surface in the host's MaterialX libraries draw as those libraries define them.
+
+## Status
+
+This is a very early toy project. Currently it does the following:
+- **Meshes** with subdivision, instancing, holes, normals, visibility, purpose and GeomSubsets. Pika renders color, depth and normal AOVs.
+- **Materials** from each mesh's MaterialX surface.
+- **Textures**, baked once into a cache, with UDIM sets kept as one array. When textures don't fit in GPU memory, the ones the camera needs least are lowered first.
+- **Lights**: distant, sphere, rect, disk and cylinder lights, the host's camera light, and light linking.
+- **Soft shadows** from every light, following shadow links. While the view is still, each frame adds one shadow sample until 64 have been drawn. Shadows are cached between frames and redrawn only where a light or a moving mesh changes them.
+- **Dome lights**: the sky lights matte surfaces, and its reflection is blurred by roughness. A bright sun in the sky is lifted out into a distant light that casts shadows.
+
+![Two blocks and a ball on a floor, lit by a sky and its sun](docs/dome.png)
 
 ## Requirements
 
-| | Needed | Notes |
-| --- | --- | --- |
-| Build | Rust and a C linker | No Vulkan SDK is needed: libvulkan is loaded at run time. |
-| Run | The Vulkan loader and a Vulkan 1.3 GPU driver | Tested with NVIDIA driver 595.71 (RTX 4070 Ti SUPER). |
-| Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.21. Pika reads `shaders/` and the bake tools from the checkout, so run it from there. Generated shaders and baked textures are kept in `$XDG_CACHE_HOME/pika` (`PIKA_CACHE` overrides it); ALab's fill 145 GB. |
-| Validate | The Vulkan validation layer | Optional; the shell turns it on. Pika enables it when `VK_ADD_LAYER_PATH` names it. |
-| Delegate | OpenUSD with its Python, OpenSubdiv, `g++` and `make` | Tested with OpenUSD 26.11 and g++ 16.2. |
-| Bake | MaterialX 1.39.5 or newer (the first with a Slang generator), OpenImageIO, `g++`, `make` and [`ispc`](https://github.com/ispc/ispc/releases) | Tested with MaterialX 1.39.5, OpenImageIO 3.1 and ispc 1.32. `MATERIALX` names the directory holding MaterialX's `libraries/`. Two tools the renderer runs, so build them before rendering: `generate` turns material documents into shaders, and `texture` bakes textures. They compile in the paths of MaterialX and of `bake/`, so rebuild them after moving either. Textures are converted through the OCIO config named in `OCIO`, else OpenImageIO's default. |
-| Check | A display, or `Xvfb`; `curl` and `unzip` to fetch ALab | `hydra/check.sh` starts its own Xvfb. |
+[Nix](https://nixos.org) users can run `nix develop` to get every tool below except the GPU driver. Without Nix, you need:
 
-Houdini is a second host: with `HFS` naming a Houdini (22.0 for the bake tools, as 21.0 has no Slang generator), the Makefiles and the checks build against its USD and MaterialX and render through husk, which also checks depth, normals and the render settings. That path was last tested with Houdini 21.0.596 and 22.0.466. `BAKE_HFS` names the bake tools' Houdini when `HFS` is a 21.0. On NixOS, Houdini runs inside an FHS environment, so a check is `HFS=~/sidefx/hfs22.0.466 nix develop --command houdini-fhs hydra/check.sh`.
+| For | You need | Notes |
+| --- | --- | --- |
+| Build | Rust and a C linker | No Vulkan SDK needed. libvulkan is loaded at run time. |
+| Run | The Vulkan loader and a Vulkan 1.3 GPU driver | Tested with NVIDIA driver 595.71 on an RTX 4070 Ti SUPER. |
+| Run | [`slangc`](https://github.com/shader-slang/slang/releases) on `PATH` | Tested with 2026.21. Run Pika from the checkout, since it reads `shaders/` and the bake tools from there. |
+| Validate | The Vulkan validation layer | Optional. Pika turns it on when `VK_ADD_LAYER_PATH` names it. |
+| Delegate | OpenUSD with Python, OpenSubdiv, `g++` and `make` | Tested with OpenUSD 26.11 and g++ 16.2. |
+| Bake | MaterialX 1.39.5 or newer, OpenImageIO, `g++`, `make` and [`ispc`](https://github.com/ispc/ispc/releases) | 1.39.5 is the first MaterialX with a Slang generator. Tested with OpenImageIO 3.1 and ispc 1.32. `MATERIALX` names the directory holding MaterialX's `libraries/`. |
+| Check | A display or `Xvfb`, plus `curl` and `unzip` to fetch ALab | `hydra/check.sh` starts its own Xvfb. |
+
+The bake tools are two programs the renderer runs: `generate` turns material documents into shaders, and `texture` bakes textures. Build them before rendering, and rebuild them if MaterialX or the checkout moves, since they compile in both paths. Textures are converted through the OCIO config named in `OCIO`, or OpenImageIO's default.
+
+Generated shaders and baked textures are cached in `$XDG_CACHE_HOME/pika`, or in `PIKA_CACHE` if set. ALab's fill 145 GB.
 
 ## Build and check
 
@@ -26,18 +44,43 @@ Houdini is a second host: with `HFS` naming a Houdini (22.0 for the bake tools, 
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
-cargo run --locked --release   # device check; needs a GPU
+cargo run --locked --release   # device check, needs a GPU
 make -C hydra                  # the delegate, into target/hydra
 make -C bake                   # the bake tools, into target/bake
 bake/check.sh
-hydra/check.sh                 # needs a GPU
+hydra/check.sh                 # renders, needs a GPU
 ```
 
-CI runs the first three cargo commands, on a runner without a GPU. To render with the delegate, point USD at it:
+CI runs the three cargo commands on a runner without a GPU. `hydra/check.sh` renders every scene in `hydra/images/` and compares it with a reference ray cast from the USD. Each check also runs controls, deliberately wrong references that must fail.
+
+## Try it
+
+Point USD at the delegate and open a scene:
 
 ```sh
 export PXR_PLUGINPATH_NAME=$PWD/target/hydra
-usdview --renderer Pika hydra/scenes/cube.usda
+usdview --renderer Pika hydra/scenes/look/room.usda
 ```
 
-`corpus/fetch.sh` downloads ALab 2.3.0 (108 GB) into `corpus/`, which git ignores, and `hydra/gate.sh` times its playback. `PIKA_STATS` with `hydra/stats.py` measure any run. Each script's header says what it does and how to run it. `NOTICE` lists the third-party code Pika ships and its licences.
+Three render settings tune Pika. usdview lists them in its Hydra settings, and husk reads them from the stage's render settings:
+
+| Setting | What it does |
+| --- | --- |
+| `pika:textureCap` | Caps every texture to this many texels a side. 0, the default, means no cap. |
+| `pika:shadowPool` | The shadow cache's size in MB, 256 by default, with as much again for moving meshes. A view that needs more draws its farthest shadows coarser, with a warning. |
+| `pika:sunThreshold` | Parts of a dome light's sky brighter than this are lifted out as a sun that casts shadows. 10 by default, and 0 means no sun. |
+
+For a production-sized scene, `corpus/fetch.sh` downloads [ALab](https://dpel.aswf.io/alab/) 2.3.0 (108 GB) into `corpus/`, which git ignores. `hydra/gate.sh` times its playback. Set `PIKA_STATS` to a file to record any run's timings, and summarise them with `hydra/stats.py`. Each script's header says what it does and how to run it.
+
+## Layout
+
+| Path | What it holds |
+| --- | --- |
+| `src/` | The renderer: the scene store, materials, textures, lights, shadows and the frame |
+| `shaders/` | Slang shaders |
+| `hydra/` | The C++ render delegate, its checks and test scenes |
+| `bake/` | The material and texture tools, and their check |
+| `corpus/` | The ALab fetch script |
+| `docs/` | The images in this README |
+
+`NOTICE` lists the third-party code Pika ships and its licences.

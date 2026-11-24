@@ -1,6 +1,6 @@
-//! The draws of the geometry's meshes: an instance per placement of each mesh, and a record
-//! per material part of it that draws them. Rewritten when a mesh is added, hidden, retagged or
-//! re-instanced; patched in place when meshes only move.
+//! The draws of the geometry's meshes: one instance per placement of each mesh, and one record
+//! per material part of it. The draws are rewritten when a mesh is added, hidden, retagged or
+//! re-instanced, and patched in place when meshes only move.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -19,16 +19,14 @@ pub struct Row {
     pub instances: std::ops::Range<usize>,
 }
 
-/// Per mesh, a row per part of it drawn.
 pub type Rows = BTreeMap<u64, Vec<Row>>;
 
-/// The draws on the host: what `Draws`' buffers hold, and where each mesh's are.
+/// The draws on the host: what the buffers in `Draws` hold, and where each mesh's are.
 #[derive(Default)]
 pub struct Tables {
     pub instances: Vec<Instance>,
-    /// Per instance, its record.
     pub owners: Vec<u32>,
-    /// Per record, its mesh's box: the low corner, then the high, in the mesh's own space.
+    /// Each record's mesh box: the low corner, then the high one, in the mesh's own space.
     pub boxes: Vec<[f32; 6]>,
     /// No record has instances until the cull pass counts a view's.
     pub records: Vec<vk::DrawIndexedIndirectCommand>,
@@ -47,22 +45,21 @@ pub struct Group {
 
 pub struct Draws {
     pub instances: Buffer,
-    /// `instances` as the frame before drew them, which motion is measured from.
+    /// `instances` as the frame before drew them. Motion is measured from these.
     pub previous_instances: Buffer,
-    /// Whether the last patch moved an instance, so `previous_instances` differs from
-    /// `instances`.
+    /// Whether the last patch moved an instance, so `previous_instances` differs from `instances`.
     last_moved: bool,
     pub owners: Buffer,
     pub boxes: Buffer,
     pub records: Buffer,
-    /// Kept on the host for the texture needs; a patch writes both.
+    /// Kept on the host for the texture needs. A patch writes both copies.
     pub tables: Tables,
     tags: Vec<String>,
 }
 
 impl Draws {
-    /// Writes the draws afresh, into `slot`'s buffers when they are large enough. Empty `tags`
-    /// draws every tag.
+    /// Writes the draws from scratch, into `slot`'s buffers when they are large enough. An empty
+    /// `tags` draws every tag.
     pub fn rewrite(
         slot: &mut Option<Draws>,
         device: &gpu::Device,
@@ -107,9 +104,9 @@ impl Draws {
         Ok(())
     }
 
-    /// The patch that follows the moved transforms and points in place, recording the copy of
-    /// the frame before's instances it needs. `None` when the draws must be rewritten instead:
-    /// a visibility, tag, instancing or link changed, or an instance count did.
+    /// The patch that follows moved transforms and points in place, recording the copy of the
+    /// frame before's instances that it needs. `None` when the draws must be rewritten instead,
+    /// because a visibility, tag, instancing, link or instance count changed.
     pub fn patch(
         &mut self,
         device: &gpu::Device,
@@ -123,8 +120,8 @@ impl Draws {
             return None;
         }
         let patch = Patch::new(store, ranges, &self.tables.rows, moved, tags)?;
-        // An instance that stops has still moved since the frame before, which
-        // `previous_instances` holds until the frame after.
+        // An instance that just stopped has still moved since the frame before, and
+        // `previous_instances` must hold that until the frame after.
         let moves = !patch.instances.is_empty();
         if self.last_moved || moves {
             self.remember(device, cb);
@@ -133,9 +130,8 @@ impl Draws {
         Some(patch)
     }
 
-    /// Every table, for rewritten draws. Those renumber the instances, so none can be matched
-    /// with the frame before's: each is drawn as if it had not moved, as EEVEE draws an object
-    /// it cannot match.
+    /// Every table, for rewritten draws. Rewriting renumbers the instances, so each is drawn as if
+    /// it hadn't moved, as EEVEE draws an object it can't match.
     pub fn uploads(&self) -> [Upload<'_>; 5] {
         let t = &self.tables;
         [
@@ -147,8 +143,8 @@ impl Draws {
         ]
     }
 
-    /// Copies the instances the frame before drew into `previous_instances`, before this
-    /// frame's patch writes over them.
+    /// Copies the instances the frame before drew into `previous_instances`, before this frame's
+    /// patch overwrites them.
     fn remember(&self, device: &gpu::Device, cb: vk::CommandBuffer) {
         let region = vk::BufferCopy {
             src_offset: 0,
@@ -163,8 +159,9 @@ impl Draws {
                 vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_STORAGE_READ,
             );
         let (from, to) = (self.instances.raw, self.previous_instances.raw);
-        // SAFETY: `cb` records outside rendering; both buffers are `device`'s and hold the
-        // tables, which a patch never grows. Vulkan has no empty copies.
+        // SAFETY: the command buffer is recording outside a render pass, and both buffers belong to
+        // this device and hold the tables, which a patch never grows. Vulkan doesn't allow empty
+        // copies, so none are made.
         unsafe {
             if region.size > 0 {
                 (device.raw).cmd_copy_buffer(cb, from, to, &[region]);
@@ -176,7 +173,7 @@ impl Draws {
         }
     }
 
-    /// The instances whose mesh's transform or points moved, by their index, ascending.
+    /// The indices of the instances whose mesh's transform or points moved, in ascending order.
     pub fn moved(&self, moved: &Moved) -> Vec<u32> {
         let ids = moved.transforms.iter().chain(&moved.points);
         let rows = ids.filter_map(|id| self.tables.rows.get(id)).flatten();
@@ -190,7 +187,7 @@ impl Draws {
     }
 }
 
-/// Empty `tags` draws every tag. Grouped by material, the unbound parts first.
+/// An empty `tags` draws every tag. Records are grouped by material, with unbound parts first.
 fn tables(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> Tables {
     let instancers = by_path(store);
     let links = Links::new(store);
@@ -247,7 +244,8 @@ fn tables(store: &Store, ranges: &BTreeMap<u64, Range>, tags: &[String]) -> Tabl
     t
 }
 
-/// A subset binding none uses the mesh's; `None` when Hydra has not made it.
+/// A subset with no material binding uses the mesh's. `None` when Hydra hasn't made the
+/// material yet.
 fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Option<u64> {
     let subset = part
         .subset
@@ -259,7 +257,6 @@ fn part_material(mesh: &Mesh, part: &Part, materials: &HashMap<&str, u64>) -> Op
     path.and_then(|p| materials.get(p).copied())
 }
 
-/// What moved meshes change of the draws, in place.
 pub struct Patch {
     instances: Vec<(usize, Vec<Instance>)>,
     boxes: Vec<(u32, [f32; 6])>,
@@ -311,7 +308,6 @@ impl Patch {
         Some(Patch { instances, boxes })
     }
 
-    /// Its bytes, into the draws' buffers.
     pub fn uploads<'a>(&'a self, d: &Draws) -> Vec<Upload<'a>> {
         let instances = self.instances.iter().map(|(first, instances)| Upload {
             bytes: bytes(instances),
@@ -434,7 +430,7 @@ mod tests {
             let tags: Vec<String> = tags.iter().map(|t| t.to_string()).collect();
             tables(&store, &ranges, &tags).records.len()
         };
-        // A retagged mesh keeps its data in the store, so drawing filters.
+        // A retagged mesh keeps its data in the store, so drawing must filter.
         assert_eq!(drawn(&["geometry", "render"]), 1);
         assert_eq!(drawn(&["geometry", "proxy"]), 1);
         assert_eq!(drawn(&["guide"]), 0);
@@ -520,7 +516,7 @@ mod tests {
         assert_eq!(t.owners, [0, 1, 2]);
         assert_eq!(t.rows[&ids[0]].len(), 2);
         assert_eq!(t.boxes.len(), 3);
-        // Control: a subset binding no material draws with the mesh's.
+        // Control: a subset with no material binding draws with the mesh's.
         store.set_material(ids[0], "/mtl/red".into()).unwrap();
         let mut topology = faces();
         topology.subsets = vec![Subset {
@@ -549,7 +545,7 @@ mod tests {
         assert_eq!(host.instances, rewritten);
         assert!(patched.boxes.is_empty());
 
-        // Control: a flattening transform drops its instance, shifting later rows.
+        // Control: a flattening transform drops its instance, which shifts later rows.
         store.set_transform(ids[1], [0.0; 16]).unwrap();
         let moved = store.take_moved();
         assert!(Patch::new(&store, &ranges, &rows, &moved, &[]).is_none());

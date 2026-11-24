@@ -1,21 +1,17 @@
-// A dome light's sky, worked when the sky changes: its irradiance image, and its reflection's
-// folded squares.
+// Run when the sky changes: its irradiance image and its reflection's folded squares.
 
 #include "view.slang"
 
 struct Push
 {
-    // A latlong's texels from the top row, 3 floats each.
+    // Latlong, 3 floats a texel from the top row.
     float *sky;
-    // The irradiance image, or the reflection.
     float *into;
     uint2 extent;
     uint first;
     uint count;
     uint stride;
-    // The blurred level or plain halving written.
     uint level;
-    // The blurred level's GGX alpha.
     float alpha;
     uint samples;
 };
@@ -41,7 +37,6 @@ void sum(uint3 thread : SV_DispatchThreadID)
         float3 sum = 0;
         for (uint y = 0; y < push.extent.y; y++)
         {
-            // A row's band of the sphere, shared evenly by its texels.
             float2 edge = cos(3.1415927 * float2(y, y + 1) / push.extent.y);
             float solid_angle = (edge.x - edge.y) * 6.2831853 / push.extent.x;
             for (uint x = 0; x < push.extent.x; x++)
@@ -62,7 +57,6 @@ float3 sky(int2 t)
     return float3(texel[0], texel[1], texel[2]);
 }
 
-// The sharp square, each texel its direction's four texels of the sky, a row wrapping.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void fold(uint3 thread : SV_DispatchThreadID)
@@ -79,7 +73,6 @@ void fold(uint3 thread : SV_DispatchThreadID)
     }
 }
 
-// A plain halving, each texel the mean of the four it covers in the one before.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void halve(uint3 thread : SV_DispatchThreadID)
@@ -96,7 +89,6 @@ void halve(uint3 thread : SV_DispatchThreadID)
     }
 }
 
-// The sharp square about uv, averaged over about 4^halving of its texels.
 float3 halved(float2 uv, float halving)
 {
     uint last = firstbithigh(REFLECTION);
@@ -106,9 +98,7 @@ float3 halved(float2 uv, float halving)
     return lerp(a, b, saturate(halving - h));
 }
 
-// A blurred level: what a surface of the level's roughness reflects of the sky seen along its
-// normal, the GGX lobe D(h) G(l). Half vectors are drawn by D, each read from the halving whose
-// texels are as wide as its share of the lobe (filtered importance sampling, GPU Gems 3, 20).
+// Filtered importance sampling of the GGX lobe (GPU Gems 3, ch. 20).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void blur(uint3 thread : SV_DispatchThreadID)
@@ -124,7 +114,6 @@ void blur(uint3 thread : SV_DispatchThreadID)
         float weights = 0;
         for (uint s = 0; s < push.samples; s++)
         {
-            // Hammersley's points.
             float2 xi = float2((s + 0.5) / push.samples, reversebits(s) * 2.3283064e-10);
             float cos2 = (1 - xi.x) / (1 + (a2 - 1) * xi.x);
             float sine = sqrt(1 - cos2);
@@ -135,7 +124,6 @@ void blur(uint3 thread : SV_DispatchThreadID)
             if (nl <= 0)
                 continue;
             float weight = 2 * nl / (nl + sqrt(a2 + (1 - a2) * nl * nl));
-            // Seen along the normal, a direction's density is D / 4.
             float d = a2 / (3.1415927 * pow(cos2 * (a2 - 1) + 1, 2));
             float texels = 4 / (d * push.samples) * REFLECTION * REFLECTION / 12.566371;
             sum += weight * halved(folded(l), max(0.5 * log2(texels) + 1, 0));

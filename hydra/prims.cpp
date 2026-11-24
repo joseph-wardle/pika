@@ -35,7 +35,7 @@ const float *xy(VtVec2fArray const &values) {
     return reinterpret_cast<const float *>(values.cdata());
 }
 
-// Part of Pika's look, so the host's complexity setting (refineLevel) does not change it.
+// Part of Pika's look, so the host's complexity setting (refineLevel) doesn't change it.
 constexpr int refine_level = 1;
 
 struct Stencils {
@@ -59,8 +59,7 @@ struct RefinedTexcoord {
     Stencils stencils;
 };
 
-// Through the factory Storm uses, so USD's subdivision tags read as they do there. Null when
-// the topology is invalid, which OpenSubdiv does not check, or OpenSubdiv refuses it.
+// Storm's factory, so USD's subdivision tags read as they do there.
 PxOsdTopologyRefinerSharedPtr refine(HdMeshTopology const &topology,
                                      std::vector<VtIntArray> const &fvar) {
     using namespace OpenSubdiv;
@@ -73,7 +72,6 @@ PxOsdTopologyRefinerSharedPtr refine(HdMeshTopology const &topology,
     return refiner;
 }
 
-// False when OpenSubdiv's table does not cover them.
 bool stencils(OpenSubdiv::Far::TopologyRefiner const &refiner,
               OpenSubdiv::Far::StencilTableFactory::Mode mode, int count, Stencils &out) {
     using namespace OpenSubdiv;
@@ -84,8 +82,7 @@ bool stencils(OpenSubdiv::Far::TopologyRefiner const &refiner,
         Far::StencilTableFactory::Create(refiner, options));
     if (!table || table->GetNumStencils() != count)
         return false;
-    // The table's weight array can be longer than its index array, so each
-    // stencil is read through its own size.
+    // The weight array can be longer than the index array, so each stencil is read by its own size.
     for (int i = 0; i < count; i++) {
         Far::Stencil stencil = table->GetStencil(i);
         out.offsets.push_back(out.indices.size());
@@ -126,8 +123,8 @@ struct CornerHash {
     }
 };
 
-// Welds by point and value (bitwise), so the primvar is continuous where faces agree and
-// seamed where not, as Houdini, Karma and Blender read it; Storm keeps every corner apart.
+// Welds bitwise by point and value, so the primvar is seamed only where faces disagree, as
+// Houdini, Karma and Blender read it. Storm keeps every corner apart.
 void weld(VtIntArray const &corners, VtVec2fArray const &values, std::vector<GfVec2f> &welded,
           VtIntArray &indices) {
     std::unordered_map<std::array<uint32_t, 3>, int32_t, CornerHash> seen;
@@ -142,8 +139,6 @@ void weld(VtIntArray const &corners, VtVec2fArray const &values, std::vector<GfV
     }
 }
 
-// A face-varying texcoord refines through its welded values, under the mesh's
-// faceVaryingLinearInterpolation.
 bool refine_texcoord(HdMeshTopology const &topology, HdInterpolation interpolation,
                      VtVec2fArray const &values, RefinedTexcoord &out) {
     using namespace OpenSubdiv;
@@ -196,8 +191,7 @@ HdDirtyBits PikaMesh::GetInitialDirtyBitsMask() const {
 
 void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
                     HdDirtyBits *dirtyBits, TfToken const &) {
-    // Hydra reads IsVisible() to skip syncing invisible prims; their other
-    // dirty bits wait until they are visible again.
+    // Hydra skips syncing invisible prims, and their other dirty bits wait until they are visible.
     _UpdateVisibility(delegate, dirtyBits);
     _UpdateInstancer(delegate, dirtyBits);
     HdDirtyBits bits = *dirtyBits;
@@ -214,8 +208,7 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
         _SyncTopology(delegate, renderer);
     if (bits & HdChangeTracker::DirtyPoints)
         _SyncPoints(delegate, renderer);
-    // Normals have their own dirty bit, but an edit can also arrive as a
-    // general primvar change.
+    // An edit to normals can also arrive as a general primvar change.
     if (bits & (HdChangeTracker::DirtyNormals | HdChangeTracker::DirtyPrimvar))
         _SyncNormals(delegate, renderer);
     if (bits & HdChangeTracker::DirtyTransform) {
@@ -224,12 +217,10 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     }
     if (bits & HdChangeTracker::DirtyMaterialId) {
         SdfPath material = delegate->GetMaterialId(GetId());
-        // Kept for PikaMaterial::Sync to find the meshes bound to it.
         SetMaterialId(material);
         _pika.report(pika_mesh_material(renderer, _id, material.GetText()), path + " material");
     }
-    // The material decides which primvar is fetched, so it goes first, and
-    // the topology how it is refined.
+    // The material picks the primvar fetched, and the topology how it is refined, so they go first.
     if (bits & (HdChangeTracker::DirtyPrimvar | HdChangeTracker::DirtyMaterialId |
                 HdChangeTracker::DirtyTopology | HdChangeTracker::DirtySubdivTags))
         SyncTexcoord(delegate, renderer);
@@ -245,8 +236,6 @@ void PikaMesh::Sync(HdSceneDelegate *delegate, HdRenderParam *,
     }
 }
 
-// Hydra calls this for every rprim with a dirty render tag, before it decides
-// which ones to sync.
 void PikaMesh::UpdateRenderTag(HdSceneDelegate *delegate, HdRenderParam *renderParam) {
     HdMesh::UpdateRenderTag(delegate, renderParam);
     if (pika_renderer *renderer = _pika.renderer())
@@ -348,7 +337,6 @@ void PikaMesh::_SyncNormals(HdSceneDelegate *delegate, pika_renderer *renderer) 
         return;
     }
     VtVec3fArray const &normals = value.UncheckedGet<VtVec3fArray>();
-    // Hydra's display name for an interpolation is USD's token.
     std::string token = TfEnum::GetDisplayName(interpolation);
     _pika.report(
         pika_mesh_normals(renderer, _id, token.c_str(), xyz(normals), normals.size()),
@@ -373,8 +361,7 @@ void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) 
         fetched.name = name;
         fetched.values = value.UncheckedGet<VtVec2fArray>();
     }
-    // Hydra's one dirty bit covers every primvar, so this is where an
-    // animated primvar the materials do not read is told from the texcoord.
+    // One dirty bit covers every primvar, so this tells the texcoord from other animated ones.
     if (_texcoord && _texcoord->name == fetched.name &&
         _texcoord->interpolation == fetched.interpolation && _texcoord->values == fetched.values)
         return;
@@ -410,7 +397,6 @@ void PikaMesh::SyncTexcoord(HdSceneDelegate *delegate, pika_renderer *renderer) 
     topology.SetSubdivTags(GetSubdivTags(delegate));
     RefinedTexcoord refined;
     if (!refine_texcoord(topology, interpolation, values, refined)) {
-        // Its cage is drawn (_SyncTopology warned), with the texcoord as it is.
         _pika.report(pika_mesh_texcoord(renderer, _id, name, token.c_str(), xy(values),
                                         values.size(), nullptr),
                      path + " texcoord");
@@ -491,7 +477,6 @@ void PikaInstancer::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits
 
 void PikaInstancer::_SyncPrimvars(HdSceneDelegate *delegate, pika_renderer *renderer) {
     std::string const &path = GetId().GetString();
-    // Kept alive until the call: the primvars point into them.
     VtMatrix4dArray transforms;
     VtVec3fArray translations, scales;
     VtQuatfArray rotations;
@@ -555,7 +540,6 @@ PikaMaterial::~PikaMaterial() {
         _pika.report(pika_material_free(renderer, _id), "removing material " + GetId().GetString());
 }
 
-// False for a type Pika has no use for.
 static bool flatten(VtValue const &value, pika_param &param) {
     auto floats = [&](float const *data, size_t count) {
         param.kind = "float";
@@ -613,7 +597,6 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     if (resource.IsHolding<HdMaterialNetworkMap>())
         network = HdConvertToHdMaterialNetwork2(resource.UncheckedGet<HdMaterialNetworkMap>());
 
-    // The flat arrays borrow every string from `network`, which outlives the call.
     std::vector<pika_node> nodes;
     std::vector<pika_connection> connections;
     std::vector<std::vector<pika_param>> params(network.nodes.size());
@@ -643,14 +626,12 @@ void PikaMaterial::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits 
     bool dirty = false;
     if (!_pika.report(pika_material_network(renderer, _id, &flat, &dirty), path + " network"))
         return;
-    // Hydra tells no mesh its material's network changed, so the bound meshes refetch here.
-    // Marking them dirty does not reach them: the emulation scene index drops the bits on USD 25,
-    // and the custom bits too on USD 26.
+    // Hydra tells no mesh its material changed, so bound meshes refetch here. Dirty bits don't
+    // reach them, as the emulation scene index drops them, and custom bits too on USD 26.
     if (!dirty)
         return;
     HdRenderIndex &index = delegate->GetRenderIndex();
     for (SdfPath const &id : index.GetRprimIds()) {
-        // The index hands out its rprims const; the mesh's sync is Pika's own.
         auto mesh = const_cast<PikaMesh *>(dynamic_cast<PikaMesh const *>(index.GetRprim(id)));
         if (mesh && mesh->Binds(GetId()))
             mesh->SyncTexcoord(delegate, renderer);
@@ -671,7 +652,6 @@ PikaLight::~PikaLight() {
         _pika.report(pika_light_free(renderer, _id), "removing light " + GetId().GetString());
 }
 
-// UsdLux's fallback when the host hands over none.
 template <typename T>
 static T light_param(HdSceneDelegate *delegate, SdfPath const &id, TfToken const &name,
                      T fallback) {
@@ -687,7 +667,6 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
         return;
     SdfPath const &id = GetId();
     bool dome = _type == HdPrimTypeTokens->domeLight;
-    // A dome's pole axis arrives as a param.
     if (bits & (dome ? DirtyTransform | DirtyParams : DirtyTransform)) {
         GfMatrix4d matrix = delegate->GetTransform(id);
         if (dome)
@@ -695,8 +674,7 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
         _pika.report(pika_light_transform(renderer, _id, matrix.data()),
                      id.GetString() + " transform");
     }
-    // A changed link is a collection change, which hosts may send as a
-    // params change too.
+    // Hosts may send a collection change as a params change too.
     if (bits & (DirtyParams | DirtyCollection)) {
         TfToken light = light_param(delegate, id, HdTokens->lightLink, TfToken());
         TfToken shadow = light_param(delegate, id, HdTokens->shadowLink, TfToken());
@@ -715,8 +693,7 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     }
     pika_light params = {};
     params.type = _type.GetText();
-    // DistantLight's schema overrides LightAPI's fallback intensity of 1,
-    // approximating sunlight.
+    // DistantLight overrides LightAPI's fallback intensity of 1, approximating sunlight.
     bool distant = _type == HdPrimTypeTokens->distantLight;
     params.intensity = light_param(delegate, id, HdLightTokens->intensity, distant ? 50000.0f : 1.0f);
     params.exposure = light_param(delegate, id, HdLightTokens->exposure, 0.0f);
@@ -724,8 +701,7 @@ void PikaLight::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *di
     std::copy_n(color.data(), 3, params.color);
     params.normalize = light_param(delegate, id, HdLightTokens->normalize, false);
     params.angle = light_param(delegate, id, HdLightTokens->angle, 0.53f);
-    // treatAsPoint and treatAsLine are hints Pika need not take: above a surface's horizon a
-    // sphere lights it exactly as a point of the same power.
+    // treatAsPoint and treatAsLine are hints. A sphere above the horizon lights as a point does.
     params.radius = light_param(delegate, id, HdLightTokens->radius, 0.5f);
     params.width = light_param(delegate, id, HdLightTokens->width, 1.0f);
     params.height = light_param(delegate, id, HdLightTokens->height, 1.0f);
@@ -765,7 +741,6 @@ void PikaCurves::Sync(HdSceneDelegate *delegate, HdRenderParam *, HdDirtyBits *d
         bytes += sizeof(int) *
                  (topology.GetCurveVertexCounts().size() + topology.GetCurveIndices().size());
     }
-    // Points are float3 and widths float; the sizes are what Hydra handed over.
     if (bits & HdChangeTracker::DirtyPoints)
         bytes += GetPrimvar(delegate, HdTokens->points).GetArraySize() * sizeof(GfVec3f);
     if (bits & HdChangeTracker::DirtyWidths)
@@ -784,7 +759,7 @@ PikaCount::PikaCount(TfToken const &type, SdfPath const &id, Pika &pika)
 }
 
 PikaCount::~PikaCount() {
-    // Store ids start at 1: a fallback prim was never added.
+    // Store ids start at 1, so 0 is a fallback prim that was never added.
     pika_renderer *renderer = _id ? _pika.renderer() : nullptr;
     if (renderer)
         _pika.report(pika_counted_free(renderer, _id), "removing " + _path.GetString());

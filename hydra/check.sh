@@ -44,7 +44,7 @@ clean() {
     grep -q "^pika: rendering on .*validation on (sync)" "$2" ||
         fail "$1: Pika did not open a device with validation on"
     grep "^pika: error" "$2" && fail "$1: Pika reported errors"
-    # husk's own SwiftShader driver
+    # husk ships its own SwiftShader driver.
     grep "^validation:" "$2" | grep -v "libvk_swiftshader.so was found to differ" &&
         fail "$1: the validation layer reported messages"
     return 0

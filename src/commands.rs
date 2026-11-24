@@ -1,4 +1,4 @@
-//! One frame's command buffer, fence and timestamps. One frame is in flight at a time:
+//! One frame's command buffer, fence and timestamps. Only one frame is in flight at a time, so
 //! `begin` after `submit` fails until `wait` returns.
 
 use std::time::{Duration, Instant};
@@ -10,14 +10,14 @@ use crate::gpu;
 const QUERIES: u32 = 16;
 
 pub struct Commands {
-    // A copy of the owner's device table; the owner outlives this (field order), as `drop` needs.
+    // A copy of the owner's device table. The owner outlives this, by field order.
     device: ash::Device,
     queue: vk::Queue,
     pool: vk::CommandPool,
     buffer: vk::CommandBuffer,
     fence: vk::Fence,
     timestamps: vk::QueryPool,
-    /// In query order, after `begin`'s.
+    /// Labels in query order, after `begin`'s.
     marks: Vec<&'static str>,
     /// `None` once `wait` returns.
     submitted: Option<Instant>,
@@ -27,7 +27,7 @@ pub struct Commands {
 
 pub struct Times {
     pub wait: Duration,
-    /// GPU time from the timestamp before each mark to it.
+    /// The GPU time from the timestamp before each mark to the mark itself.
     pub spans: Vec<(&'static str, Duration)>,
 }
 
@@ -48,8 +48,8 @@ impl Commands {
         };
         let pool_info =
             vk::CommandPoolCreateInfo::default().queue_family_index(device.queue_family);
-        // SAFETY (all of `new`): `d` is live, each info outlives its call, each handle was made on
-        // `d` above. Handles start null, so a failed `new` drops a partly built value.
+        // SAFETY (all of `new`): the device is alive, each info outlives its call, and each handle was
+        // made on this device above. Handles start null, so a failed `new` drops a partly built value.
         c.pool = unsafe { d.create_command_pool(&pool_info, None) }
             .map_err(|e| format!("vkCreateCommandPool failed: {e}"))?;
         let alloc_info = vk::CommandBufferAllocateInfo::default()
@@ -74,8 +74,8 @@ impl Commands {
         }
         let begin = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-        // SAFETY: the pool and buffer were created on this live device, and
-        // `wait` waited for the last submit, so neither is in use.
+        // SAFETY: the pool and buffer were created on this device, which is alive, and `wait` waited
+        // for the last submit, so neither is in use.
         unsafe {
             self.device
                 .reset_command_pool(self.pool, vk::CommandPoolResetFlags::empty())
@@ -108,8 +108,8 @@ impl Commands {
     /// Call `wait` before touching anything the frame uses.
     pub fn submit(&mut self) -> Result<(), String> {
         let d = &self.device;
-        // SAFETY: the buffer is recording outside rendering, and the fence
-        // was created on `d` and is not in use (`begin` checked).
+        // SAFETY: the buffer is recording outside a render pass, and the fence was created on this
+        // device and isn't in use, which `begin` checked.
         unsafe {
             d.end_command_buffer(self.buffer)
                 .map_err(|e| format!("vkEndCommandBuffer failed: {e}"))?;
@@ -132,8 +132,8 @@ impl Commands {
         let start = Instant::now();
         let count = self.marks.len() + 1;
         let mut ticks = vec![0u64; count];
-        // SAFETY: the fence and query pool were created on `d`, and the
-        // submit that signals the fence writes the first `count` queries.
+        // SAFETY: the fence and query pool were created on this device, and the submit that signals
+        // the fence writes the first `count` queries.
         unsafe {
             d.wait_for_fences(&[self.fence], true, u64::MAX)
                 .map_err(|e| format!("vkWaitForFences failed: {e}"))?;
@@ -157,8 +157,8 @@ impl Commands {
     }
 
     fn timestamp(&mut self, index: u32) {
-        // SAFETY: the buffer is recording, the pool was created on this
-        // device and reset in `begin`, and `index` is below `QUERIES`.
+        // SAFETY: the buffer is recording, the pool was created on this device and reset in `begin`,
+        // and `index` is below `QUERIES`.
         unsafe {
             self.device.cmd_write_timestamp2(
                 self.buffer,
@@ -173,8 +173,8 @@ impl Commands {
 impl Drop for Commands {
     fn drop(&mut self) {
         let d = &self.device;
-        // SAFETY: every handle was created on `d` or is null, which destroy
-        // calls accept, and waiting for idle means none is still in use.
+        // SAFETY: every handle was created on this device or is null, which the destroy calls accept,
+        // and after waiting for idle none is still in use.
         unsafe {
             let _ = d.device_wait_idle();
             d.destroy_fence(self.fence, None);
@@ -184,7 +184,7 @@ impl Drop for Commands {
     }
 }
 
-/// The counter has `bits` valid bits, ticks every `period` ns, and may wrap between.
+/// The counter has `bits` valid bits, ticks every `period` ns, and may wrap in between.
 fn elapsed(start: u64, end: u64, bits: u32, period: f32) -> Duration {
     let ticks = end.wrapping_sub(start) & (u64::MAX >> (64 - bits));
     Duration::from_nanos((ticks as f64 * period as f64) as u64)
@@ -199,9 +199,9 @@ mod tests {
         let ns = |d: Duration| d.as_nanos();
         assert_eq!(ns(elapsed(1000, 1500, 64, 1.0)), 500);
         assert_eq!(ns(elapsed(1000, 1500, 64, 52.08)), 26_040);
-        // A 36-bit counter that wrapped: 16 ticks before and 16 after.
+        // A 36-bit counter that wrapped, with 16 ticks before the wrap and 16 after.
         assert_eq!(ns(elapsed((1 << 36) - 16, 16, 36, 1.0)), 32);
-        // The same wrap read without the mask is a huge interval.
+        // The same wrap read without the mask gives a huge interval.
         assert!(ns(elapsed((1 << 36) - 16, 16, 64, 1.0)) > 1 << 60);
     }
 }

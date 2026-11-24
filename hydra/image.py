@@ -1,10 +1,9 @@
-"""Pika's image check: renders each scene in hydra/images/ and compares the images with a ray cast
-from USD. husk's color, depth and normals are compared where there is a husk; usdrecord's color
-is compared when asked for. Each control perturbs the reference and must then fail.
+"""Renders each scene in hydra/images/ and compares it with a ray cast from USD. Each control
+perturbs the reference and must then fail.
 
     python3 hydra/image.py <out dir> [usdrecord]
 
-Run it from hydra/check.sh's environment; usdrecord needs a display.
+usdrecord needs a display.
 """
 
 import collections
@@ -23,36 +22,32 @@ from pxr import CameraUtil, Gf, Sdf, Tf, Usd, UsdGeom, UsdImagingGL, UsdLux, Usd
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCENES = os.path.join(ROOT, "hydra", "images")
 SETTINGS = "/render/settings"
-# The layers the scenes sublayer, which are not scenes themselves.
 LAYERS = ("settings.usda", "light.usda")
-# The delegate's default texture cap.
+# The delegate's default.
 CAP = float("inf")
-# Scenes whose texture the cap shrinks.
+# Scenes by the warnings they must print.
 CAPPED = {"capped": 1}
-# Scenes under PIKA_BUDGET.
 BUDGET = {"lowered": 1}
 TAIL = 4
-# Scenes husk draws coarser than the camera needs, first frame and last, (0, 0) for the rest.
+# Whether husk draws textures coarser than needed on the first frame and the last.
 BLURRED = {"lowered": (0, 1)}
-# Scenes whose pika:shadowPool holds fewer pages than husk's camera marks.
 POOLED = {"receding": 1}
-# Scenes whose shadow pages husk must show cached, or not.
+# Whether husk must show the shadow pages cached.
 CACHED = {"moving": True, "lamps": False}
-# Scenes husk must draw the same twice, bit for bit.
+# Drawn twice, bit for bit.
 REPEATED = {"receding"}
-# Each render is a Houdini process of about 1 GB with a few busy threads.
+# A render is a Houdini process of about 1 GB with a few busy threads.
 RENDERS = 8
-# Each reference process holds up to 1.4 GB (Houdini 22's hython).
+# A reference process holds up to 1.4 GB (Houdini 22's hython).
 REFERENCES = 16
 # Pika's pixel filter (src/film.rs).
 FILTER_RADIUS = 1.5
 FILTER_SIGMA = 0.284
-# Rays to a pixel's side in a textured scene's reference.
+# Per pixel side, in a textured scene's reference.
 RAYS = 3
-# A jump between adjacent rays of a textured scene's colour past which its pixels are not compared.
+# A colour jump between adjacent rays past which pixels are not compared.
 STEP = 0.1
-# Scenes whose shadows thin below a pixel between the centres, which their references trace as a
-# textured scene's.
+# Shadows thinner than a pixel, traced as a textured scene's.
 THIN = {"receding"}
 # Color allows for usdrecord's half floats.
 TOLERANCE = {"color": 2e-3, "depth": 2e-6, "normal": 2e-4}
@@ -92,28 +87,22 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "dome's intensity halved", "sky upside down", "sky a quarter turn off", "sun left in the sky",
             "metal read as matte",
             "frame 1's reference"]
-# The controls under which a subdivided mesh is drawn as its cage.
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
-# ACEScg to linear Rec.709.
 ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
                              [-0.130256, 1.140805, -0.010548],
                              [-0.024003, -0.128969, 1.152972]])
-# A material's closed form.
 # `metal` is a white metal's roughness.
 Look = collections.namedtuple("Look", "albedo emission image normal facing metal", defaults=(None,))
 CLAY = Look((0.18,) * 3, (0.0,) * 3, None, None, None)
 PINK = Look((0.0,) * 3, (1.0, 0.0, 1.0), None, None, None)
-# Each lit surface's inputs.
 LIT = {
     "ND_open_pbr_surface_surfaceshader": ("base_weight", "base_color", "emission_luminance",
                                           "emission_color", "specular_weight", "geometry_normal", 35),
     "ND_standard_surface_surfaceshader": ("base", "base_color", "emission", "emission_color",
                                           "specular", "normal", None),
 }
-# An OpenPBR surface's metalness and roughness. A UsdPreviewSurface's metal is no white one:
-# MaterialX holds its reflectivity to 0.99.
+# A UsdPreviewSurface's metal is no white one, as MaterialX holds its reflectivity to 0.99.
 METAL = ("base_metalness", "specular_roughness")
-# What a host hands Pika.
 Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
 # husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and husk holds it where
 # the camera was at the first frame it renders.
@@ -121,17 +110,16 @@ HUSK = Host(("default", "render"), True, True, 57225, True)
 # usdview's and usdrecord's, from HdxTaskController.
 USDRECORD_CAMERA_LIGHT = 15000
 CAMERA_LIGHT_ANGLE = 0.53
-# The scenes rendered under the host's camera light.
 CAMERA_LIT = {"headlit"}
-# A dome light: its radiance, its image's texels less its sun (None for a constant sky), its axes'
-# world directions a row each, and its sun as the direction toward it and its illuminance.
+# `texels` are less the sun, None for a constant sky. `axes` are world directions, a row each.
+# `sun` is the direction toward it and its illuminance.
 Sky = collections.namedtuple("Sky", "prim radiance texels axes sun")
 # Pika's default pika:sunThreshold, the share of a sky's light below which no sun is lifted, and
 # the angle a sun is lit and shadowed at (src/dome.rs, src/light.rs).
 SUN_THRESHOLD = 10.0
 SUN_SHARE = 0.01
 SUN_ANGLE = 0.53
-# Directions to a sky texel's side in the sum over a hemisphere.
+# Per sky texel side, in the hemisphere sum.
 SKY_RAYS = 2
 
 
@@ -141,7 +129,6 @@ def usdrecord_host():
 
 
 def meshes(stage, time, purposes, control=None):
-    """Every mesh of `purposes` drawn, once per instance it is drawn at."""
     out = []
     walked = set()
 
@@ -183,8 +170,7 @@ def meshes(stage, time, purposes, control=None):
 
 
 def misread_orientations(stage, time):
-    """Authors, in the session layer, each point instancer's orientations as they would read if
-    GfQuatf's (i, j, k, real) were taken for (real, i, j, k)."""
+    """Session-layer orientations as if GfQuatf's (i, j, k, real) were read as (real, i, j, k)."""
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         for prim in stage.TraverseAll():
             attr = UsdGeom.PointInstancer(prim).GetOrientationsAttr() if prim.IsA(UsdGeom.PointInstancer) else None
@@ -194,7 +180,7 @@ def misread_orientations(stage, time):
 
 
 def smooth_normals(points, counts, indices, left, control=None):
-    """Each point's smooth normal, as Hydra's Hd_SmoothNormals computes it."""
+    """As Hydra's Hd_SmoothNormals computes them."""
     sums = [Gf.Vec3d(0) for _ in points]
     corner = 0
     for count in counts:
@@ -214,7 +200,6 @@ def smooth_normals(points, counts, indices, left, control=None):
 
 
 def refine(points, counts, indices, holes, scheme, control=None):
-    """One level of uniform refinement."""
     points = [Gf.Vec3d(p) for p in points]
     faces, corner = [], 0
     for count in counts:
@@ -278,8 +263,7 @@ def refine(points, counts, indices, holes, scheme, control=None):
 
 
 def surface(mesh, time, control=None):
-    """The points, face vertex counts, face vertex indices and holes a mesh is drawn with at
-    `time`, and each drawn face's cage face."""
+    """Points, counts, indices and holes drawn at `time`, and each drawn face's cage face."""
     points = mesh.GetPointsAttr().Get(time)
     counts = mesh.GetFaceVertexCountsAttr().Get(time)
     indices = mesh.GetFaceVertexIndicesAttr().Get(time)
@@ -297,7 +281,7 @@ def surface(mesh, time, control=None):
 
 
 def weld(counts, indices, values, control=None):
-    """Welds a faceVarying primvar's values by point and value, as Pika does."""
+    """By point and value, as Pika does."""
     welded, index, corner_value = [], {}, []
     for point, value in zip(indices, values):
         key = point if control == "st seams smoothed over" else (point, tuple(value))
@@ -305,7 +289,6 @@ def weld(counts, indices, values, control=None):
             index[key] = len(welded)
             welded.append(value)
         corner_value.append(index[key])
-    # Each edge's sides.
     sides = {}
     corner = 0
     for count in counts:
@@ -327,7 +310,6 @@ def weld(counts, indices, values, control=None):
 
 
 def texcoord(mesh, primvar, time, control=None):
-    """The primvar as the faces drawn read it."""
     values, interpolation = primvar.ComputeFlattened(time), primvar.GetInterpolation()
     if control == "st indices ignored":
         values = primvar.Get(time)
@@ -353,13 +335,12 @@ def texcoord(mesh, primvar, time, control=None):
 
 
 def upstream(shader, name):
-    """The shader connected to `shader`'s input `name`, or None."""
     source = shader.GetInput(name).GetConnectedSource() if shader.GetInput(name) else None
     return UsdShade.Shader(source[0].GetPrim()) if source else None
 
 
 def nodedefs():
-    """The host's MaterialX libraries, as the generate tool loads them."""
+    """As the generate tool loads them."""
     libraries = mx.createDocument()
     search = mx.FileSearchPath(os.environ["MATERIALX"])
     mx.loadLibraries(["libraries"], search, libraries)
@@ -370,12 +351,11 @@ NODEDEFS = nodedefs()
 
 
 def unknown(shader):
-    """Whether the shader names a nodedef the libraries do not define."""
     return shader.GetShaderId().startswith("ND_") and not NODEDEFS.getNodeDef(shader.GetShaderId())
 
 
 def uv0(image):
-    """Whether the image node samples UV0, the texcoord MaterialX's nodes read by default."""
+    """UV0 is the texcoord MaterialX's nodes read by default."""
     if not image.GetInput("texcoord"):
         return True
     node = upstream(image, "texcoord")
@@ -386,10 +366,8 @@ def uv0(image):
 
 
 def sampled(image, kind, time, control=None):
-    """The file, address modes (u, v) at `time`, primvar and declared colour space (auto when none
-    for a colour, raw for the rest) of an ND_image_<kind> node sampled at UV0 (st) or a
-    geompropvalue reader, or of a UsdUVTexture (`kind` rgb, its output) sampled at st or a
-    UsdPrimvarReader_float2, or None for any other node."""
+    """(file, (u, v) modes at `time`, primvar, colour space) of an image node at UV0, st or a
+    primvar reader, or None. An undeclared space is auto for a colour and raw for the rest."""
     usd = kind == "rgb"
     if not image or image.GetShaderId() != ("UsdUVTexture" if usd else f"ND_image_{kind}"):
         return None
@@ -424,7 +402,7 @@ def sampled(image, kind, time, control=None):
 
 
 def wrap(image, name, path, time, control=None):
-    """A UsdUVTexture's wrapS or wrapT at `time` in the image nodedefs' words."""
+    """In the image nodedefs' words."""
     token = image.GetInput(name).Get(time) if image.GetInput(name) else "useMetadata"
     if token != "useMetadata":
         return "periodic" if token == "repeat" else token
@@ -434,9 +412,8 @@ def wrap(image, name, path, time, control=None):
 
 
 def metadata(path, control=None):
-    """The wrap modes (u, v) the file's wrapmodes attribute states, as maketx writes it
-    ("black,clamp", or one word for both), black for an axis it states none or another for, as
-    Storm reads it."""
+    """As maketx writes it, "black,clamp" or one word for both. Black for an axis it doesn't state,
+    as Storm reads it."""
     if "<UDIM>" in path:
         path = next(p for p in (path.replace("<UDIM>", str(n)) for n in range(1001, 1101)) if os.path.isfile(p))
     file = oiio.ImageInput.open(path)
@@ -447,7 +424,7 @@ def metadata(path, control=None):
 
 
 def constant(shader, name):
-    """The constant node `shader`'s input `name` reads through dot nodes, or None."""
+    """Read through dot nodes, or None."""
     node = upstream(shader, name)
     while node and node.GetShaderId().startswith("ND_dot_"):
         node = upstream(node, "in")
@@ -455,11 +432,7 @@ def constant(shader, name):
 
 
 def lit(surface, time, control=None):
-    """The Look of an OpenPBR or Standard Surface shader with its specular off
-    (hydra/images/pbr.usda) or of an OpenPBR white metal (hydra/images/sky.usda), its inputs read
-    at `time` as values or constant nodes' values
-    (hydra/images/constant.usda), its normal mapped when connected
-    (hydra/images/normalmap.usda)."""
+    """OpenPBR or Standard Surface with specular off, or an OpenPBR white metal."""
     *names, bump, facing = LIT[surface.GetShaderId()]
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
@@ -509,7 +482,6 @@ def lit(surface, time, control=None):
 
 
 def preview(surface, time, control=None):
-    """The Look of a UsdPreviewSurface (hydra/images/wrapped.usda)."""
     path = surface.GetPath()
     authored = {i.GetBaseName(): i for i in surface.GetInputs()}
     extra = sorted(set(authored) - {"diffuseColor", "emissiveColor", "useSpecularWorkflow", "specularColor",
@@ -557,7 +529,6 @@ def preview(surface, time, control=None):
 
 
 def look(prim, host, time, control=None):
-    """The closed form of the mesh's material."""
     material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
     if not material:
         return CLAY
@@ -589,7 +560,7 @@ def look(prim, host, time, control=None):
 
 
 def working(texels, path, space, control=None):
-    """The texels in the working space, linear Rec.709, from the colour space the asset declares."""
+    """From the declared colour space to linear Rec.709."""
     if space == "auto":
         eight = oiio.ImageBuf(path).spec().format.basetype == oiio.UINT8
         space = "srgb_texture" if eight and control != "8-bit auto read as raw" else "raw"
@@ -607,16 +578,14 @@ def working(texels, path, space, control=None):
 
 
 def halve(texels):
-    """A 2×2 box of the texels (rows, columns, channels), the last row or column repeated where a
-    side is odd, as the texture tool builds a level."""
+    """As the texture tool builds a level, the last row or column repeated where a side is odd."""
     h, w = texels.shape[:2]
     padded = texels[np.minimum(np.arange(h + h % 2), h - 1)][:, np.minimum(np.arange(w + w % 2), w - 1)]
     return padded.reshape((h + 1) // 2, 2, (w + 1) // 2, 2, -1).mean((1, 3))
 
 
 def bilinear(texels, st, modes, control=None):
-    """The bilinear sample of one level's texels, rows from the bottom, at each st (an (n, 2)
-    array), under the address modes (u, v)."""
+    """st is (n, 2), rows from the bottom."""
     h, w = texels.shape[:2]
     f = st * [w, h] - 0.5
     if control == "nearest texel":
@@ -625,8 +594,7 @@ def bilinear(texels, st, modes, control=None):
     fx, fy = (f - i0)[:, :1], (f - i0)[:, 1:]
 
     def address(i, n, mode):
-        """The texel column or row `i` reads, in `padded`, whose border of 0 is what black
-        addresses past the edge."""
+        """`padded`'s border of 0 is what black addresses past the edge."""
         if mode == "black":
             return np.clip(i, -1, n) + 1
         if mode == "clamp":
@@ -643,9 +611,7 @@ def bilinear(texels, st, modes, control=None):
 
 
 def sample(path, st, step, modes, space, cap, control=None):
-    """The trilinear sample of the image at `path`, or of the tile of the UDIM set `path` names, at
-    each st (an (n, 2) array), rows from the bottom as USD reads st, under the address modes (u,
-    v), in the working space."""
+    """Rows from the bottom as USD reads st, in the working space."""
     if "<UDIM>" in path:
         tile = np.floor(st)
         if control == "UDIM tiles read as one image":
@@ -676,8 +642,7 @@ def sample(path, st, step, modes, space, cap, control=None):
     level0 = oiio.ImageBuf(path).get_pixels(oiio.FLOAT)
 
     def level(m):
-        """Level m's texels, the file's level first + m, in the working space, rows from the
-        bottom."""
+        """The file's level first + m."""
         if first + m and control == "levels filtered from level 0":
             image = level0
             for _ in range(first + m):
@@ -731,7 +696,6 @@ def tangent_sums(points, counts, indices, holes, key, st):
 
 
 def frame(normal, u, v, control=None):
-    """A vertex's unit tangent and handedness from its normal and summed u and v directions."""
     n = normalize(np.array(normal, float))
     t = u - n * np.dot(n, u)
     if not t.any() or control == "tangent from the first axis":
@@ -742,7 +706,6 @@ def frame(normal, u, v, control=None):
 
 
 def parts(prim, parents, host, time, control=None):
-    """The Look of each drawn face."""
     own = look(prim, host, time, control)
     out = [None] * len(parents)
     subsets = UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets()
@@ -757,7 +720,6 @@ def parts(prim, parents, host, time, control=None):
 
 
 def triangles(stage, time, host, control=None):
-    """Every drawn mesh instance's fan triangles, in world space."""
     out = []
     for instance, (prim, world) in enumerate(meshes(stage, time, host.purposes, control)):
         mesh = UsdGeom.Mesh(prim)
@@ -797,7 +759,6 @@ def triangles(stage, time, host, control=None):
         face_of = [face for face, count in enumerate(counts) for _ in range(count)]
 
         def value(values, kind, c):
-            """The value corner `c` reads, by the primvar's interpolation."""
             if kind == UsdGeom.Tokens.constant:
                 return values[0]
             if kind == UsdGeom.Tokens.uniform:
@@ -845,7 +806,6 @@ def triangles(stage, time, host, control=None):
 
 
 def illuminance(intensity, exposure, color, angle, normalize, control):
-    """What a distant light gives a surface facing it."""
     theta = min(max(math.radians(angle) / 2, 0), math.pi)
     sin2 = math.sin(theta) ** 2
     if theta == 0:
@@ -862,8 +822,7 @@ def illuminance(intensity, exposure, color, angle, normalize, control):
 
 
 def sphere(api, radius, time, p, control):
-    """The direction toward a sphere light from each hit at `p`, the illuminance it gives a surface
-    there facing it and the sine of the angle it subtends."""
+    """Direction, illuminance on a facing surface, and the sine of the angle it subtends."""
     m = UsdGeom.Xformable(api.GetPrim()).ComputeLocalToWorldTransform(time)
     scales = [np.linalg.norm([m[r][0], m[r][1], m[r][2]]) for r in range(3)]
     if max(scales) - min(scales) > 1e-6 * max(scales):
@@ -883,8 +842,7 @@ def sphere(api, radius, time, p, control):
 
 
 def lambert(corners, c):
-    """The illuminance vector of an outline of radiance 1, `corners` (hits, corners, 3) relative to
-    each hit, pointing toward `c`, the light's centre relative to each hit (Lambert's formula)."""
+    """Lambert's formula. `corners` is (hits, corners, 3) relative to each hit, `c` the centre."""
     b = np.roll(corners, -1, axis=1)
     k = np.cross(corners, b)
     s = np.linalg.norm(k, axis=2)
@@ -895,8 +853,6 @@ def lambert(corners, c):
 
 
 def area(prim, time, p, n, control):
-    """The direction a rect, disk or cylinder light shines on each hit at `p`, facing `n`, and the
-    illuminance it gives a surface there facing that way."""
     m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(time)
     x, y, z, o = (np.array([m[r][0], m[r][1], m[r][2]]) for r in range(4))
     cylinder = prim.IsA(UsdLux.CylinderLight)
@@ -937,7 +893,7 @@ def area(prim, time, p, n, control):
             size = w * h * np.linalg.norm(np.cross(x, y))
         else:
             r = UsdLux.DiskLight(prim).GetRadiusAttr().Get(time)
-            # The regular 64-gon of the disk's area.
+            # A 64-gon of the disk's area.
             k = 64
             s = r * math.sqrt(2 * math.pi / (k * math.sin(2 * math.pi / k)))
             outline = [(s * math.cos(2 * math.pi * i / k), s * math.sin(2 * math.pi * i / k)) for i in range(k)]
@@ -946,7 +902,6 @@ def area(prim, time, p, n, control):
         corners = c[:, None] + np.array([a * x + b * y for a, b in outline])
         front = np.cross(x, y)
         front *= -np.sign(np.dot(front, z)) / np.linalg.norm(front)
-        # The cosine at the light of the direction to each hit.
         emitted = np.clip(dot(-c, front) / np.linalg.norm(c, axis=1), 0, None)
         if control != "area lights lit from both sides":
             lit = emitted > 0
@@ -969,7 +924,6 @@ AREA = (UsdLux.RectLight, UsdLux.DiskLight, UsdLux.CylinderLight)
 
 
 def links(prim, paths, control):
-    """Which hits' meshes, by the hits' prim `paths`, the light's lightLink collection includes."""
     if control == "light links ignored":
         return np.ones(len(paths), bool)
     query = UsdLux.LightAPI(prim).GetLightLinkCollectionAPI().ComputeMembershipQuery()
@@ -977,7 +931,6 @@ def links(prim, paths, control):
 
 
 def member(light, query, paths, control):
-    """Which `paths` the collection `query` includes."""
     stage = light.GetStage()
     everything = dict(query.GetAsPathExpansionRuleMap()) == {Sdf.Path.absoluteRootPath: "expandPrims"}
     def included(path):
@@ -994,8 +947,7 @@ PAIRS = 1 << 20
 
 
 def shadowed(toward, casts, p, own, world, control, reach=None):
-    """Which hits `p`, on triangles `own`, a light toward `toward` (one direction, or one per hit)
-    shadows."""
+    """`toward` is one direction or one per hit."""
     if control == "shadows ignored":
         return np.zeros(len(p), bool)
     if control == "shadow rays turned 6°":
@@ -1023,7 +975,6 @@ DISK_EDGE = np.c_[np.ones(8), np.arange(8) / 8]
 
 
 def aims(prim, time, toward, angle, control):
-    """Where a light's shadow rays aim."""
     if control == "shadows of the light's centre alone":
         return None
     scale = 0.25 if control == "shadows of a quarter of the light's size" else 1.0
@@ -1075,12 +1026,10 @@ def aims(prim, time, toward, angle, control):
 
 
 def share(prim, time, toward, angle, p, own, world, casts, control):
-    """Each hit's share of a light."""
     distant = toward is not None
 
     def unmet(points, at):
-        """The share of the hits `at`'s rays toward `points`, directions (n, 3) or points per hit
-        (n, hits at, 3), that meet no caster."""
+        """`points` is directions (n, 3) or points per hit (n, hits at, 3)."""
         blocked = np.zeros(at.sum())
         for q in points:
             if distant:
@@ -1109,7 +1058,6 @@ def share(prim, time, toward, angle, p, own, world, casts, control):
 
 
 def shadow_casters(prim, faces, control):
-    """Which triangles, by `faces`' prim paths, cast the light's shadows."""
     if prim.GetAttribute("inputs:shadow:enable").Get() is False and control != "shadow:enable ignored":
         return np.zeros(len(faces), bool)
     if control == "shadow links ignored":
@@ -1119,8 +1067,7 @@ def shadow_casters(prim, faces, control):
 
 
 def sky_directions(height, width):
-    """Each texel of a latlong's direction, +y along the top row, +z at the centre and +x a quarter
-    in from the left (shaders/view.slang's from_latlong), and its solid angle."""
+    """+y along the top row, +z at the centre, +x a quarter in (view.slang's from_latlong)."""
     y, x = np.mgrid[:height, :width]
     longitude = (0.5 - (x + 0.5) / width) * 2 * np.pi
     latitude = (0.5 - (y + 0.5) / height) * np.pi
@@ -1130,9 +1077,8 @@ def sky_directions(height, width):
 
 
 def lifted(texels, radiance, threshold):
-    """A sky's texels with the light they give over `threshold` taken out, their colour kept, and
-    that light as a sun: the direction toward it in the sky's axes and what it held, or None when
-    it is under SUN_SHARE of the sky's."""
+    """The texels less the light over `threshold`, colour kept, and that light as a sun, or None
+    under SUN_SHARE of the sky's."""
     if threshold <= 0:
         return texels, None
     d, solid_angle = sky_directions(*texels.shape[:2])
@@ -1148,7 +1094,6 @@ def lifted(texels, radiance, threshold):
 
 
 def dome(stage, time, host, control=None):
-    """The stage's dome light, or None."""
     found = [prim for prim in stage.Traverse() if prim.IsA(UsdLux.DomeLight)
              and UsdGeom.Imageable(prim).ComputeVisibility(time) != UsdGeom.Tokens.invisible]
     if not found:
@@ -1179,8 +1124,7 @@ def dome(stage, time, host, control=None):
 
 
 def skylight(sky, n):
-    """What a white matte surface of each normal shows of the sky: its radiance summed over the
-    normal's hemisphere, over π, unshadowed as Pika's is."""
+    """Radiance over the hemisphere, over π, unshadowed as Pika's is."""
     if sky.texels is None:
         return np.broadcast_to(sky.radiance, (len(n), 3))
     fine = sky.texels.repeat(SKY_RAYS, 0).repeat(SKY_RAYS, 1)
@@ -1194,7 +1138,7 @@ def skylight(sky, n):
 
 
 def mirrored(sky, n, toward):
-    """The sky along each hit's reflected ray: its image's four texels about it, a row wrapping."""
+    """Four texels about the reflected ray, a row wrapping."""
     if sky.texels is None:
         return np.broadcast_to(sky.radiance, (len(n), 3))
     local = (2 * dot(n, toward)[:, None] * n - toward) @ sky.axes.T
@@ -1213,9 +1157,8 @@ def mirrored(sky, n, toward):
 
 
 def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, sky, control=None):
-    """Each light as the direction toward it, one for every hit or one per hit, the illuminance it
-    gives a surface facing it unshadowed, likewise, the sine of the angle it subtends, 0 but for
-    a sphere, and each hit's share of it its shadow leaves."""
+    """Per light: the direction toward it, unshadowed illuminance, the sine of the angle it subtends
+    (0 but for a sphere), and the share its shadow leaves."""
     own, world, faces = casters
     found = [prim for prim in stage.Traverse() if prim.HasAPI(UsdLux.LightAPI)]
     for prim in found:
@@ -1234,7 +1177,7 @@ def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, sky, cont
         return [(-axis, (np.pi,) * 3, 0, np.ones(len(p)))]
     out = []
     if sky and sky.sun:
-        # A distant light with the dome's links.
+        # A sun, with the dome's links.
         on = links(sky.prim, paths, control)
         d, e, left = np.zeros((len(p), 3)), np.zeros((len(p), 3)), np.ones(len(p))
         d[on], e[on] = sky.sun
@@ -1283,7 +1226,6 @@ def frustum(stage, time, width, height, focal, policy):
 
 
 def reference(stage, time, width, height, host, lowered, lit, thin, control=None, centre=None, base=None):
-    """The reference image of the stage at `time`."""
     if control is None and centre is not None:
         image = dict(centre)
     else:
@@ -1308,7 +1250,6 @@ def reference(stage, time, width, height, host, lowered, lit, thin, control=None
         image["bounds"] = image["bounds"][image["soft"]]
         return image
     else:
-        # The geometry alone, at the textured scenes' rays.
         fine = {"face": coverage(stage, time, width, height, host, control)}
         image["mixed"] = mixed(fine, image, ("face",))
     # Pika's shadow edges stray up to a map texel, a pixel, from the rays', and the filter spreads
@@ -1317,20 +1258,17 @@ def reference(stage, time, width, height, host, lowered, lit, thin, control=None
     # An edge pixel sees a sliver past its outermost rays, and nothing past the image.
     image["mixed"][[0, -1], :] = True
     image["mixed"][:, [0, -1]] = True
-    # Bounds only where they differ.
     image["bounds"] = image["bounds"][image["soft"]]
     return image
 
 
 def weight(radius, distance2):
-    """Pika's filter's weight at `distance2` pixels squared from a pixel's centre."""
     r = distance2 / radius ** 2
     return np.where(r < 1, np.exp(-0.5 * r / FILTER_SIGMA ** 2), 0.0)
 
 
 def windows(a, kernel):
-    """Each of `kernel`'s weights with the rays of `a`, traced RAYS × RAYS a pixel, at its offset
-    from every pixel's centre, the edge pixels' rays repeated past the image's edge."""
+    """Rays traced RAYS × RAYS a pixel, the edge pixels' repeated past the image."""
     h, w = a.shape[0] // RAYS, a.shape[1] // RAYS
     rest = a.shape[2:]
     cells = a.reshape((h, RAYS, w, RAYS) + rest)
@@ -1341,13 +1279,11 @@ def windows(a, kernel):
 
 
 def kernel(radius):
-    """The filter's weight at each ray of a pixel and its neighbours each way."""
     d = (np.arange(3 * RAYS) + 0.5) / RAYS - 1.5
     return weight(radius, d[:, None] ** 2 + d[None, :] ** 2)
 
 
 def mixed(fine, centre, keys):
-    """Pixels whose `keys` differ from `centre`'s at a ray of `fine` in the pixel or a neighbour."""
     out = np.zeros(centre[keys[0]].shape, bool)
     for key in keys:
         for _, v in windows(fine[key], np.ones((3 * RAYS, 3 * RAYS))):
@@ -1356,8 +1292,6 @@ def mixed(fine, centre, keys):
 
 
 def stepped(color):
-    """Pixels whose filter meets two adjacent rays of `color`, traced RAYS × RAYS a pixel,
-    differing by more than STEP."""
     h, w = color.shape[0] // RAYS, color.shape[1] // RAYS
     jump = np.zeros(color.shape[:2])
     across = np.abs(np.diff(color[..., :3], axis=1)).max(axis=-1)
@@ -1371,8 +1305,6 @@ def stepped(color):
 
 
 def filtered(image, fine, radius):
-    """Gives `image` the colour, penumbra bounds and penumbra pixels of `fine`, its trace at RAYS ×
-    RAYS rays a pixel, filtered by `radius`."""
     k = kernel(radius)
     total = k.sum()
     image["color"] = sum(w * v for w, v in windows(fine["color"], k)) / total
@@ -1381,20 +1313,17 @@ def filtered(image, fine, radius):
     image["mixed"] = mixed(fine, image, ("face", "shadow", "cell")) | stepped(fine["color"])
 
 
-# Controls that move the rays, by the fraction of a pixel.
+# By the fraction of a pixel.
 SHIFTS = {"half a pixel right": 0.5, "depth and normals off centre": 0.25}
 
 
 def lens(control):
-    """The focal length's factor and the window policy under `control`."""
     focal = 1.005 if control == "focal length +0.5 %" else 1.0
     policy = CameraUtil.Crop if control == "aperture cropped" else CameraUtil.Fit
     return focal, policy
 
 
 def view(stage, time, width, height, host, control):
-    """The camera's frustum at `time`, conformed to a `width` × `height` image, its world to clip
-    matrix, and the triangles drawn."""
     f = frustum(stage, time, width, height, *lens(control))
     to_clip = f.ComputeViewMatrix() * f.ComputeProjectionMatrix()
     if control == "orientations misread":
@@ -1410,14 +1339,13 @@ def view(stage, time, width, height, host, control):
 
 
 def face_ids(tris):
-    """Each triangle's face as a number, the same for every trace of the same triangles."""
+    """The same for every trace of the same triangles."""
     faces = {}
     return np.array([faces.setdefault(t["face"], len(faces)) for t in tris])
 
 
 def coverage(stage, time, width, height, host, control=None):
-    """The face each of RAYS × RAYS rays a pixel meets, -1 for none, at RAYS times the image's
-    size."""
+    """-1 for none, at RAYS times the image's size."""
     _, to_clip, tris = view(stage, time, width * RAYS, height * RAYS, host, control)
     out = np.full((height * RAYS, width * RAYS), -1)
     if not tris:
@@ -1429,8 +1357,6 @@ def coverage(stage, time, width, height, host, control=None):
 
 
 def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
-    """The stage at `time` traced through each pixel centre of a `width` × `height` image, `scale`
-    times as fine as the reference's."""
     f, to_clip, tris = view(stage, time, width, height, host, control)
     fixed = host.holds_camera_light != (control == "camera light held as the other host holds it")
     focal, policy = lens(control)
@@ -1453,7 +1379,7 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
         # wholly shadowed and wholly lit.
         "soft": np.zeros((height, width), bool),
         "bounds": np.zeros((height, width, 2, 3)),
-        # Per pixel, the step of its look's image it lies in (`sampled`), 0 for none.
+        # The step of its look's image a pixel lies in, 0 for none.
         "cell": np.zeros((height, width), np.int64),
         "textured": False,
     }
@@ -1463,7 +1389,6 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     faces = [t["face"][0] for t in tris]
     casting = world
     if control == "moved casters' old shadows kept" and time != stage.GetStartTimeCode():
-        # The triangles that moved since frame 1, where they were then.
         old = triangles(stage, stage.GetStartTimeCode(), host)
         moved = old if len(old) != len(tris) else [o for o, t in zip(old, tris) if o["points"] != t["points"]]
         if moved:
@@ -1500,8 +1425,6 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     image["textured"] = any(l.image or l.normal for l in looks) or mirror
 
     def sampled(field):
-        """Each hit's sample of its look's `field` image at its st, 0 where it has none, and which
-        hits have one."""
         out = np.zeros((len(p), 3))
         images = sorted({getattr(l, field) for l in looks if getattr(l, field)})
         which = np.array([images.index(getattr(l, field)) if getattr(l, field) else -1 for l in looks])[i]
@@ -1521,7 +1444,6 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
         return out, which >= 0
 
     cells = np.zeros(len(p), np.int64)
-    # A normal map perturbs the normal before it is turned toward the eye.
     value, mapped = sampled("normal")
     if mapped.any() and control != "normal map ignored":
         value = np.where(dot(value, value)[:, None] == 0, (0.0, 0.0, 1.0), value * 2 - 1)
@@ -1595,7 +1517,7 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
 
 
 def rays(unproject, width, height, x, y):
-    """The ray through the image position (x, y), in pixels, rows down."""
+    """(x, y) in pixels, rows down."""
     ndc = np.c_[2 * x / width - 1, 1 - 2 * y / height]
     near = np.c_[ndc, -np.ones(len(x)), np.ones(len(x))] @ unproject
     far = np.c_[ndc, np.ones(len(x)), np.ones(len(x))] @ unproject
@@ -1617,7 +1539,6 @@ def intersect(o, d, v0, e1, e2):
 
 
 def cast(to_clip, width, height, shift, tris):
-    """Casts a ray through each pixel centre at the triangles (world points, (count, 3, 3))."""
     # Barycentric slack.
     EDGE = 1e-9
     nearest = np.full((height, width), -1)
@@ -1641,7 +1562,6 @@ def cast(to_clip, width, height, shift, tris):
 
 
 def footprint(to_clip, width, height, shift, tris, nearest, scale):
-    """For each pixel `cast` hit, in image order."""
     y, x = np.nonzero(nearest >= 0)
     i = nearest[y, x]
     unproject = np.linalg.inv(np.array(to_clip))
@@ -1663,7 +1583,6 @@ def normalize(v):
 
 
 def read(path):
-    """An EXR's AOVs, by subimage name."""
     image = {}
     for i in range(oiio.ImageBuf(path).nsubimages):
         buf = oiio.ImageBuf(path, i, 0)
@@ -1675,7 +1594,6 @@ def read(path):
 
 
 def edges(face, reach=1):
-    """Pixels whose neighbourhood `reach` pixels each way holds more than one face (or none)."""
     padded = np.pad(face, reach, mode="edge")
     h, w = face.shape
     out = np.zeros(face.shape, bool)
@@ -1686,8 +1604,6 @@ def edges(face, reach=1):
 
 
 def compare(image, ref, aovs, trusted=None):
-    """Why `image` does not match `ref`, or an empty list, over the pixels `trusted` (`ref` by
-    default) compares."""
     trusted = ref if trusted is None else trusted
     problems = []
     covered = ref["face"] >= 0
@@ -1716,8 +1632,6 @@ def compare(image, ref, aovs, trusted=None):
 
 
 def penumbrae(image, ref, at):
-    """Why the penumbra pixels `at` of `image` do not match `ref`, or an
-    empty list."""
     problems = []
     bounds = np.zeros(at.shape + (2, 3))
     bounds[ref["soft"]] = ref["bounds"]
@@ -1747,7 +1661,6 @@ def penumbrae(image, ref, at):
 
 
 def budget(name):
-    """The environment a scene renders in."""
     env = dict(os.environ)
     if name in BUDGET:
         env["PIKA_BUDGET"] = str(BUDGET[name])
@@ -1755,7 +1668,6 @@ def budget(name):
 
 
 def times(stage):
-    """The times of the stage's time range."""
     return tuple(range(int(stage.GetStartTimeCode()), int(stage.GetEndTimeCode()) + 1))
 
 
@@ -1774,15 +1686,12 @@ def husk(scene, out, times):
 
 
 def stats(path):
-    """Each frame line of the PIKA_STATS file at `path`, its values by name."""
     with open(path) as f:
         lines = [line.split() for line in f]
     return [dict(zip(w[2::2], w[3::2])) for w in lines if w and w[0] == "frame"]
 
 
 def blurred(frames, name):
-    """Failures unless husk's `frames` stats report BLURRED's textures drawn coarser than needed on
-    the first frame and the last."""
     counts = [int(f["blurred_textures"]) for f in frames]
     expected = BLURRED.get(name, (0, 0))
     if not counts or (counts[0], counts[-1]) != expected:
@@ -1792,9 +1701,6 @@ def blurred(frames, name):
 
 
 def cached(frames, name):
-    """Failures unless husk's `frames` stats show each time past the first keeping some of its
-    shadow pages, drawing others anew and giving some a live copy, as a CACHED scene whose
-    casters move must, and not, as one whose casters stay must."""
     if name not in CACHED:
         return []
     seen = []
@@ -1810,7 +1716,6 @@ def cached(frames, name):
 
 
 def repeated(name, renders, again):
-    """Failures unless husk's second render, `again`, matches `renders` bit for bit."""
     def same(a, b):
         return all(np.array_equal(a[aov], b[aov]) for aov in a)
     failures = [f"{name} frame {t}: drawn again, the image differs" for t in sorted(renders)
@@ -1836,7 +1741,6 @@ def usdrecord(scene, out, width, times):
 
 
 def references(scene, width, height, host):
-    """The reference and each control's, for each frame, of the scene at `scene`."""
     stage = Usd.Stage.Open(scene)
     name = os.path.splitext(os.path.basename(scene))[0]
     lowered, lit, thin = name in BUDGET, name in CAMERA_LIT, name in THIN
@@ -1860,13 +1764,10 @@ def differs(stage, host):
 
 
 def budget_warnings(name):
-    """The warnings of the memory budget scene `name` must print."""
     return int(name in BUDGET) + int(any(BLURRED.get(name, (0, 0))))
 
 
 def warned(log, name, capped, lowered, pooled):
-    """Failures unless `log` holds `capped` warnings of textures the cap shrinks, `lowered` of
-    textures lowered to fit and `pooled` of a shadow pool too small."""
     with open(log) as f:
         lines = [line for line in f if line.startswith("pika: warning: ")]
     failures = []
@@ -1880,7 +1781,6 @@ def warned(log, name, capped, lowered, pooled):
 
 
 def check(name, renders, references, aovs):
-    """Compares a host's frames with the references and the controls."""
     failures = []
     changed = set()
     times = sorted(renders)
