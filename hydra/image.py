@@ -1538,6 +1538,15 @@ def intersect(o, d, v0, e1, e2):
     return u, v, t, det
 
 
+def spans(to_clip, height, tris):
+    """Each triangle's rows on screen, a pixel wider, or every row if it reaches behind the eye."""
+    clip = np.concatenate([tris, np.ones(tris.shape[:2] + (1,))], -1) @ np.array(to_clip)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = (1 - clip[..., 1] / clip[..., 3]) / 2 * height
+    ahead = (clip[..., 3] > 0).all(1)
+    return np.where(ahead, y.min(1) - 1, -np.inf), np.where(ahead, y.max(1) + 1, np.inf)
+
+
 def cast(to_clip, width, height, shift, tris):
     # Barycentric slack.
     EDGE = 1e-9
@@ -1547,15 +1556,19 @@ def cast(to_clip, width, height, shift, tris):
     v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
     unproject = np.linalg.inv(np.array(to_clip))
     columns = np.arange(width)
+    low, high = spans(to_clip, height, tris)
     for y in range(height):
+        near = np.flatnonzero((low <= y + 0.5) & (y + 0.5 <= high))
+        if not len(near):
+            continue
         o, d = rays(unproject, width, height, columns + 0.5 + shift, np.full(width, y + 0.5))
         o, d = o[:, None], d[:, None]
-        u, v, t, det = intersect(o, d, v0, e1, e2)
+        u, v, t, det = intersect(o, d, v0[near], e1[near], e2[near])
         hit = (det != 0) & (u >= -EDGE) & (v >= -EDGE) & (u + v <= 1 + EDGE) & (t >= 0)
         i = np.where(hit, t, np.inf).argmin(axis=1)
         seen = hit[columns, i]
         x, i = columns[seen], i[seen]
-        nearest[y, x] = i
+        nearest[y, x] = near[i]
         point[y, x] = o[x, 0] + t[x, i, None] * d[x, 0]
         bary[y, x] = np.c_[1 - u[x, i] - v[x, i], u[x, i], v[x, i]]
     return nearest, point, bary
