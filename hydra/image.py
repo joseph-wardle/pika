@@ -1603,6 +1603,11 @@ def edges(face, reach=1):
     return out
 
 
+def nans(image):
+    nan = {aov: np.isnan(a.reshape(a.shape[:2] + (-1,))).any(-1) for aov, a in image.items()}
+    return [f"{aov} is NaN at {n.sum()} pixels" for aov, n in nan.items() if n.any()]
+
+
 def compare(image, ref, aovs, trusted=None):
     trusted = ref if trusted is None else trusted
     problems = []
@@ -1785,10 +1790,17 @@ def check(name, renders, references, aovs):
     changed = set()
     times = sorted(renders)
     for t in times:
-        problems = compare(renders[t], references[t][None], aovs)
+        problems = nans(renders[t]) + compare(renders[t], references[t][None], aovs)
         print(f"  frame {t}: {'; '.join(problems) or 'matches'}")
         failures += [f"{name} frame {t}: {p}" for p in problems]
     t = times[-1]
+    poisoned = {**renders[t], "color": renders[t]["color"].copy()}
+    face = references[t][None]["face"]
+    poisoned["color"][np.unravel_index(np.argmax(edges(face) & (face >= 0)), face.shape)] = np.nan
+    caught = bool(nans(poisoned))
+    print(f"  control 'a NaN on an edge': {'fails, as it must' if caught else 'PASSES'}")
+    if not caught:
+        failures.append(f"{name}: the control 'a NaN on an edge' passes")
     for control in CONTROLS:
         frame = times[0] if control == "frame 1's reference" else t
         perturbed = references[frame][None if frame != t else control]
