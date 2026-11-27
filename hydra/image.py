@@ -1538,6 +1538,15 @@ def intersect(o, d, v0, e1, e2):
     return u, v, t, det
 
 
+def spans(to_clip, height, tris):
+    """Each triangle's rows on screen, a pixel wider, or every row if it reaches behind the eye."""
+    clip = np.concatenate([tris, np.ones(tris.shape[:2] + (1,))], -1) @ np.array(to_clip)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        y = (1 - clip[..., 1] / clip[..., 3]) / 2 * height
+    ahead = (clip[..., 3] > 0).all(1)
+    return np.where(ahead, y.min(1) - 1, -np.inf), np.where(ahead, y.max(1) + 1, np.inf)
+
+
 def cast(to_clip, width, height, shift, tris):
     # Barycentric slack.
     EDGE = 1e-9
@@ -1547,15 +1556,19 @@ def cast(to_clip, width, height, shift, tris):
     v0, e1, e2 = tris[:, 0], tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0]
     unproject = np.linalg.inv(np.array(to_clip))
     columns = np.arange(width)
+    low, high = spans(to_clip, height, tris)
     for y in range(height):
+        near = np.flatnonzero((low <= y + 0.5) & (y + 0.5 <= high))
+        if not len(near):
+            continue
         o, d = rays(unproject, width, height, columns + 0.5 + shift, np.full(width, y + 0.5))
         o, d = o[:, None], d[:, None]
-        u, v, t, det = intersect(o, d, v0, e1, e2)
+        u, v, t, det = intersect(o, d, v0[near], e1[near], e2[near])
         hit = (det != 0) & (u >= -EDGE) & (v >= -EDGE) & (u + v <= 1 + EDGE) & (t >= 0)
         i = np.where(hit, t, np.inf).argmin(axis=1)
         seen = hit[columns, i]
         x, i = columns[seen], i[seen]
-        nearest[y, x] = i
+        nearest[y, x] = near[i]
         point[y, x] = o[x, 0] + t[x, i, None] * d[x, 0]
         bary[y, x] = np.c_[1 - u[x, i] - v[x, i], u[x, i], v[x, i]]
     return nearest, point, bary
@@ -1601,6 +1614,11 @@ def edges(face, reach=1):
         for dx in range(2 * reach + 1):
             out |= padded[dy:dy + h, dx:dx + w] != face
     return out
+
+
+def nans(image):
+    nan = {aov: np.isnan(a.reshape(a.shape[:2] + (-1,))).any(-1) for aov, a in image.items()}
+    return [f"{aov} is NaN at {n.sum()} pixels" for aov, n in nan.items() if n.any()]
 
 
 def compare(image, ref, aovs, trusted=None):
@@ -1785,10 +1803,17 @@ def check(name, renders, references, aovs):
     changed = set()
     times = sorted(renders)
     for t in times:
-        problems = compare(renders[t], references[t][None], aovs)
+        problems = nans(renders[t]) + compare(renders[t], references[t][None], aovs)
         print(f"  frame {t}: {'; '.join(problems) or 'matches'}")
         failures += [f"{name} frame {t}: {p}" for p in problems]
     t = times[-1]
+    poisoned = {**renders[t], "color": renders[t]["color"].copy()}
+    face = references[t][None]["face"]
+    poisoned["color"][np.unravel_index(np.argmax(edges(face) & (face >= 0)), face.shape)] = np.nan
+    caught = bool(nans(poisoned))
+    print(f"  control 'a NaN on an edge': {'fails, as it must' if caught else 'PASSES'}")
+    if not caught:
+        failures.append(f"{name}: the control 'a NaN on an edge' passes")
     for control in CONTROLS:
         frame = times[0] if control == "frame 1's reference" else t
         perturbed = references[frame][None if frame != t else control]
