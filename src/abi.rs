@@ -173,6 +173,7 @@ pub struct CFrame {
     texture_cap: u32,
     shadow_pool: u32,
     sun_threshold: f32,
+    dome_light_camera_visibility: bool,
 }
 
 thread_local! {
@@ -395,6 +396,7 @@ pub unsafe extern "C" fn pika_render(
             texture_cap: f.texture_cap,
             shadow_pool: f.shadow_pool,
             sun_threshold: f.sun_threshold,
+            dome_light_camera_visibility: f.dome_light_camera_visibility,
         };
         let done = lock(handle)?.render(frame)?;
         // SAFETY: the delegate passes room for one value.
