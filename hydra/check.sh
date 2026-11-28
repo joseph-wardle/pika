@@ -225,8 +225,8 @@ clean engine "$OUT/engine.log"
 grep -q "^pika: warning: texture .*mips.exr.*cannot read its levels.*; held at 2×2 until the memory budget grows or the textures change$" "$OUT/engine.log" ||
     fail "engine: the raise whose read failed was not warned of (see $OUT/engine.log)"
 DISPLAY=:$(cat "$OUT/display") "$PYTHON" "$ROOT/hydra/film.py" "$ROOT/hydra/scenes/panned.usda" "$ROOT/hydra/scenes/penumbra.usda" \
-    >"$OUT/film.log" 2>&1 ||
-    fail "the film's history does not follow a pan, objects' motion or a light's change, does not average a soft shadow while playing, or a converged still depends on what came before (see $OUT/film.log)"
+    "$ROOT/hydra/scenes/turned.usda" >"$OUT/film.log" 2>&1 ||
+    fail "the film's history does not follow a pan, a turn over the sky, objects' motion or a light's change, does not average a soft shadow while playing, or a converged still depends on what came before (see $OUT/film.log)"
 clean film "$OUT/film.log"
 
 [ $failed -eq 0 ] && echo "PASS" || exit 1

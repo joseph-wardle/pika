@@ -82,6 +82,8 @@ pub struct Frame<'a> {
     pub shadow_pool: u32,
     /// `pika:sunThreshold`, or 0 for no sun.
     pub sun_threshold: f32,
+    /// Hydra's `domeLightCameraVisibility`: whether the lit dome's sky is drawn behind the scene.
+    pub dome_light_camera_visibility: bool,
 }
 
 impl Frame<'_> {
@@ -173,6 +175,7 @@ struct Inputs {
     texture_cap: u32,
     shadow_pool: u32,
     sun_threshold: f32,
+    dome_light_camera_visibility: bool,
 }
 
 impl Inputs {
@@ -185,6 +188,7 @@ impl Inputs {
             texture_cap: frame.texture_cap,
             shadow_pool: frame.shadow_pool,
             sun_threshold: frame.sun_threshold,
+            dome_light_camera_visibility: frame.dome_light_camera_visibility,
         }
     }
 }
@@ -249,6 +253,7 @@ impl Renderer {
         let shadow = shader::compile("shadow")?;
         let film = shader::compile("film")?;
         let dome = shader::compile("dome")?;
+        let sky = shader::compile("sky")?;
         let bake = Bake::new()?;
         Ok(Self {
             store: Store::new(),
@@ -260,7 +265,7 @@ impl Renderer {
             shade: Shade::new(&device, bake.clone())?,
             shadows: Shadows::new(&device, &shadow.spirv)?,
             cull: Cull::new(&device, &cull.spirv)?,
-            dome: Dome::new(&device, &dome.spirv, bake)?,
+            dome: Dome::new(&device, &dome.spirv, &sky.spirv, bake)?,
             film: Film::new(&device, &film.spirv)?,
             geometry: Geometry::new(&device, &subdiv.spirv, &smooth.spirv, &tangent.spirv)?,
             device,
@@ -367,6 +372,9 @@ impl Renderer {
         let addresses = self.geometry.addresses();
         let (dome, sun) =
             (self.dome).update(&self.device, &self.store, cb, inputs.sun_threshold)?;
+        if inputs.dome_light_camera_visibility {
+            (self.dome).show(&self.device, cb, inputs.texture_cap)?;
+        }
         let (mut lights, casters) = light::gather(&self.store, sun);
         laps.lap("lights");
         if let Some(g) = &addresses {
@@ -446,6 +454,17 @@ impl Renderer {
         if let Some((geometry, view)) = drawn {
             let groups = self.geometry.groups();
             (self.shade).draw(cb, formats[COLOR].0, target.area(), geometry, groups, view);
+        }
+        if inputs.dome_light_camera_visibility {
+            let previous = &previous_view_projection;
+            (self.dome).draw(
+                cb,
+                formats[COLOR].0,
+                target.area(),
+                &camera,
+                previous,
+                jitter,
+            );
         }
         target.end_rendering(cb);
         self.commands.mark("shade")?;

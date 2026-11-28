@@ -16,7 +16,7 @@ This is a very early toy project. Currently it does the following:
 - **Textures**, baked once into a cache, with UDIM sets kept as one array. When textures don't fit in GPU memory, the ones the camera needs least are lowered first.
 - **Lights**: distant, sphere, rect, disk and cylinder lights, the host's camera light, and light linking.
 - **Soft shadows** from every light, following shadow links. While the view is still, each frame adds one shadow sample until 64 have been drawn. Shadows are cached between frames and redrawn only where a light or a moving mesh changes them.
-- **Dome lights**: the sky lights matte surfaces, and its reflection is blurred by roughness. A bright sun in the sky is lifted out into a distant light that casts shadows.
+- **Dome lights**: the sky lights matte surfaces, and its reflection is blurred by roughness. A bright sun in the sky is lifted out into a distant light that casts shadows. The sky shows behind the scene unless the host hides dome lights from the camera, as usdview's "Show Dome Light Textures" and usdrecord's default do.
 
 ![Two blocks and a ball on a floor, lit by a sky and its sun](docs/dome.png)
 

@@ -1,0 +1,25 @@
+#usda 1.0
+(
+    doc = """Two small quads at opposite corners, which frame the view, before a dome light whose image is a checker of squares a few pixels wide at the check's 64×64 (bake/fixtures/checker.exr): the scene hydra/film.py turns the camera across, so the sky's own motion carries its history."""
+    defaultPrim = "world"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "world"
+{
+    def Mesh "quads"
+    {
+        uniform token subdivisionScheme = "none"
+        int[] faceVertexCounts = [4, 4]
+        int[] faceVertexIndices = [0, 1, 2, 3, 4, 5, 6, 7]
+        point3f[] points = [(-2, -2, 0), (-1.8, -2, 0), (-1.8, -1.8, 0), (-2, -1.8, 0), (1.8, 1.8, 0), (2, 1.8, 0), (2, 2, 0), (1.8, 2, 0)]
+    }
+
+    def DomeLight "sky"
+    {
+        float inputs:intensity = 1
+        asset inputs:texture:file = @../../bake/fixtures/checker.exr@
+        token inputs:texture:format = "latlong"
+    }
+}

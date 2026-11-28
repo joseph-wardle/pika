@@ -31,6 +31,12 @@ sky.exr     64×32 float latlong, the texel toward d holding 0.5 + 0.4 d, so a t
             sky shows.
 spot.exr    64×32 float latlong of grey 0.3 with one texel of SPOT, 59° up and 20° round from +z
             toward +x, a sun for a dome light to lift.
+ripples.exr 1024×512 half latlong of grey 0.5 rippled by ±RIPPLE every RIPPLE_PERIOD texels round,
+            with a disc of DISC toward TOWARD, a sun for a dome light to lift. Each halving
+            flattens the ripple further, so a render shows the levels it blends, and a quarter
+            turn moves it.
+checker.exr 512×256 half latlong of 2×2 squares of 0.2 and 0.8, a sky whose edges show where a
+            frame's history lags.
 """
 
 import os
@@ -45,6 +51,13 @@ SWATCH = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (128, 128, 128)]
 GREYS = [17 * i for i in range(16)]
 WRAPPED = [51, 102, 153, 204]
 SPOT = 400.0
+DISC = 40.0
+TOWARD = (14, 8, -12)
+# Its angular radius, in degrees.
+DISC_RADIUS = 4
+# Gentle enough that rays a third of a pixel apart differ by less than hydra/image.py's STEP.
+RIPPLE = 0.15
+RIPPLE_PERIOD = 12
 COLORS = [(240, 60, 60), (220, 100, 60), (200, 140, 60), (180, 180, 60),
           (140, 200, 80), (100, 200, 120), (60, 200, 160), (60, 180, 200)]
 # Linear Rec.709 to ACEScg: the inverse of hydra/image.py's ACESCG_TO_REC709.
@@ -179,12 +192,45 @@ def write_sky(name, pixels):
     out.close()
 
 
-def sky():
+def directions(width, height):
     # shaders/view.slang's from_latlong.
-    y, x = np.mgrid[:32, :64]
-    longitude, latitude = (0.5 - (x + 0.5) / 64) * 2 * np.pi, (0.5 - (y + 0.5) / 32) * np.pi
-    d = np.stack([np.cos(latitude) * np.sin(longitude), np.sin(latitude), np.cos(latitude) * np.cos(longitude)], -1)
-    write_sky("sky.exr", 0.5 + 0.4 * d)
+    y, x = np.mgrid[:height, :width]
+    longitude, latitude = (0.5 - (x + 0.5) / width) * 2 * np.pi, (0.5 - (y + 0.5) / height) * np.pi
+    c = np.cos(latitude)
+    return np.stack([c * np.sin(longitude), np.sin(latitude), c * np.cos(longitude)], -1)
+
+
+def sky():
+    write_sky("sky.exr", 0.5 + 0.4 * directions(64, 32))
+
+
+def checker():
+    y, x = np.mgrid[:256, :512]
+    pixels = np.where(((x // 2 + y // 2) % 2)[..., None] == 1, 0.8, 0.2) * np.ones(3)
+    out = oiio.ImageOutput.create("checker.exr")
+    spec = oiio.ImageSpec(512, 256, 3, oiio.HALF)
+    spec.attribute("compression", "zip")
+    out.open(os.path.join(HERE, "checker.exr"), spec)
+    out.write_image(np.ascontiguousarray(pixels, np.float32))
+    out.close()
+
+
+def ripples():
+    toward = np.array(TOWARD) / np.linalg.norm(TOWARD)
+    within = directions(1024, 512) @ toward > np.cos(np.radians(DISC_RADIUS))
+    x = np.arange(1024) + 0.5
+    rippled = np.broadcast_to(0.5 + RIPPLE * np.sin(2 * np.pi * x / RIPPLE_PERIOD), (512, 1024))
+    pixels = np.where(within, DISC, rippled)[..., None] * np.ones(3)
+    path = os.path.join(HERE, "ripples.exr")
+    spec = oiio.ImageSpec(1024, 512, 3, oiio.HALF)
+    spec.attribute("compression", "zip")
+    out = oiio.ImageOutput.create(path)
+    out.open(path, spec)
+    out.write_image(np.ascontiguousarray(pixels, np.float32))
+    out.close()
+    read = oiio.ImageBuf(path)
+    if read.has_error or np.abs(read.get_pixels(oiio.FLOAT) - pixels).max() > 1e-2:
+        raise SystemExit("ripples.exr does not read back as written")
 
 
 def spot():
@@ -205,3 +251,5 @@ if __name__ == "__main__":
     mixed()
     sky()
     spot()
+    ripples()
+    checker()

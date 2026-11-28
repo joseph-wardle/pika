@@ -101,6 +101,28 @@ impl Camera {
         }
         c
     }
+
+    /// Rows taking clip (x, y, 1) to the world direction through that point, away from the camera.
+    pub fn rays(&self) -> [[f64; 3]; 3] {
+        let [x, y, _, w] = self
+            .view_projection
+            .map(|row| [0, 1, 2].map(|i| f64::from(row[i])));
+        // A direction d at (x, y) has (x_row - x w_row)·d = (y_row - y w_row)·d = 0, so d is the
+        // cross product, whose xy term cancels.
+        let columns = [cross(y, w), cross(w, x), cross(x, y)];
+        // w_row·d is the same everywhere, as is an orthographic camera's d.
+        let ahead = match self.eye[3] {
+            0.0 => -(0..3)
+                .map(|i| f64::from(self.eye[i]) * columns[2][i])
+                .sum::<f64>(),
+            _ => (0..3).map(|i| w[i] * columns[2][i]).sum(),
+        };
+        std::array::from_fn(|r| columns.map(|c| c[r] * ahead.signum()))
+    }
+}
+
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [0, 1, 2].map(|i| a[(i + 1) % 3] * b[(i + 2) % 3] - a[(i + 2) % 3] * b[(i + 1) % 3])
 }
 
 /// The instances a prototype is drawn at, composed as Hydra does. At each instancer level the
@@ -413,6 +435,37 @@ mod tests {
         (ortho[0], ortho[5], ortho[10], ortho[15]) = (1.0, 1.0, -0.02, 1.0);
         let camera = Camera::new(&world_to_view, &ortho).unwrap();
         assert_eq!(camera.eye, [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn rays_point_from_the_eye_through_each_point() {
+        // A quarter turn about y, then placed at (2, 0, 0), so it looks down -x.
+        let world_to_view = [
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, -2.0, 1.0,
+        ];
+        let camera = Camera::new(&world_to_view, &perspective()).unwrap();
+        let jittered = camera.jittered([0.375, -0.25], [16, 9]);
+        let along = |c: &Camera, at: [f64; 3]| {
+            let rays = c.rays();
+            let (clip, _) = clip(&camera, at);
+            let [x, y] = [0, 1].map(|i| clip[i] / clip[3]);
+            let d = rays.map(|row| row[0] * x + row[1] * y + row[2]);
+            let to = [at[0] - 2.0, at[1], at[2]];
+            let length = |v: [f64; 3]| v.iter().map(|c| c * c).sum::<f64>().sqrt();
+            let cos = (0..3).map(|i| d[i] * to[i]).sum::<f64>() / (length(d) * length(to));
+            1.0 - cos
+        };
+        for at in [[0.0, 0.0, 0.0], [-3.0, 1.0, 2.0], [-40.0, -9.0, -30.0]] {
+            assert!(along(&camera, at) < 1e-9, "{at:?}");
+            // Negative control: the jittered camera's ray through the same point misses it.
+            assert!(along(&jittered, at) > 1e-6, "{at:?}");
+        }
+        let mut ortho = [0.0; 16];
+        (ortho[0], ortho[5], ortho[10], ortho[15]) = (1.0, 1.0, -0.02, 1.0);
+        let rays = Camera::new(&world_to_view, &ortho).unwrap().rays();
+        let d = |x: f64, y: f64| rays.map(|row| row[0] * x + row[1] * y + row[2]);
+        assert_eq!(d(0.0, 0.0), d(0.5, -1.0));
+        assert!(d(0.0, 0.0)[0] < 0.0 && d(0.0, 0.0)[1] == 0.0 && d(0.0, 0.0)[2] == 0.0);
     }
 
     #[test]

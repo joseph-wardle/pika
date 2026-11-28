@@ -1,6 +1,6 @@
 //! The dome light that lights a view. From its sky this makes the irradiance toward every
 //! direction, a blurred copy of the sky for each roughness of reflection, and a sun lifted out
-//! of the sky.
+//! of the sky. It also draws the sky behind the scene.
 
 use std::f64::consts::{PI, TAU};
 use std::ops::Range;
@@ -11,7 +11,11 @@ use crate::bake::Bake;
 use crate::gpu::{self, Buffer};
 use crate::light;
 use crate::material::Source;
+use crate::raster::{COLOR_FORMATS, DEPTH_AOV, MOTION, NORMAL_AOV};
 use crate::store::{self, Shape, Store};
+use crate::target;
+use crate::texture;
+use crate::transform::Camera;
 
 /// `IRRADIANCE` in `shaders/view.slang`, counted in texels.
 const IRRADIANCE: u32 = 64 * 32;
@@ -35,6 +39,8 @@ const FLAT: [u32; 2] = [SUMMED, SUMMED / 2];
 /// The smallest share of a sky's light worth lifting into a sun.
 const SHARE: f64 = 0.01;
 const BAND: u32 = 64;
+/// The widest a sky is drawn behind the scene, within `pika:textureCap`. ALab's sky is 8000 wide.
+const BACKGROUND: u32 = 8192;
 
 /// Must match `Dome` in `shaders/view.slang`.
 #[repr(C)]
@@ -61,6 +67,18 @@ struct Push {
     samples: u32,
 }
 
+/// Must match `Push` in `shaders/sky.slang`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SkyPush {
+    rays: [[f32; 4]; 3],
+    previous: [[f32; 4]; 3],
+    radiance: [f32; 3],
+    levels: u32,
+    texels: vk::DeviceAddress,
+    size: [u32; 2],
+}
+
 /// What a dome shows, before its colour and intensity.
 #[derive(Clone, PartialEq, Debug)]
 enum Sky {
@@ -76,6 +94,49 @@ struct Lifted {
     toward: [f32; 3],
     /// Its texels summed over their solid angles, before the dome's colour and intensity.
     light: [f32; 3],
+}
+
+/// The dome that lit the last update.
+struct Lit {
+    sky: Sky,
+    axes: [[f32; 3]; 3],
+    radiance: [f32; 3],
+}
+
+/// The sky drawn behind the scene, read from its image again, since the lighting copies are too
+/// coarse for a lens and have their sun lifted out.
+struct Background {
+    /// The sky and `pika:textureCap` it was read with, so colour and intensity edits keep it.
+    key: (Sky, u32),
+    /// RGB9E5 levels, the finest first, and the finest's extent. `None` for a black sky or an
+    /// image that failed.
+    texels: Option<(Buffer, [u32; 2])>,
+}
+
+/// A dome's image, baked.
+struct Latlong {
+    file: String,
+    texture: texture::Texture,
+    channels: usize,
+}
+
+impl Latlong {
+    /// Rows of one level of the first tile of a set, 3 floats a texel.
+    fn rows(&self, level: usize, rows: Range<u32>) -> Result<Vec<f32>, String> {
+        let channels = self.channels;
+        let row = self.texture.extent(level).0 as usize * channels * 4;
+        let mut bytes = vec![0; rows.len() * row];
+        let from = self.texture.levels[level].start + rows.start as usize * row;
+        (self.texture.read_at(from, &mut bytes))
+            .map_err(|e| format!("cannot read the bake of {}: {e}", self.file))?;
+        let texels = bytes.chunks_exact(channels * 4).flat_map(|texel| {
+            [0, 1, 2].map(|c| {
+                let at = 4 * c.min(channels - 1);
+                f32::from_le_bytes(texel[at..at + 4].try_into().unwrap())
+            })
+        });
+        Ok(texels.collect())
+    }
 }
 
 /// A sky's extent within `REFLECTED`, its texels from the top row with 3 floats each, and its
@@ -101,17 +162,37 @@ pub struct Dome {
     sun: Option<Lifted>,
     /// The domes last warned about for giving no light.
     warned: Vec<String>,
+    lit: Lit,
+    background: Option<Background>,
+    /// The last upload's source, kept until the GPU has run it.
+    staging: Option<Buffer>,
+    sky_layout: vk::PipelineLayout,
+    /// One pipeline per `COLOR_FORMATS` entry.
+    sky_pipelines: Vec<vk::Pipeline>,
 }
 
 impl Dome {
-    pub fn new(device: &gpu::Device, spirv: &[u32], bake: Bake) -> Result<Self, String> {
+    pub fn new(
+        device: &gpu::Device,
+        spirv: &[u32],
+        sky: &[u32],
+        bake: Bake,
+    ) -> Result<Self, String> {
         let compute = |name| gpu::Compute::new(device, spirv, name, size_of::<Push>());
         let local = |texels: u32| {
             let usage = vk::BufferUsageFlags::STORAGE_BUFFER;
             Buffer::device_local(device, texels as u64 * 12, usage)
         };
-        Ok(Self {
-            device: device.raw.clone(),
+        let d = &device.raw;
+        let push = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+            .size(size_of::<SkyPush>() as u32)];
+        let layout_info = vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push);
+        // SAFETY: the device is alive and `layout_info` outlives the call.
+        let sky_layout = unsafe { d.create_pipeline_layout(&layout_info, None) }
+            .map_err(|e| format!("vkCreatePipelineLayout failed: {e}"))?;
+        let mut dome = Self {
+            device: d.clone(),
             sum: compute(c"sum")?,
             fold: compute(c"fold")?,
             halve: compute(c"halve")?,
@@ -127,7 +208,54 @@ impl Dome {
             summed: None,
             sun: None,
             warned: Vec::new(),
-        })
+            lit: Lit {
+                sky: Sky::Black,
+                axes: axes(&IDENTITY),
+                radiance: [0.0; 3],
+            },
+            background: None,
+            staging: None,
+            sky_layout,
+            sky_pipelines: Vec::new(),
+        };
+        let module_info = vk::ShaderModuleCreateInfo::default().code(sky);
+        // SAFETY: the device is alive and `module_info` outlives the call.
+        let module = unsafe { d.create_shader_module(&module_info, None) }
+            .map_err(|e| format!("vkCreateShaderModule failed: {e}"))?;
+        // Only where the prepass left the far depth it cleared to.
+        let depth = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            .depth_write_enable(false)
+            .depth_compare_op(vk::CompareOp::EQUAL);
+        let built: Vec<_> = (COLOR_FORMATS.iter())
+            .map(|&color| {
+                let colors = [
+                    (color, vk::ColorComponentFlags::RGBA),
+                    (DEPTH_AOV.0, vk::ColorComponentFlags::empty()),
+                    (NORMAL_AOV.0, vk::ColorComponentFlags::empty()),
+                    (
+                        MOTION,
+                        vk::ColorComponentFlags::R | vk::ColorComponentFlags::G,
+                    ),
+                ];
+                let entries = [c"vs", c"fs"];
+                gpu::graphics(
+                    d,
+                    sky_layout,
+                    module,
+                    entries,
+                    &colors,
+                    target::DEPTH_FORMAT,
+                    depth,
+                )
+            })
+            .collect();
+        // SAFETY: the pipeline is built, so nothing uses the shader module any more.
+        unsafe { d.destroy_shader_module(module, None) };
+        // Kept before the error returns, so `drop` destroys them.
+        dome.sky_pipelines = built.iter().filter_map(|p| p.clone().ok()).collect();
+        built.into_iter().collect::<Result<Vec<_>, _>>()?;
+        Ok(dome)
     }
 
     /// Records the irradiance pass into `cb`, outside a render pass, when the sky or what
@@ -139,6 +267,8 @@ impl Dome {
         cb: vk::CommandBuffer,
         threshold: f32,
     ) -> Result<(Constants, Option<light::Sun>), String> {
+        // The frame before has run, so its upload is done.
+        self.staging = None;
         let (lit, rest) = choose(store);
         if rest != self.warned {
             if !rest.is_empty() {
@@ -165,6 +295,11 @@ impl Dome {
             radiance.map(|l| l / threshold)
         } else {
             [0.0; 3]
+        };
+        self.lit = Lit {
+            sky: sky.clone(),
+            axes,
+            radiance,
         };
         let summed = (sky, scale);
         if self.summed.as_ref() != Some(&summed) {
@@ -215,6 +350,28 @@ impl Dome {
                 image.file, image.format
             );
         }
+        let latlong = self.latlong(image)?;
+        let texture = &latlong.texture;
+        let level = texture.first(REFLECTED);
+        let (width, height) = texture.extent(level);
+        if scale != [0.0; 3] {
+            // The whole image, because a level's average would hide a sun.
+            let (w, h) = texture.extent(0);
+            let mut lift = Lift::new(scale, [w, h], [width, height]);
+            for y in (0..h).step_by(BAND as usize) {
+                let band = latlong.rows(0, y..(y + BAND).min(h))?;
+                for (row, texels) in (y..).zip(band.chunks_exact(3 * w as usize)) {
+                    lift.row(row, texels);
+                }
+            }
+            if let Some((texels, sun)) = lift.finish() {
+                return Ok(([width, height], texels, Some(sun)));
+            }
+        }
+        Ok(([width, height], latlong.rows(level, 0..height)?, None))
+    }
+
+    fn latlong(&self, image: &store::Texture) -> Result<Latlong, String> {
         let source = Source {
             node: String::new(),
             input: String::new(),
@@ -230,38 +387,164 @@ impl Dome {
             vk::Format::R32G32B32A32_SFLOAT => 4,
             _ => return Err(format!("{} has two channels", image.file)),
         };
-        // Rows of one level of the first tile of a set, 3 floats a texel.
-        let rows = |level: usize, rows: Range<u32>| -> Result<Vec<f32>, String> {
-            let row = texture.extent(level).0 as usize * channels * 4;
-            let mut bytes = vec![0; rows.len() * row];
-            let from = texture.levels[level].start + rows.start as usize * row;
-            (texture.read_at(from, &mut bytes))
-                .map_err(|e| format!("cannot read the bake of {}: {e}", image.file))?;
-            let texels = bytes.chunks_exact(channels * 4).flat_map(|texel| {
-                [0, 1, 2].map(|c| {
-                    let at = 4 * c.min(channels - 1);
-                    f32::from_le_bytes(texel[at..at + 4].try_into().unwrap())
+        Ok(Latlong {
+            file: image.file.clone(),
+            texture,
+            channels,
+        })
+    }
+
+    /// Reads the sky of the dome that lit the last update, to draw behind the scene, when it or
+    /// `cap` has changed. Records its upload into `cb`, outside a render pass. No GPU work may be
+    /// pending.
+    pub fn show(
+        &mut self,
+        device: &gpu::Device,
+        cb: vk::CommandBuffer,
+        cap: u32,
+    ) -> Result<(), String> {
+        let key = (self.lit.sky.clone(), cap);
+        if self.background.as_ref().is_some_and(|b| b.key == key) {
+            return Ok(());
+        }
+        // Freed before the new sky is allocated.
+        self.background = None;
+        let encoded = match &key.0 {
+            Sky::Black => None,
+            Sky::White => Some(([1, 1], vec![rgb9e5([1.0; 3])])),
+            // A failed image isn't tried again until the sky or cap changes.
+            Sky::Image(image) => (self.encode(image, cap))
+                .inspect_err(|e| {
+                    eprintln!("pika: warning: a dome light's image: {e}; it isn't drawn behind");
                 })
-            });
-            Ok(texels.collect())
+                .ok(),
         };
-        let level = texture.first(REFLECTED);
-        let (width, height) = texture.extent(level);
-        if scale != [0.0; 3] {
-            // The whole image, because a level's average would hide a sun.
-            let (w, h) = texture.extent(0);
-            let mut lift = Lift::new(scale, [w, h], [width, height]);
+        let Some((size, texels)) = encoded else {
+            self.background = Some(Background { key, texels: None });
+            return Ok(());
+        };
+        let bytes = gpu::bytes(&texels);
+        let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let usage = vk::BufferUsageFlags::TRANSFER_SRC;
+        let mut staging = Buffer::host(device, bytes.len() as u64, usage, host)?;
+        staging.bytes().copy_from_slice(bytes);
+        let usage = vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+        let buffer = Buffer::device_local(device, bytes.len() as u64, usage)?;
+        let region = vk::BufferCopy {
+            src_offset: 0,
+            dst_offset: 0,
+            size: bytes.len() as u64,
+        };
+        let written = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
+        // SAFETY: recording outside a render pass, with this device's buffers of `region`'s size.
+        unsafe {
+            (self.device).cmd_copy_buffer(cb, staging.raw, buffer.raw, &[region]);
+            (self.device).cmd_pipeline_barrier2(
+                cb,
+                &vk::DependencyInfo::default().memory_barriers(&[written]),
+            );
+        }
+        self.staging = Some(staging);
+        self.background = Some(Background {
+            key,
+            texels: Some((buffer, size)),
+        });
+        Ok(())
+    }
+
+    /// An image's RGB9E5 levels from the finest within `cap` and `BACKGROUND`, each from its top
+    /// row, and the finest's extent.
+    fn encode(&self, image: &store::Texture, cap: u32) -> Result<([u32; 2], Vec<u32>), String> {
+        let latlong = self.latlong(image)?;
+        let texture = &latlong.texture;
+        let first = texture.first(match cap {
+            0 => BACKGROUND,
+            cap => cap.min(BACKGROUND),
+        });
+        let mut texels = Vec::new();
+        for level in first..texture.levels.len() {
+            let h = texture.extent(level).1;
             for y in (0..h).step_by(BAND as usize) {
-                let band = rows(0, y..(y + BAND).min(h))?;
-                for (row, texels) in (y..).zip(band.chunks_exact(3 * w as usize)) {
-                    lift.row(row, texels);
-                }
-            }
-            if let Some((texels, sun)) = lift.finish() {
-                return Ok(([width, height], texels, Some(sun)));
+                let band = latlong.rows(level, y..(y + BAND).min(h))?;
+                texels.extend(band.as_chunks::<3>().0.iter().map(|&t| rgb9e5(t)));
             }
         }
-        Ok(([width, height], rows(level, 0..height)?, None))
+        let (w, h) = texture.extent(first);
+        Ok(([w, h], texels))
+    }
+
+    /// Records inside the materials' rendering, after them, the sky `show` read wherever nothing
+    /// was drawn. `camera` is jittered by `jitter`, and `previous_view_projection` isn't.
+    pub fn draw(
+        &self,
+        cb: vk::CommandBuffer,
+        color: vk::Format,
+        area: vk::Rect2D,
+        camera: &Camera,
+        previous_view_projection: &[[f32; 4]; 4],
+        jitter: [f64; 2],
+    ) {
+        let Some(Background {
+            texels: Some((texels, size)),
+            ..
+        }) = &self.background
+        else {
+            return;
+        };
+        let extent = [area.extent.width, area.extent.height].map(f64::from);
+        let to_clip = [
+            [2.0 / extent[0], 0.0, -1.0],
+            [0.0, 2.0 / extent[1], -1.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let world = product(&camera.rays(), &to_clip);
+        let axes = self.lit.axes.map(|row| row.map(f64::from));
+        // A direction is a point with w = 0, so only the first three columns apply.
+        let [x, y, w] = [0, 1, 3].map(|r| previous_view_projection[r].map(f64::from));
+        // Clip to pixels, less the jitter, as `shaders/mesh.slang` measures motion.
+        let pixels = |i: usize, row: [f64; 4]| {
+            [0, 1, 2].map(|c| 0.5 * extent[i] * (row[c] + w[c]) - jitter[i] * w[c])
+        };
+        let previous = [pixels(0, x), pixels(1, y), [w[0], w[1], w[2]]];
+        let rows = |m: [[f64; 3]; 3]| m.map(|r| [r[0] as f32, r[1] as f32, r[2] as f32, 0.0]);
+        let push = SkyPush {
+            rays: rows(product(&axes, &world)),
+            previous: rows(product(&previous, &world)),
+            radiance: self.lit.radiance,
+            levels: 32 - size[0].max(size[1]).leading_zeros(),
+            texels: texels.address,
+            size: *size,
+        };
+        let index = COLOR_FORMATS.iter().position(|&f| f == color);
+        let pipeline = self.sky_pipelines[index.expect("the renderer chooses a color format")];
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: area.extent.width as f32,
+            height: area.extent.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        let d = &self.device;
+        // SAFETY: inside rendering of this pipeline's formats, pointing at the levels `size` gives.
+        unsafe {
+            d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            d.cmd_set_viewport(cb, 0, &[viewport]);
+            d.cmd_set_scissor(cb, 0, &[area]);
+            let bytes = gpu::bytes(std::slice::from_ref(&push));
+            d.cmd_push_constants(
+                cb,
+                self.sky_layout,
+                vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytes,
+            );
+            d.cmd_draw(cb, 3, 1, 0, 0);
+        }
     }
 
     /// Records the irradiance image, then the sharp square and its halvings, each made from the
@@ -333,7 +616,23 @@ impl Dome {
         memory += self.reflected_sky.memory();
         memory += self.irradiance.memory();
         memory += self.reflection.memory();
+        let texels = self.background.as_ref().and_then(|b| b.texels.as_ref());
+        for buffer in texels.map(|(b, _)| b).into_iter().chain(&self.staging) {
+            memory += buffer.memory();
+        }
         memory
+    }
+}
+
+impl Drop for Dome {
+    fn drop(&mut self) {
+        // SAFETY: this device's handles, idle by field order before this drops.
+        unsafe {
+            for &p in &self.sky_pipelines {
+                self.device.destroy_pipeline(p, None);
+            }
+            self.device.destroy_pipeline_layout(self.sky_layout, None);
+        }
     }
 }
 
@@ -356,6 +655,28 @@ fn level(level: u32) -> u32 {
 /// The roughness a blurred level holds, as `dome_radiance` in `shaders/frame.slang` reads it.
 fn roughness(level: u32) -> f32 {
     ROUGHEST * (level as f32 / (LEVELS - 1) as f32).powf(1.0 / SPACING)
+}
+
+/// Row-major `a b`.
+fn product(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    std::array::from_fn(|r| std::array::from_fn(|c| (0..3).map(|k| a[r][k] * b[k][c]).sum()))
+}
+
+/// Vulkan's E5B9G9R9_UFLOAT_PACK32, clamped to its range, as the spec converts it.
+fn rgb9e5(texel: [f32; 3]) -> u32 {
+    // 511 / 512 × 2^16.
+    const MAX: f32 = 65408.0;
+    let c = texel.map(|v| if v > 0.0 { v.min(MAX) } else { 0.0 });
+    let largest = c[0].max(c[1]).max(c[2]);
+    // The shared exponent is biased by 15 and scales a 9-bit mantissa. floor(log2) of a normal
+    // float is its exponent field less 127, and smaller ones round to 0. Faster than log2 and powi.
+    let mut e = ((largest.to_bits() >> 23) as i32 - 127).max(-16) + 16;
+    let mut scale = f64::from_bits(((1023 + 24 - e) as u64) << 52);
+    if (f64::from(largest) * scale + 0.5) as u32 == 512 {
+        (e, scale) = (e + 1, scale / 2.0);
+    }
+    let [r, g, b] = c.map(|v| (f64::from(v) * scale + 0.5) as u32);
+    r | g << 9 | b << 18 | (e as u32) << 27
 }
 
 fn summed_extent(extent: [u32; 2]) -> [u32; 2] {
@@ -485,12 +806,12 @@ const IDENTITY: [f64; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
-type Lit<'a> = (u64, &'a store::Light, &'a store::LightParams, &'a [f64; 16]);
+type Chosen<'a> = (u64, &'a store::Light, &'a store::LightParams, &'a [f64; 16]);
 
 /// The dome that lights the scene, which is the first shown with an image, or else the first
 /// shown, as Storm chooses. Also returns the paths of the other domes shown.
-fn choose(store: &Store) -> (Option<Lit<'_>>, Vec<String>) {
-    let shown: Vec<Lit> = (store.lights().iter())
+fn choose(store: &Store) -> (Option<Chosen<'_>>, Vec<String>) {
+    let shown: Vec<Chosen> = (store.lights().iter())
         .filter_map(|(&id, l)| match (&l.params, &l.transform) {
             (Some(p), Some(m)) if p.shape == Shape::Dome && p.visible => Some((id, l, p, m)),
             _ => None,
@@ -631,6 +952,23 @@ mod tests {
             faint.row(y, &row);
         }
         assert!(faint.finish().is_none());
+    }
+
+    #[test]
+    fn rgb9e5_shares_one_exponent_and_clamps() {
+        let decode = |v: u32| {
+            let scale = 2f32.powi((v >> 27) as i32 - 24);
+            [0, 9, 18].map(|at| (v >> at & 0x1ff) as f32 * scale)
+        };
+        assert_eq!(decode(rgb9e5([1.0, 0.5, 0.25])), [1.0, 0.5, 0.25]);
+        assert_eq!(decode(rgb9e5([1e6, -1.0, f32::NAN])), [65408.0, 0.0, 0.0]);
+        assert_eq!(decode(rgb9e5([0.0; 3])), [0.0; 3]);
+        // Just under a power of two rounds up into the next exponent.
+        assert_eq!(decode(rgb9e5([0.9999, 0.0, 0.0])), [1.0, 0.0, 0.0]);
+        let [r, g, _] = decode(rgb9e5([97.3, 3.1, 0.0]));
+        assert!((r - 97.3).abs() < 97.3 / 512.0 && (g - 3.1).abs() < 97.3 / 512.0);
+        // Negative control: a channel under the largest's precision is lost.
+        assert_eq!(decode(rgb9e5([1.0, 1e-3, 0.0]))[1], 0.0);
     }
 
     #[test]

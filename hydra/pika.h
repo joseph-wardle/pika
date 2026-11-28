@@ -143,6 +143,8 @@ typedef struct pika_frame {
     // pika:shadowPool, in MB of quarter-MB pages. 0 is an error.
     uint32_t shadow_pool;
     float sun_threshold;
+    // Hydra's domeLightCameraVisibility.
+    bool dome_light_camera_visibility;
 } pika_frame;
 
 // Keys ending in _ms are milliseconds, the rest counts.

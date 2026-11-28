@@ -62,6 +62,9 @@ protected:
         // usdview sends a double, husk a float.
         VtValue sun = VtValue::Cast<float>(delegate->GetRenderSetting(_tokens->sunThreshold));
         frame.sun_threshold = sun.IsEmpty() ? 10.0f : sun.UncheckedGet<float>();
+        // Unsent is shown, as Storm reads it. Solaris never sends it.
+        frame.dome_light_camera_visibility = delegate->GetRenderSetting<bool>(
+            HdRenderSettingsTokens->domeLightCameraVisibility, true);
         std::copy_n(state->GetProjectionMatrix().data(), 16, frame.projection);
         GfVec4f clear(0.0f);
         PikaRenderBuffer *first = nullptr;

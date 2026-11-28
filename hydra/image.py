@@ -85,7 +85,8 @@ CONTROLS = ["focal length +0.5 %", "half a pixel right", "aperture cropped", "un
             "the cap ignored", "lowering ignored", "missing file's fallback ignored", "a zero mapped normal left unlit",
             "constant nodes at their default",
             "dome's intensity halved", "sky upside down", "sky a quarter turn off", "sun left in the sky",
-            "metal read as matte",
+            "metal read as matte", "the sky behind shown as the other host shows it", "the sky behind a level coarser",
+            "the sun lifted from the sky behind",
             "frame 1's reference"]
 CAGE_DRAWN = ("cage drawn on subdivided meshes", "authored normals on subdivided meshes")
 ACESCG_TO_REC709 = np.array([[1.705051, -0.621792, -0.083259],
@@ -103,17 +104,18 @@ LIT = {
 }
 # A UsdPreviewSurface's metal is no white one, as MaterialX holds its reflectivity to 0.99.
 METAL = ("base_metalness", "specular_roughness")
-Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light")
+Host = collections.namedtuple("Host", "purposes delivers_unknown settings camera_light holds_camera_light "
+                                      "shows_sky")
 # husk's camera light, /husk_headlight/__the_headlight, is not usdview's, and husk holds it where
-# the camera was at the first frame it renders.
-HUSK = Host(("default", "render"), True, True, 57225, True)
+# the camera was at the first frame it renders. Solaris never sends domeLightCameraVisibility.
+HUSK = Host(("default", "render"), True, True, 57225, True, True)
 # usdview's and usdrecord's, from HdxTaskController.
 USDRECORD_CAMERA_LIGHT = 15000
 CAMERA_LIGHT_ANGLE = 0.53
 CAMERA_LIT = {"headlit"}
 # `texels` are less the sun, None for a constant sky. `axes` are world directions, a row each.
-# `sun` is the direction toward it and its illuminance.
-Sky = collections.namedtuple("Sky", "prim radiance texels axes sun")
+# `sun` is the direction toward it and its illuminance. `levels` are the image's, the sun kept.
+Sky = collections.namedtuple("Sky", "prim radiance texels axes sun levels")
 # Pika's default pika:sunThreshold, the share of a sky's light below which no sun is lifted, and
 # the angle a sun is lit and shadowed at (src/dome.rs, src/light.rs).
 SUN_THRESHOLD = 10.0
@@ -121,11 +123,17 @@ SUN_SHARE = 0.01
 SUN_ANGLE = 0.53
 # Per sky texel side, in the hemisphere sum.
 SKY_RAYS = 2
+# The widest a sky is summed, as src/dome.rs averages it down.
+SUMMED = 256
+# The widest level of a sky drawn behind the scene (src/dome.rs).
+BACKGROUND = 8192
+# Recorded again with usdview's dome light textures shown, since usdrecord hides them by default.
+SHOWN = {"background"}
 
 
 def usdrecord_host():
     scene_index = Tf.GetEnvSetting("USDIMAGINGGL_ENGINE_ENABLE_SCENE_INDEX")
-    return Host(("default", "proxy"), scene_index, False, USDRECORD_CAMERA_LIGHT, False)
+    return Host(("default", "proxy"), scene_index, False, USDRECORD_CAMERA_LIGHT, False, False)
 
 
 def meshes(stage, time, purposes, control=None):
@@ -1109,51 +1117,115 @@ def dome(stage, time, host, control=None):
     axes = normalize(np.array([[m[r][c] for c in range(3)] for r in range(3)]))
     file = UsdLux.DomeLight(prim).GetTextureFileAttr().Get(time)
     if not file or not file.resolvedPath:
-        return Sky(prim, radiance, None, axes, None)
-    texels = np.asarray(oiio.ImageBuf(file.resolvedPath).get_pixels(oiio.FLOAT), float)[..., :3]
-    if control == "sky upside down":
-        texels = texels[::-1]
-    if control == "sky a quarter turn off":
-        texels = np.roll(texels, texels.shape[1] // 4, axis=1)
+        return Sky(prim, radiance, None, axes, None, None)
+    levels = []
+    for texels in mip_levels(file.resolvedPath):
+        if control == "sky upside down":
+            texels = texels[::-1]
+        if control == "sky a quarter turn off":
+            texels = np.roll(texels, texels.shape[1] // 4, axis=1)
+        levels.append(texels)
+    texels = levels[0]
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:sunThreshold")
     threshold = authored.Get() if host.settings and authored else SUN_THRESHOLD
     if control == "sun left in the sky":
         threshold = 0
     texels, sun = lifted(texels, radiance, threshold)
-    return Sky(prim, radiance, texels, axes, sun and (sun[0] @ axes, sun[1] * radiance))
+    if control == "the sun lifted from the sky behind":
+        levels = halvings(texels)
+    return Sky(prim, radiance, texels, axes, sun and (sun[0] @ axes, sun[1] * radiance), levels)
+
+
+def mip_levels(path):
+    file = oiio.ImageInput.open(path)
+    stored = file.seek_subimage(0, 1)
+    file.close()
+    if stored:
+        raise ValueError(f"{path}: the reference halves a sky into its levels; it stores its own")
+    return halvings(np.asarray(oiio.ImageBuf(path).get_pixels(oiio.FLOAT), float)[..., :3])
+
+
+def halvings(texels):
+    """The levels the texture tool builds, down to a texel."""
+    levels = [texels]
+    while max(levels[-1].shape[:2]) > 1:
+        levels.append(halve(levels[-1]))
+    return levels
+
+
+def rgb9e5(texels):
+    """Rounded as src/dome.rs packs a texel the sky behind holds."""
+    c = np.clip(np.nan_to_num(texels), 0, 65408)
+    largest = c.max(-1, keepdims=True)
+    with np.errstate(divide="ignore"):
+        e = np.maximum(np.floor(np.log2(largest)), -16) + 16
+    e += np.floor(largest * 2.0 ** (24 - e) + 0.5) == 512
+    scale = 2.0 ** (24 - e)
+    return np.floor(c * scale + 0.5) / scale
+
+
+def background(sky, d, spread, cap, control):
+    """The sky toward each world direction `d` as Pika draws it behind the scene: RGB9E5 levels
+    from the finest within the cap and BACKGROUND, blended at the level a pixel's angular `spread`
+    picks."""
+    if sky.levels is None:
+        return np.broadcast_to(sky.radiance, (len(d), 3))
+    widest = min(cap, BACKGROUND)
+    first = next(m for m, l in enumerate(sky.levels) if max(l.shape[:2]) <= widest)
+    levels = [rgb9e5(l) for l in sky.levels[first:]]
+    # A finest texel spans π / height.
+    lod = np.log2(spread * levels[0].shape[0] / np.pi) + (control == "the sky behind a level coarser")
+    lod = np.clip(lod, 0, len(levels) - 1)
+    lower = np.floor(lod).astype(int)
+    f = (lod - lower)[:, None]
+    local = d @ sky.axes.T
+    out = np.zeros((len(d), 3))
+    for m in np.unique(lower):
+        on = lower == m
+        coarser = levels[min(m + 1, len(levels) - 1)]
+        out[on] = latlong(levels[m], local[on]) * (1 - f[on]) + latlong(coarser, local[on]) * f[on]
+    return out * sky.radiance
 
 
 def skylight(sky, n):
     """Radiance over the hemisphere, over π, unshadowed as Pika's is."""
     if sky.texels is None:
         return np.broadcast_to(sky.radiance, (len(n), 3))
-    fine = sky.texels.repeat(SKY_RAYS, 0).repeat(SKY_RAYS, 1)
+    texels = sky.texels
+    while max(texels.shape[:2]) > SUMMED:
+        texels = halve(texels)
+    fine = texels.repeat(SKY_RAYS, 0).repeat(SKY_RAYS, 1)
     d, solid_angle = sky_directions(*fine.shape[:2])
     light = (fine * solid_angle[..., None]).reshape(-1, 3)
     local = n @ sky.axes.T
     out = np.zeros((len(n), 3))
-    for first in range(0, len(n), 1024):
-        out[first:first + 1024] = np.clip(local[first:first + 1024] @ d.reshape(-1, 3).T, 0, None) @ light
+    # Under 256 MB a chunk, as sixteen references run at once.
+    chunk = max(1, (1 << 25) // len(light))
+    for first in range(0, len(n), chunk):
+        out[first:first + chunk] = np.clip(local[first:first + chunk] @ d.reshape(-1, 3).T, 0, None) @ light
     return out * sky.radiance / np.pi
 
 
 def mirrored(sky, n, toward):
-    """Four texels about the reflected ray, a row wrapping."""
     if sky.texels is None:
         return np.broadcast_to(sky.radiance, (len(n), 3))
-    local = (2 * dot(n, toward)[:, None] * n - toward) @ sky.axes.T
-    height, width = sky.texels.shape[:2]
+    return latlong(sky.texels, (2 * dot(n, toward)[:, None] * n - toward) @ sky.axes.T) * sky.radiance
+
+
+def latlong(texels, local):
+    """Four texels about each unit direction in the dome's axes, a row wrapping."""
+    height, width = texels.shape[:2]
     x = (0.5 - np.arctan2(local[:, 0], local[:, 2]) / (2 * np.pi)) * width - 0.5
     y = np.arccos(np.clip(local[:, 1], -1, 1)) / np.pi * height - 0.5
     x0, y0 = np.floor(x).astype(int), np.floor(y).astype(int)
     fx, fy = (x - x0)[:, None], (y - y0)[:, None]
 
     def texel(x, y):
-        return sky.texels[np.clip(y, 0, height - 1), x % width]
+        return texels[np.clip(y, 0, height - 1), x % width]
 
     top = texel(x0, y0) * (1 - fx) + texel(x0 + 1, y0) * fx
     bottom = texel(x0, y0 + 1) * (1 - fx) + texel(x0 + 1, y0 + 1) * fx
-    return (top * (1 - fy) + bottom * fy) * sky.radiance
+    return top * (1 - fy) + bottom * fy
 
 
 def lights(stage, time, axis, toward, p, n, paths, host, lit, casters, sky, control=None):
@@ -1363,9 +1435,8 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     axis = np.array((frustum(stage, stage.GetStartTimeCode(), width, height, focal, policy) if fixed else f).ComputeViewDirection())
     authored = stage.GetPrimAtPath(SETTINGS).GetAttribute("pika:textureCap")
     # 0 is none, as it is to Pika.
-    cap = (authored.Get() if host.settings and authored else 0) or CAP
-    if lowered and control != "lowering ignored":
-        cap = min(cap, TAIL)
+    capped = (authored.Get() if host.settings and authored else 0) or CAP
+    cap = min(capped, TAIL) if lowered and control != "lowering ignored" else capped
     eye = np.array(f.position)
     shift = SHIFTS.get(control, 0.0) * scale
 
@@ -1383,6 +1454,18 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
         "cell": np.zeros((height, width), np.int64),
         "textured": False,
     }
+    sky = dome(stage, time, host, control)
+    if sky and host.shows_sky != (control == "the sky behind shown as the other host shows it"):
+        y, x = (v.ravel() + 0.5 for v in np.mgrid[:height, :width])
+        unproject = np.linalg.inv(np.array(to_clip))
+        d = normalize(rays(unproject, width, height, x + shift, y)[1])
+        # A pixel's angle, between rays a pixel apart.
+        spread = np.max([np.linalg.norm(normalize(rays(unproject, width, height, x + shift + dx * scale,
+                                                       y + dy * scale)[1]) - d, axis=-1)
+                         for dx, dy in ((1, 0), (0, 1))], 0)
+        colour = background(sky, d, spread, capped, control)
+        image["color"] = np.c_[colour, np.ones(len(d))].reshape(height, width, 4)
+        image["textured"] = sky.levels is not None
     if not tris:
         return image
     world = np.array([[list(v) for v in t["points"]] for t in tris])
@@ -1418,11 +1501,10 @@ def trace(stage, time, width, height, scale, host, lowered, lit, control=None):
     if control == "flat normals":
         n[dot(n, toward) < 0] *= -1
     looks = [t["look"] for t in tris]
-    sky = dome(stage, time, host, control)
     metal = np.array([np.nan if l.metal is None else l.metal for l in looks])[i]
     # A mirror's colour turns within a pixel as a texture's does.
     mirror = sky is not None and sky.texels is not None and not np.isnan(metal).all()
-    image["textured"] = any(l.image or l.normal for l in looks) or mirror
+    image["textured"] |= any(l.image or l.normal for l in looks) or mirror
 
     def sampled(field):
         out = np.zeros((len(p), 3))
@@ -1624,7 +1706,8 @@ def nans(image):
 def compare(image, ref, aovs, trusted=None):
     trusted = ref if trusted is None else trusted
     problems = []
-    covered = ref["face"] >= 0
+    # A mesh's or the sky's. Where the sky is behind, depth tells a mesh's coverage.
+    covered = ref["color"][..., 3] > 0.5
     edge = edges(trusted["face"])
     drawn = image["color"][..., 3] > 0.5
     stray = (drawn != covered) & ~edge
@@ -1745,17 +1828,19 @@ def repeated(name, renders, again):
     return failures
 
 
-def usdrecord(scene, out, width, times):
+def usdrecord(scene, out, width, times, host):
     name = os.path.splitext(os.path.basename(scene))[0]
-    log = os.path.join(out, f"{name}.usdrecord.log")
+    stem = name + (".shown" if host.shows_sky else "")
+    log = os.path.join(out, f"{stem}.usdrecord.log")
     off = [] if name in CAMERA_LIT else ["--disableCameraLight"]
+    shown = ["--enableDomeLightVisibility"] if host.shows_sky else []
     with open(log, "w") as f:
-        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off,
+        subprocess.run(["usdrecord", "--renderer", "Pika", "--camera", "/camera", *off, *shown,
                         "--imageWidth", str(width), "--colorCorrectionMode", "disabled",
                         "--frames", f"{times[0]}:{times[-1]}",
-                        scene, os.path.join(out, f"{name}.usdrecord.#.exr")],
+                        scene, os.path.join(out, f"{stem}.usdrecord.#.exr")],
                        stdout=f, stderr=subprocess.STDOUT, check=True, env=budget(name))
-    return {t: read(os.path.join(out, f"{name}.usdrecord.{t}.exr")) for t in times}, log
+    return {t: read(os.path.join(out, f"{stem}.usdrecord.{t}.exr")) for t in times}, log
 
 
 def references(scene, width, height, host):
@@ -1778,7 +1863,9 @@ def differs(stage, host):
     purposed = any(UsdGeom.Imageable(p).GetPurposeAttr().HasAuthoredValue() for p in prims)
     settings = any(a.GetName().startswith("pika:") for a in stage.GetPrimAtPath(SETTINGS).GetAttributes())
     dropped = any(p.IsA(UsdShade.Shader) and unknown(UsdShade.Shader(p)) for p in prims)
-    return purposed or (settings and not host.settings) or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
+    domed = any(p.IsA(UsdLux.DomeLight) for p in prims)
+    return (purposed or (settings and not host.settings) or (dropped and host.delivers_unknown != HUSK.delivers_unknown)
+            or (domed and host.shows_sky != HUSK.shows_sky))
 
 
 def budget_warnings(name):
@@ -1846,15 +1933,17 @@ def main():
         os.makedirs(again, exist_ok=True)
         agains = {s: render.submit(husk, s, again, times(stages[s])) for s in husked
                   if os.path.basename(s)[:-5] in REPEATED}
-        records = {s: render.submit(usdrecord, s, out, sizes[s][0], times(stages[s])) for s in scenes} if record else {}
+        shown = usdrecord_host()._replace(shows_sky=True)
+        hosts = {s: [usdrecord_host()] + [shown] * (os.path.basename(s)[:-5] in SHOWN) for s in scenes}
+        records = {(s, host): render.submit(usdrecord, s, out, sizes[s][0], times(stages[s]), host)
+                   for s in scenes for host in hosts[s]} if record else {}
         recorded = {}
-        for s, job in records.items():
+        for (s, host), job in records.items():
             # usdrecord takes the image's height from the camera's aspect.
             shape = next(iter(job.result()[0].values()))["color"].shape
-            host = usdrecord_host()
             if (s not in refs or shape[:2] != sizes[s][::-1] or differs(stages[s], host)
                     or os.path.basename(s)[:-5] in CAMERA_LIT):
-                recorded[s] = compute.submit(references, s, shape[1], shape[0], host)
+                recorded[s, host] = compute.submit(references, s, shape[1], shape[0], host)
         failures = []
         changed = set()
         for s in scenes:
@@ -1869,12 +1958,13 @@ def main():
                 if s in agains:
                     failures += repeated(name, renders, agains[s].result()[0])
                 changed |= c
-            if s not in records:
-                continue
-            renders, log = records[s].result()
-            print(f"{name} in usdrecord ({log}):")
-            failures += check(f"{name} (usdrecord)", renders, (recorded.get(s) or refs[s]).result(), ["color"])[0]
-            failures += warned(log, f"{name} (usdrecord)", 0, budget_warnings(name), 0)
+            for host in hosts[s] if record else []:
+                renders, log = records[s, host].result()
+                label = "usdrecord, the sky shown" if host.shows_sky else "usdrecord"
+                print(f"{name} in {label} ({log}):")
+                reference = (recorded.get((s, host)) or refs[s]).result()
+                failures += check(f"{name} ({label})", renders, reference, ["color"])[0]
+                failures += warned(log, f"{name} ({label})", 0, budget_warnings(name), 0)
     # Some controls change only depth or normals, which only husk's images hold.
     for control in CONTROLS if husked else []:
         if control not in changed:
