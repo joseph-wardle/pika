@@ -1,11 +1,12 @@
 """Checks Pika's film while frames change, through UsdImagingGL. Each frame is compared with the
 converged still at its camera, and must be nearer to it than a frame drawn alone.
 
-    python3 hydra/film.py <panned.usda> <penumbra.usda>
+    python3 hydra/film.py <panned.usda> <penumbra.usda> <turned.usda>
 
 Needs a display and the delegate on PXR_PLUGINPATH_NAME.
 """
 
+import math
 import sys
 
 from pxr import Gf, Usd, UsdGeom, UsdLux
@@ -50,6 +51,16 @@ def camera(stage, right):
     frustum = framing(stage)
     moved = Gf.Matrix4d().SetTranslate(Gf.Vec3d(-shift(frustum, right), 0, 0))
     return frustum.ComputeViewMatrix() * moved, frustum.ComputeProjectionMatrix()
+
+
+def turn(stage, right):
+    """Turned about the view's up axis, so its centre moves `right` pixels. A sideways pan leaves a
+    sky at infinity still."""
+    frustum = framing(stage)
+    # A pixel at the centre is 2 / SIZE in normalized device x, which is P[0][0] tan(angle).
+    angle = math.degrees(math.atan(right * 2 / SIZE / frustum.ComputeProjectionMatrix()[0][0]))
+    turned = Gf.Matrix4d().SetRotate(Gf.Rotation(Gf.Vec3d(0, 1, 0), angle))
+    return frustum.ComputeViewMatrix() * turned, frustum.ComputeProjectionMatrix()
 
 
 def offset(stage, right):
@@ -98,10 +109,11 @@ def alone(path, fbo, state, edit=None):
     return pixels(fbo)
 
 
-def pan(path, fbo):
+def played(path, fbo, move):
+    """Each frame's converged still and the frames drawn while `move`, `camera` or `turn`, steps."""
     engine, stage, params = scene(path)
     reference, reference_stage, _ = scene(path)
-    states = [camera(stage, STEP * (t - FRAMES / 2)) for t in range(FRAMES)]
+    states = [move(stage, STEP * (t - FRAMES / 2)) for t in range(FRAMES)]
     stills = [converged(reference, reference_stage, params, fbo, s) for s in states]
     converged(engine, stage, params, fbo, states[0])
     shown = {}
@@ -111,6 +123,11 @@ def pan(path, fbo):
         # A render shows the frame the one before drew.
         if t >= 2:
             shown[t - 1] = pixels(fbo)
+    return states, stills, shown
+
+
+def pan(path, fbo):
+    states, stills, shown = played(path, fbo, camera)
     for t in range(WARM, FRAMES - 1):
         bound = error(alone(path, fbo, states[t]), stills[t])
         drawn, behind = error(shown[t], stills[t]), error(stills[t - 1], stills[t])
@@ -119,6 +136,18 @@ def pan(path, fbo):
         if behind < bound:
             sys.exit(f"film: the control failed: the still a frame behind is {behind:.2f} from frame {t}'s, within {bound:.2f}")
         print(f"film: panning, frame {t} is {drawn:.2f} from its still, a frame alone {bound:.2f}, the still a frame behind {behind:.2f}")
+
+
+def turning(path, fbo):
+    """A filtered sky is nearly converged in a frame, and history resampled every frame softens it,
+    so a frame alone is no bound here. A history that lags, as a still sky's motion leaves it,
+    stays near the still a frame behind."""
+    _, stills, shown = played(path, fbo, turn)
+    for t in range(WARM, FRAMES - 1):
+        drawn, behind = error(shown[t], stills[t]), error(stills[t - 1], stills[t])
+        if not drawn < behind / 2:
+            sys.exit(f"film: turning over the sky, frame {t} is {drawn:.2f} from its still, not within half the still a frame behind's {behind:.2f}")
+    print(f"film: turning over the sky, frame {t} is {drawn:.2f} from its still, the still a frame behind {behind:.2f}")
 
 
 def slide(path, fbo, move, sliding):
@@ -240,10 +269,11 @@ def path_independence(path, fbo):
     print(f"film: converged from either side the same, {differ} pixels apart at sample {PART_WAY}")
 
 
-def main(panned, penumbra):
+def main(panned, penumbra, turned):
     keep = gl_context()  # noqa: F841
     fbo = keep[3]
     pan(panned, fbo)
+    turning(turned, fbo)
     slide(panned, fbo, place, "sliding")
     slide(panned, fbo, bend, "sliding by points")
     rotate(penumbra, fbo)
@@ -252,6 +282,6 @@ def main(panned, penumbra):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 4:
         sys.exit(__doc__)
     main(*sys.argv[1:])
